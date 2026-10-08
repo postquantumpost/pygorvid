@@ -1,0 +1,13 @@
+[package]
+name = "pygorvid"
+version = "0.1.0"
+edition = "2021"
+description = "Video file support library to reduce dependency on ffmpeg"
+
+[lib]
+name = "pygorvid"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vidprobe"
+path = "src/bin/vidprobe.rs"
