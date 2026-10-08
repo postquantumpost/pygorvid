@@ -1,0 +1,213 @@
+## Plan: Silkroad
+
+Silkroad incrementally replaces FFmpeg-based frame extraction with native code in Go, Python, and Rust. It will demux MP4 samples, decode the H.264 features actually required by the bundled corpus, convert a decoded frame to RGB, and encode PNG or JPEG without external libraries. Every milestone should leave the existing metadata and extraction CLI behavior usable; unsupported bitstream features must fail clearly rather than yield corrupt images.
+
+**Steps**
+
+**Phase 1: Define the target and fixtures**
+1. Record the exact 22 bundled MP4 inputs and hashes so test results are reproducible.
+2. Inventory each video stream's codec, profile, level, chroma format, bit depth, dimensions, sample rate, and codec configuration record.
+3. Inventory frame types, reference-frame requirements, NAL length size, B-frame reordering, entropy coding mode, and interlace flags per file.
+4. Save an input-feature matrix that identifies the union of required H.264 features and explicitly excludes unobserved features for the first release.
+5. Choose representative tiny fixtures for every observed syntax/decoder feature; retain the full corpus for end-to-end tests.
+6. Establish reference decoded frames and PNG/JPEG validity checks using standards-based vectors and independent structural checks. Treat the standards and official errata as the primary implementation authority. Consult FFmpeg source only if a specific ambiguity remains after standards research; record the unresolved point and exact source file. Any code reuse remains out of scope unless separately approved after per-file license review. FFmpeg is never part of the shipped extraction path.
+7. Specify common contracts: zero-based frame number, first video track, presentation-order frame selection, supported input subset, RGB pixel layout, and behavior on unsupported codecs/features.
+
+**Phase 2: MP4 sample demuxing**
+8. Design a per-language `VideoSampleReader` object that owns the input and exposes codec configuration plus compressed samples and timestamps.
+9. Extend the Go box model around `boxRegistry`, `readBoxes`, and `find` to parse `stsd/avc1/avcC`, `stsz`, `stsc`, `stco`, and `co64`.
+10. Add parsing for `stts`, `ctts`, `stss`, and `mdat` sample locations needed for decode and presentation order.
+11. Implement equivalent Python boxes and `VideoSampleReader` in `p/src/pygorvid/`.
+12. Implement equivalent Rust boxes and `VideoSampleReader` in `r/src/` using the current `Mp4Box` and `find` patterns.
+13. Reconstruct chunk-to-sample mapping for constant and variable sample sizes and both 32-bit and 64-bit chunk offsets.
+14. Parse AVC configuration records and validate NAL length-prefix size and SPS/PPS boundaries.
+15. Return a precise error for malformed tables, invalid offsets, unsupported sample descriptions, or truncated NAL units.
+16. Test demuxed sample counts, byte ranges, timestamps, key-frame markers, and parameter sets against all bundled files.
+
+**Phase 3: H.264 bitstream primitives**
+17. Create a `BitReader` with bounded reads, bit alignment, and tested unsigned/signed Exp-Golomb decoding.
+18. Implement RBSP extraction, emulation-prevention removal, and NAL unit header parsing.
+19. Parse and validate SPS fields used by the corpus, including dimensions, chroma format, bit depth, frame numbering, POC, reference counts, and cropping.
+20. Parse PPS fields used by the corpus, including entropy mode, slice groups, weighting, and deblocking controls.
+21. Parse slice headers and identify picture boundaries and access-unit membership.
+22. Add table-driven bitstream tests for truncation, malformed Exp-Golomb values, invalid parameter-set references, and emulation-prevention edge cases.
+23. Implement whichever CAVLC/CABAC paths the Phase 1 inventory proves necessary, initially with isolated symbol/codeword vectors.
+24. Verify parsed SPS/PPS and slice metadata across every bundled input before attempting pixel reconstruction.
+
+**Phase 4: Native decoder objects and reconstruction**
+25. Define a language-neutral decoder contract and an idiomatic `H264Decoder` object in Go, Python, and Rust; each owns parameter sets, reference state, and frame reordering state.
+26. Implement inverse quantization/scaling lists and integer inverse transforms with standards-derived unit vectors.
+27. Implement intra prediction modes observed in the corpus and verify reconstructed blocks against reference vectors.
+28. Implement inter prediction, motion-vector derivation, reference-list construction, and fractional-pixel interpolation required by the corpus.
+29. Implement decoded-picture-buffer management and POC-based output ordering, including the observed B-frame behavior.
+30. Implement deblocking behavior and chroma reconstruction for the observed 8-bit 4:2:0 format.
+31. Decode IDR/I pictures first and compare luma/chroma planes to the reference frame data.
+32. Add P-picture support and compare decoded frames across reference changes.
+33. Add B-picture support and test decode order versus presentation order.
+34. Add a `decode_frame(index)` operation that decodes dependencies through the requested presentation frame and returns planar YUV plus dimensions.
+35. Reject unsupported profiles, bit depths, chroma layouts, interlace modes, or coding tools with a stable error, rather than returning a misleading frame.
+36. Port each verified decoder increment to all three languages before broadening the supported feature union.
+
+**Phase 5: Pixel conversion and native PNG encoder**
+37. Define a common frame-buffer contract and convert 8-bit 4:2:0 YUV to RGB with documented range and rounding behavior.
+38. Add color-conversion tests for black, white, primaries, chroma edges, and odd frame dimensions where supported.
+39. Create a native `PNGEncoder` object in each language with explicit input dimensions, row stride, and RGB data.
+40. Write PNG signature and IHDR/IDAT/IEND chunks, with CRC-32 and Adler-32 implemented and independently tested.
+41. Implement a minimal zlib stream using uncompressed DEFLATE blocks so PNG needs no compression library.
+42. Verify output dimensions, chunk integrity, decoded pixels, and multi-megabyte image handling with a small native PNG test reader or independent structural checks.
+
+**Phase 6: Native JPEG encoder**
+43. Create a native `JPEGEncoder` object in each language with explicit RGB input and output quality settings fixed initially to one documented default.
+44. Implement RGB-to-YCbCr conversion and a defined 4:2:0 or 4:4:4 MCU layout.
+45. Implement baseline FDCT, quantization, zigzag ordering, DC prediction, AC run-length coding, and standard Huffman coding.
+46. Write JFIF/JPEG markers and validate marker lengths, byte stuffing, dimensions, and end-of-image handling.
+47. Test JPEG outputs with structural checks and lossy pixel-error bounds; verify behavior on odd dimensions and small images.
+
+**Phase 7: Integrate the native extraction path**
+48. Replace Go `extractFrame`'s subprocess call with `VideoSampleReader`, `H264Decoder`, RGB conversion, and the selected encoder.
+49. Replace Python `_extract_frame`'s subprocess call with the same pipeline and preserve current argument validation and temporary-output cleanup.
+50. Replace Rust `extract_frame`'s `Command::new("ffmpeg")` path with the native objects and preserve current CLI semantics.
+51. Keep `--input`, `--extractframe`, `--output`, and `--prefix` behavior consistent; continue processing the explicit input first and leave `--prefix` inert when no image is written.
+52. Choose PNG/JPEG solely from the final output extension and write only to a temporary file until encode succeeds.
+53. Remove FFmpeg runtime documentation and all `exec`, `subprocess`, and `Command` extraction calls; ensure output errors do not leave partial files.
+
+**Phase 8: Conformance and release gates**
+54. Add per-language tests for demux-only, each decoder feature, presentation-order selection, unsupported-feature errors, and both encoders.
+55. Run all 22 bundled videos through all three implementations and compare selected decoded frames to the reference set.
+56. Compare Go/Python/Rust RGB output for the same frame to detect cross-port drift.
+57. Test boundary indices (first frame, last frame, out-of-range), prefixed paths, `.png`/`.jpg`, spaces in paths, and unwritable destinations.
+58. Run every full language test suite, formatter, diagnostics, and a clean-environment check with FFmpeg absent from `PATH`.
+59. Record supported H.264 features, known limitations, performance, and test corpus in README documentation.
+
+**Complexity review: split before implementation**
+- Steps 9-12 are broad as written: they span multiple box types and three implementations. Split into one task per box parser, then chunk-to-sample mapping, access-unit extraction, and one-language-at-a-time ports.
+- Steps 13-16 combine separate demux concerns. Split constant versus variable sample sizes, 32-bit versus 64-bit offsets, timestamp/reordering tables, malformed-input behavior, and corpus verification into separate tests.
+- Steps 17-18 should be separate primitives: bounded bit reads, alignment, Exp-Golomb, RBSP prevention-byte removal, and NAL headers, each with its own vectors.
+- Step 19 is too broad for one parser change. Split SPS parsing into profile/chroma/bit-depth, dimensions/cropping, frame-number/POC, and reference-frame fields, gated by the corpus feature matrix.
+- Steps 20-21 should be split by syntax stage: PPS core fields, optional PPS tools, slice-header common fields, per-slice-type fields, and access-unit/picture-boundary detection.
+- Step 23 is a major decoder subsystem, not one goal. First decide from the corpus whether CAVLC, CABAC, or both are needed; then split arithmetic/bit decoding, context initialization/update, bin syntax, residual coefficients, and conformance vectors into independently tested tasks.
+- Steps 25 and 36 mix architecture with three language ports. Finalize a language-neutral contract first; implement each decoder increment in one chosen reference port, then port that increment separately to Python and Rust with matching vectors.
+- Steps 26-30 each hide multiple algorithms. Split transforms from scaling; split intra prediction by block size/mode family; split inter prediction into motion parsing, reference selection, interpolation, and weighting; split DPB from POC ordering; split deblocking from chroma reconstruction.
+- Steps 31-35 should be acceptance milestones only after their internal algorithms are split. For each I/P/B milestone, specify a tiny input, expected planes, reference state, and an unsupported-feature test.
+- Step 37 combines API design and color conversion. Freeze the frame-buffer contract first, then implement range handling, chroma upsampling, matrix conversion, and rounding as separate tests.
+- Steps 39-42 should split the PNG object/API from chunk writing, CRC-32, Adler-32, zlib framing, DEFLATE stored blocks, scanline filters, and image validation. The current single stored-block approach is deliberately simple but should still be tested separately.
+- Steps 43-47 substantially understate JPEG complexity. Break JPEG into marker/header writing, color conversion/subsampling, 8x8 FDCT, quantization/zigzag, DC coding, AC run-length coding, Huffman bit packing/stuffing, and end-to-end validation.
+- Steps 48-50 each combine a full media pipeline with a CLI port. Split each language into demux-to-decoder, frame selection/reordering, decoder-to-RGB, encoder invocation, temporary output/error behavior, and CLI wiring.
+- Steps 54-58 are too broad as one test milestone. Gate per box family, bitstream primitive, picture type, encoder, and language port; reserve full-corpus and FFmpeg-absent runs for final release checks.
+
+**Expanded small tasks for flagged items**
+
+**MP4 demux (steps 9-16)**
+- 9.1 Parse the `stsd` full-box header and validate the declared entry count.
+- 9.2 Parse one `avc1` visual sample entry and its `avcC` record; reject unsupported sample-entry types.
+- 9.3 Parse `stsz` with constant sample size, then add variable sample-size entries.
+- 9.4 Parse `stco`; separately add `co64` and overflow/bounds checks.
+- 9.5 Parse `stsc` and map one chunk to its samples; then cover multiple chunks and description-index changes.
+- 9.6 Parse `stts` and calculate decode timestamps; separately parse signed/unsigned `ctts` versions.
+- 9.7 Parse `stss`; define behavior when the box is absent and test sync-frame lookup.
+- 9.8 Return one length-prefixed sample at a time; then assemble access units and validate all ranges against `mdat`.
+- 9.9 Port each tested table parser individually to Python and Rust; do not bundle all tables into one porting task.
+
+**Bitstream syntax (steps 17-22)**
+- 17.1 Add bounded fixed-width bit reads, then EOF/error tests.
+- 17.2 Add bit alignment and byte reads across unaligned positions.
+- 17.3 Add unsigned Exp-Golomb decode and boundary vectors.
+- 17.4 Add signed Exp-Golomb decode and boundary vectors.
+- 18.1 Remove emulation-prevention bytes and verify RBSP round trips.
+- 18.2 Parse NAL headers and validate forbidden bits/type handling.
+- 19.1 Parse SPS profile, constraints, level, chroma format, and bit depth.
+- 19.2 Parse SPS dimensions and cropping; validate computed frame sizes.
+- 19.3 Parse frame numbering and each POC mode separately.
+- 19.4 Parse reference limits and frame/field flags used by the corpus.
+- 20.1 Parse PPS identifiers and core slice/entropy flags.
+- 20.2 Parse only the corpus-used PPS weighting, deblocking, and optional tools.
+- 21.1 Parse common slice-header fields through picture identity.
+- 21.2 Add separate I-, P-, and B-slice header handling.
+- 21.3 Group slices into pictures/access units and test boundary conditions.
+- 22.1 Add malformed/truncated vectors for each primitive before cross-porting it.
+
+**Entropy decoding (step 23)**
+- 23.1 Inspect corpus parameter sets and slices to determine CAVLC/CABAC needs before coding either path.
+- 23.2 If CAVLC is required, test coeff-token tables before level, run-before, and residual assembly.
+- 23.3 If CABAC is required, test arithmetic-engine initialization and renormalization independently.
+- 23.4 Add CABAC context initialization/update, then regular, bypass, and terminate-bin paths.
+- 23.5 Map decoded bins to one syntax element at a time; then reconstruct residual coefficient blocks.
+- 23.6 Compare each path against standards-derived vectors and fail explicitly on unsupported syntax.
+
+**Decoder reconstruction (steps 25-36)**
+- 25.1 Define the frame, error, decoder-state, and `decode_frame(index)` contracts without implementing codecs.
+- 25.2 Implement inverse scaling separately from each required 4x4 and 8x8 inverse transform.
+- 27.1 Implement intra 4x4 modes by mode family; test each edge-neighbor case.
+- 27.2 Add 8x8 luma modes, then 16x16 luma and chroma modes as separate tasks.
+- 28.1 Parse motion data and derive vectors; test vector prediction independently.
+- 28.2 Build reference lists and test short/long-term indexing.
+- 28.3 Add fractional-pixel interpolation, then weighting if the corpus uses it.
+- 29.1 Store decoded reference pictures; separately implement POC calculation and output reordering.
+- 30.1 Implement luma deblocking; add chroma deblocking only after luma vectors pass.
+- 30.2 Reconstruct and upsample chroma planes separately from deblocking.
+- 31.1 Decode one IDR fixture end-to-end; add remaining I-picture features individually.
+- 32.1 Decode one P-picture fixture and verify reference selection before expanding corpus coverage.
+- 33.1 Decode one B-picture fixture, then verify frame output order against timestamps/POC.
+- 34.1 Support requesting frame zero; then add dependency decoding and later-frame selection.
+- 35.1 Add one unsupported-feature check per excluded profile/tool and verify stable errors.
+- 36.1 Choose one reference implementation; port each passed algorithm increment separately to the other two languages.
+
+**Image encoders (steps 37-47)**
+- 37.1 Freeze pixel-buffer dimensions, stride, color range, and ownership; test buffer layout.
+- 37.2 Implement YUV range conversion, chroma upsampling, matrix conversion, and rounding as separate pixel tests.
+- 39.1 Define and test the native `PNGEncoder` API before writing files.
+- 40.1 Write PNG signature/IHDR, then IDAT/IEND framing and chunk-length checks.
+- 40.2 Implement and test CRC-32 separately from Adler-32.
+- 41.1 Implement zlib header/trailer; then emit one valid uncompressed DEFLATE block.
+- 41.2 Split large images across stored blocks and add PNG scanline filters if required.
+- 42.1 Validate PNG chunks/checksums; separately test dimensions, row stride, and large output.
+- 43.1 Define `JPEGEncoder` input/quality contract and marker writer.
+- 44.1 Implement RGB-to-YCbCr; test 4:4:4 first and add 4:2:0 MCU layout if selected.
+- 45.1 Implement FDCT and verify coefficients; then quantization and zigzag ordering.
+- 45.2 Implement DC differences/Huffman coding, then AC run-length/Huffman coding.
+- 46.1 Add JPEG bit packing and byte stuffing; then complete JFIF markers and lengths.
+- 47.1 Validate baseline JPEG structure, decoded dimensions, pixel-error bounds, odd sizes, and small images.
+- Port each encoder milestone to one other language at a time using identical vectors.
+
+**Pipeline, CLI, and release (steps 48-59)**
+- 48.1 In the reference language, connect sample reader to decoder for one fixture only.
+- 48.2 Connect decoded frame to RGB conversion and verify pixel layout before encoder integration.
+- 48.3 Connect PNG output; add JPEG output only after the PNG route passes.
+- 48.4 Wire CLI argument handling, temporary output, cleanup, and errors as distinct changes.
+- 49.1 Port the working extraction path to Python stage-by-stage; 50.1 do the same for Rust.
+- 51.1 Verify input ordering and zero-based selection independently from output formatting.
+- 52.1 Test output extension selection and atomic/temporary-file behavior for each encoder.
+- 53.1 Remove FFmpeg runtime invocation first; then update help text and README separately.
+- 54.1 Add focused tests per box, primitive, picture type, encoder, and language increment.
+- 55.1 Run corpus tests in batches by codec feature, then across all 22 files.
+- 56.1 Compare same-frame RGB across languages; diagnose and resolve one mismatch class at a time.
+- 57.1 Split CLI edge tests into index boundaries, path/prefix cases, format selection, and write failures.
+- 58.1 Run each language's full suite/formatter; separately run with FFmpeg absent from `PATH`.
+- 59.1 Document supported syntax, limitations, performance, and corpus results as separate README updates.
+
+**Relevant files**
+- `g/vid/mp4boxes.go` — current Go MP4 box registry and parser; extend for sample tables and AVC configuration.
+- `g/vid/mp4file.go` — current Go metadata path; reference for file ownership and errors.
+- `g/cmd/vidprobe/main.go` — replace `extractFrame`'s `exec.Command("ffmpeg", ...)` call with native decoder/encoder objects.
+- `p/src/pygorvid/mp4boxes.py` and `p/src/pygorvid/mp4file.py` — Python box parsing and file API patterns.
+- `p/src/pygorvid/cli.py` — replace `subprocess.run` extraction path.
+- `r/src/mp4boxes.rs` and `r/src/mp4file.rs` — Rust trait-based box parsing and file API patterns.
+- `r/src/bin/vidprobe.rs` — replace `Command::new("ffmpeg")` extraction path.
+- `g/vid/basicinfo_test.go`, `p/tests/test_basicinfo.py`, and `r/tests/basicinfo.rs` — synthetic MP4 fixture patterns to extend for demux tests.
+- `README.md` — document the supported native codec subset and remove the runtime FFmpeg requirement after integration.
+
+**Verification**
+1. Keep demux tests independent of decoding and assert every sample offset/size lies within `mdat`.
+2. Validate each bitstream primitive using fixed input/output vectors before integrating it into the decoder.
+3. Compare decoder planes/RGB against checked-in references for IDR, P, and B frames.
+4. Validate PNG with signature/chunk/CRC checks and JPEG with marker/length/byte-stuffing checks plus an independent decode during development.
+5. Run identical selected-frame cases through Go, Python, and Rust and compare dimensions and pixel data.
+6. Run the full corpus in an environment without FFmpeg on `PATH`; extraction must still work for supported files and clearly reject unsupported features.
+
+**Decisions**
+- “No libraries” means no third-party codec, image, compression, FFI, or subprocess dependency in the shipped extraction path; implement MP4 demuxing, H.264 decoding, PNG, and JPEG in project-owned code for each language.
+- Initial codec scope is the verified bundled corpus (22 H.264 High Profile, 8-bit `yuv420p` files), not arbitrary H.264. A representative sample contains I/P/B frames and reports two B frames of reordering, so support must include reference management and output reordering.
+- Frame indexes remain zero-based and refer to the first video track in presentation order, matching the current CLI contract.
+- Extend the supported codec subset only after the full current corpus passes all three implementations.
+- Decoder, PNG encoder, and JPEG encoder are separate native objects, so parsing, decoding, conversion, and output each have testable ownership boundaries.
+- Standards and official errata are the primary source of implementation requirements. Consult FFmpeg source only as a backup when a concrete standards ambiguity remains, and record the reason and exact file. This repository is MIT-licensed; FFmpeg is primarily LGPL-2.1-or-later, with optional GPL and other per-file licenses. Code reuse is excluded unless separately approved after file-level license/notice review; patent questions are separate.
