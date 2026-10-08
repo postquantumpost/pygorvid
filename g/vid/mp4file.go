@@ -70,15 +70,68 @@ func (m *Mp4File) GetBasicInfo() BasicInfo {
 		return BasicInfo{}
 	}
 	var info BasicInfo
-	for _, b := range find(boxes, "moov", "trak", "mdia", "hdlr") {
-		if h, ok := b.(*hdlrBox); ok {
-			switch h.handlerType {
-			case "vide":
-				info.HasVideo = true
-			case "soun":
-				info.HasAudio = true
+	for _, b := range find(boxes, "moov", "trak") {
+		track, ok := b.(*trakBox)
+		if !ok {
+			continue
+		}
+		var handler string
+		for _, h := range find([]box{track}, "trak", "mdia", "hdlr") {
+			if hdlr, ok := h.(*hdlrBox); ok {
+				handler = hdlr.handlerType
 			}
+		}
+		switch handler {
+		case "vide":
+			info.HasVideo = true
+			info.VideoStreams = append(info.VideoStreams, getBasicVideoStreamInfo(track))
+		case "soun":
+			info.HasAudio = true
+			info.AudioStreams = append(info.AudioStreams, getBasicAudioStreamInfo(track))
 		}
 	}
 	return info
+}
+
+func getBasicAudioStreamInfo(track *trakBox) BasicAudioStreamInfo {
+	var stream BasicAudioStreamInfo
+	for _, b := range find([]box{track}, "trak", "mdia", "minf", "stbl", "stsd") {
+		if stsd, ok := b.(*stsdBox); ok {
+			stream.SampleRate = stsd.sampleRate
+			stream.Channels = stsd.channels
+		}
+	}
+	return stream
+}
+
+func getBasicVideoStreamInfo(track *trakBox) BasicVideoStreamInfo {
+	var stream BasicVideoStreamInfo
+	var timescale uint32
+	for _, b := range find([]box{track}, "trak", "tkhd") {
+		if tkhd, ok := b.(*tkhdBox); ok {
+			stream.Width = tkhd.width
+			stream.Height = tkhd.height
+		}
+	}
+	for _, b := range find([]box{track}, "trak", "mdia", "mdhd") {
+		if mdhd, ok := b.(*mdhdBox); ok {
+			timescale = mdhd.timescale
+		}
+	}
+	if timescale == 0 {
+		return stream
+	}
+	var samples, duration float64
+	for _, b := range find([]box{track}, "trak", "mdia", "minf", "stbl", "stts") {
+		if stts, ok := b.(*sttsBox); ok {
+			for _, entry := range stts.entries {
+				samples += float64(entry.sampleCount)
+				duration += float64(entry.sampleCount) * float64(entry.sampleDelta)
+			}
+		}
+	}
+	if duration > 0 {
+		stream.FrameRate = samples * float64(timescale) / duration
+	}
+	return stream
 }

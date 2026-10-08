@@ -21,7 +21,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", p, v.Format, err)
 				status = 1
 			} else {
-				fmt.Printf("%s: %s hasvideo=%t hasaudio=%t\n", p, v.Format, info.HasVideo, info.HasAudio)
+				fmt.Printf("%s: %s %+v\n", p, v.Format, info)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "%s: %s\n", p, v.ErrorInfo())

@@ -6,7 +6,7 @@ Unregistered box types are skipped without being parsed.
 
 import struct
 from dataclasses import dataclass
-from typing import BinaryIO, Dict, List, Optional, Type
+from typing import BinaryIO, Dict, List, Optional, Tuple, Type
 
 
 class Mp4FormatError(Exception):
@@ -81,6 +81,94 @@ class MdiaBox(ContainerBox):
     pass
 
 
+class MinfBox(ContainerBox):
+    pass
+
+
+class StblBox(ContainerBox):
+    pass
+
+
+class TkhdBox(Box):
+    def __init__(self, header: BoxHeader) -> None:
+        super().__init__(header)
+        self.width = 0
+        self.height = 0
+
+    def read(self, f: BinaryIO) -> None:
+        payload_size = self.header.end - self.header.payload_start
+        if payload_size < 84:
+            raise Mp4FormatError("tkhd box too short")
+        f.seek(self.header.payload_start)
+        version = f.read(1)[0]
+        width_offset = 88 if version == 1 else 76
+        if payload_size < width_offset + 8:
+            raise Mp4FormatError("tkhd box too short")
+        f.seek(self.header.payload_start + width_offset)
+        width, height = struct.unpack(">II", f.read(8))
+        self.width = width >> 16
+        self.height = height >> 16
+
+
+class MdhdBox(Box):
+    def __init__(self, header: BoxHeader) -> None:
+        super().__init__(header)
+        self.timescale = 0
+
+    def read(self, f: BinaryIO) -> None:
+        payload_size = self.header.end - self.header.payload_start
+        if payload_size < 20:
+            raise Mp4FormatError("mdhd box too short")
+        f.seek(self.header.payload_start)
+        version = f.read(1)[0]
+        timescale_offset = 20 if version == 1 else 12
+        if payload_size < timescale_offset + 4:
+            raise Mp4FormatError("mdhd box too short")
+        f.seek(self.header.payload_start + timescale_offset)
+        self.timescale = struct.unpack(">I", f.read(4))[0]
+
+
+class SttsBox(Box):
+    def __init__(self, header: BoxHeader) -> None:
+        super().__init__(header)
+        self.entries: List[Tuple[int, int]] = []
+
+    def read(self, f: BinaryIO) -> None:
+        payload_size = self.header.end - self.header.payload_start
+        if payload_size < 8:
+            raise Mp4FormatError("stts box too short")
+        f.seek(self.header.payload_start + 4)
+        count = struct.unpack(">I", f.read(4))[0]
+        if count * 8 > payload_size - 8:
+            raise Mp4FormatError("stts entries exceed box size")
+        self.entries = [struct.unpack(">II", f.read(8)) for _ in range(count)]
+
+
+class StsdBox(Box):
+    def __init__(self, header: BoxHeader) -> None:
+        super().__init__(header)
+        self.sample_rate = 0
+        self.channels = 0
+
+    def read(self, f: BinaryIO) -> None:
+        payload_size = self.header.end - self.header.payload_start
+        if payload_size < 8:
+            raise Mp4FormatError("stsd box too short")
+        f.seek(self.header.payload_start + 4)
+        count = struct.unpack(">I", f.read(4))[0]
+        if count == 0:
+            return
+        entry = read_header(f, self.header.end)
+        if entry is None:
+            raise Mp4FormatError("audio sample entry too short")
+        if entry.end - entry.payload_start < 28:
+            return
+        f.seek(entry.payload_start + 16)
+        self.channels = struct.unpack(">H", f.read(2))[0]
+        f.seek(entry.payload_start + 24)
+        self.sample_rate = struct.unpack(">I", f.read(4))[0] >> 16
+
+
 class HdlrBox(Box):
     def __init__(self, header: BoxHeader) -> None:
         super().__init__(header)
@@ -98,7 +186,13 @@ _REGISTRY: Dict[str, Type[Box]] = {
     "moov": MoovBox,
     "trak": TrakBox,
     "mdia": MdiaBox,
+    "minf": MinfBox,
+    "stbl": StblBox,
     "hdlr": HdlrBox,
+    "tkhd": TkhdBox,
+    "mdhd": MdhdBox,
+    "stts": SttsBox,
+    "stsd": StsdBox,
 }
 
 

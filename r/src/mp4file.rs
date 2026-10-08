@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io;
 
-use crate::basicinfo::BasicInfo;
+use crate::basicinfo::{BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo};
 use crate::mp4boxes::{find, read_boxes};
 use crate::probe_file_handle;
 
@@ -77,12 +77,64 @@ fn read_info(mut f: &File) -> io::Result<BasicInfo> {
     let size = f.metadata()?.len();
     let boxes = read_boxes(&mut f, 0, size)?;
     let mut info = BasicInfo::default();
-    for b in find(&boxes, &[b"moov", b"trak", b"mdia", b"hdlr"]) {
-        match b.handler_type().as_ref().map(|h| &h[..]) {
-            Some(b"vide") => info.hasvideo = true,
-            Some(b"soun") => info.hasaudio = true,
+    for track in find(&boxes, &[b"moov", b"trak"]) {
+        let handler = find(track.children(), &[b"mdia", b"hdlr"])
+            .iter()
+            .find_map(|b| b.handler_type());
+        match handler {
+            Some(h) if h == *b"vide" => {
+                info.hasvideo = true;
+                info.videostreams.push(video_stream_info(track));
+            }
+            Some(h) if h == *b"soun" => {
+                info.hasaudio = true;
+                info.audiostreams.push(audio_stream_info(track));
+            }
             _ => {}
         }
     }
     Ok(info)
+}
+
+fn video_stream_info(track: &dyn crate::mp4boxes::Mp4Box) -> BasicVideoStreamInfo {
+    let children = track.children();
+    let mut stream = BasicVideoStreamInfo::default();
+    for b in find(children, &[b"tkhd"]) {
+        if let Some((width, height)) = b.dimensions() {
+            stream.width = width;
+            stream.height = height;
+        }
+    }
+    let timescale = find(children, &[b"mdia", b"mdhd"])
+        .iter()
+        .find_map(|b| b.timescale())
+        .unwrap_or(0);
+    if timescale == 0 {
+        return stream;
+    }
+    let mut samples = 0.0;
+    let mut duration = 0.0;
+    for b in find(children, &[b"mdia", b"minf", b"stbl", b"stts"]) {
+        if let Some(entries) = b.sample_timing() {
+            for (sample_count, sample_delta) in entries {
+                samples += f64::from(*sample_count);
+                duration += f64::from(*sample_count) * f64::from(*sample_delta);
+            }
+        }
+    }
+    if duration > 0.0 {
+        stream.framerate = samples * f64::from(timescale) / duration;
+    }
+    stream
+}
+
+fn audio_stream_info(track: &dyn crate::mp4boxes::Mp4Box) -> BasicAudioStreamInfo {
+    let mut stream = BasicAudioStreamInfo::default();
+    for b in find(track.children(), &[b"mdia", b"minf", b"stbl", b"stsd"]) {
+        if let Some((sample_rate, channels)) = b.audio_info() {
+            stream.sample_rate = sample_rate;
+            stream.channels = channels;
+        }
+    }
+    stream
 }

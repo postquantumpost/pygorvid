@@ -18,10 +18,7 @@ def main(argv=None) -> int:
                     print(f"{path}: {v.format}: {err}", file=sys.stderr)
                     status = 1
                 else:
-                    print(
-                        f"{path}: {v.format} hasvideo={str(info.hasvideo).lower()}"
-                        f" hasaudio={str(info.hasaudio).lower()}"
-                    )
+                    print(f"{path}: {v.format} {info}")
             else:
                 print(f"{path}: {v.errorinfo()[0]}", file=sys.stderr)
                 status = 1

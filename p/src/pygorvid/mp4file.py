@@ -2,8 +2,18 @@
 
 from typing import BinaryIO, Optional, Tuple
 
-from .basicinfo import BasicInfo
-from .mp4boxes import HdlrBox, Mp4FormatError, find, read_boxes
+from .basicinfo import BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo
+from .mp4boxes import (
+    HdlrBox,
+    MdhdBox,
+    Mp4FormatError,
+    SttsBox,
+    StsdBox,
+    TkhdBox,
+    TrakBox,
+    find,
+    read_boxes,
+)
 from .probe import HEADER_SIZE, detect_format
 
 
@@ -53,9 +63,52 @@ class Mp4File:
         except (Mp4FormatError, OSError) as e:
             self._error = str(e)
             return BasicInfo()
-        handlers = {
-            b.handler_type
-            for b in find(boxes, "moov", "trak", "mdia", "hdlr")
-            if isinstance(b, HdlrBox)
-        }
-        return BasicInfo(hasvideo="vide" in handlers, hasaudio="soun" in handlers)
+        info = BasicInfo()
+        for track in find(boxes, "moov", "trak"):
+            if not isinstance(track, TrakBox):
+                continue
+            handlers = [
+                b.handler_type
+                for b in find([track], "trak", "mdia", "hdlr")
+                if isinstance(b, HdlrBox)
+            ]
+            if "vide" in handlers:
+                info.hasvideo = True
+                info.videostreams.append(self._get_basic_video_stream_info(track))
+            if "soun" in handlers:
+                info.hasaudio = True
+                info.audiostreams.append(self._get_basic_audio_stream_info(track))
+        return info
+
+    @staticmethod
+    def _get_basic_video_stream_info(track: TrakBox) -> BasicVideoStreamInfo:
+        stream = BasicVideoStreamInfo()
+        for box in find([track], "trak", "tkhd"):
+            if isinstance(box, TkhdBox):
+                stream.width = box.width
+                stream.height = box.height
+        timescale = 0
+        for box in find([track], "trak", "mdia", "mdhd"):
+            if isinstance(box, MdhdBox):
+                timescale = box.timescale
+        if timescale == 0:
+            return stream
+        samples = 0
+        duration = 0
+        for box in find([track], "trak", "mdia", "minf", "stbl", "stts"):
+            if isinstance(box, SttsBox):
+                for sample_count, sample_delta in box.entries:
+                    samples += sample_count
+                    duration += sample_count * sample_delta
+        if duration > 0:
+            stream.framerate = samples * timescale / duration
+        return stream
+
+    @staticmethod
+    def _get_basic_audio_stream_info(track: TrakBox) -> BasicAudioStreamInfo:
+        stream = BasicAudioStreamInfo()
+        for box in find([track], "trak", "mdia", "minf", "stbl", "stsd"):
+            if isinstance(box, StsdBox):
+                stream.sample_rate = box.sample_rate
+                stream.channels = box.channels
+        return stream

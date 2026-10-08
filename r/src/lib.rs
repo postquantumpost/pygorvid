@@ -5,7 +5,7 @@ mod mp4boxes;
 mod mp4file;
 mod vidfile;
 
-pub use basicinfo::BasicInfo;
+pub use basicinfo::{BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo};
 pub use mp4file::Mp4File;
 pub use vidfile::{construct, open_file, VidFile};
 

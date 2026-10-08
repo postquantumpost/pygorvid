@@ -13,12 +13,7 @@ fn main() {
             let info = v.getbasicinfo();
             let err = v.errorinfo().0;
             if err.is_empty() {
-                println!(
-                    "{p}: {} hasvideo={} hasaudio={}",
-                    v.format(),
-                    info.hasvideo,
-                    info.hasaudio
-                );
+                println!("{p}: {} {info:?}", v.format());
             } else {
                 eprintln!("{p}: {}: {err}", v.format());
                 status = 1;
