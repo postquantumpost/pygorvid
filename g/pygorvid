@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -x
+d=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$d/../tmp"
+go build -C "$d" -o "$d/../tmp/vidprobe-go" ./cmd/vidprobe && "$d/../tmp/vidprobe-go" $*

@@ -41,6 +41,10 @@ func ProbeFile(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
+	return detectFromFile(f)
+}
+
+func detectFromFile(f *os.File) (string, error) {
 	buf := make([]byte, headerSize)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {

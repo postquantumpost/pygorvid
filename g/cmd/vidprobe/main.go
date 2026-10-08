@@ -1,4 +1,3 @@
-package vidprobe
 package main
 
 import (
@@ -15,13 +14,20 @@ func main() {
 	}
 	status := 0
 	for _, p := range os.Args[1:] {
-		f, err := vid.ProbeFile(p)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
+		v := vid.OpenFile(p)
+		if v.IsOpen() {
+			info := v.GetBasicInfo()
+			if err := v.ErrorInfo(); err != "" {
+				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", p, v.Format, err)
+				status = 1
+			} else {
+				fmt.Printf("%s: %s hasvideo=%t hasaudio=%t\n", p, v.Format, info.HasVideo, info.HasAudio)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", p, v.ErrorInfo())
 			status = 1
-			continue
 		}
-		fmt.Printf("%s: %s\n", p, f)
+		v.Close()
 	}
 	os.Exit(status)
 }

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -x
+d=$(cd "$(dirname "$0")" && pwd)
+PYTHONPATH="$d/src" python3 -m pygorvid.cli $*

@@ -1,5 +1,14 @@
 //! Video container detection without ffmpeg.
 
+mod basicinfo;
+mod mp4boxes;
+mod mp4file;
+mod vidfile;
+
+pub use basicinfo::BasicInfo;
+pub use mp4file::Mp4File;
+pub use vidfile::{construct, open_file, VidFile};
+
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -32,7 +41,11 @@ pub fn detect_format(h: &[u8]) -> &'static str {
 
 /// Reads the header of the file at `path` and detects its container.
 pub fn probe_file<P: AsRef<Path>>(path: P) -> io::Result<&'static str> {
+    probe_file_handle(&mut File::open(path)?)
+}
+
+pub(crate) fn probe_file_handle(f: &mut File) -> io::Result<&'static str> {
     let mut buf = Vec::with_capacity(HEADER_SIZE);
-    File::open(path)?.take(HEADER_SIZE as u64).read_to_end(&mut buf)?;
+    f.take(HEADER_SIZE as u64).read_to_end(&mut buf)?;
     Ok(detect_format(&buf))
 }

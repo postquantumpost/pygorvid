@@ -8,12 +8,24 @@ fn main() {
     }
     let mut status = 0;
     for p in &args {
-        match pygorvid::probe_file(p) {
-            Ok(f) => println!("{p}: {f}"),
-            Err(e) => {
-                eprintln!("{p}: {e}");
+        let mut v = pygorvid::open_file(p);
+        if v.isopen() {
+            let info = v.getbasicinfo();
+            let err = v.errorinfo().0;
+            if err.is_empty() {
+                println!(
+                    "{p}: {} hasvideo={} hasaudio={}",
+                    v.format(),
+                    info.hasvideo,
+                    info.hasaudio
+                );
+            } else {
+                eprintln!("{p}: {}: {err}", v.format());
                 status = 1;
             }
+        } else {
+            eprintln!("{p}: {}", v.errorinfo().0);
+            status = 1;
         }
     }
     exit(status);

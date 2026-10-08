@@ -1,6 +1,6 @@
 import sys
 
-from .probe import probe_file
+from .vidfile import openfile
 
 
 def main(argv=None) -> int:
@@ -10,11 +10,21 @@ def main(argv=None) -> int:
         return 2
     status = 0
     for path in args:
-        try:
-            print(f"{path}: {probe_file(path)}")
-        except OSError as e:
-            print(f"{path}: {e}", file=sys.stderr)
-            status = 1
+        with openfile(path) as v:
+            if v.isopen():
+                info = v.getbasicinfo()
+                err = v.errorinfo()[0]
+                if err:
+                    print(f"{path}: {v.format}: {err}", file=sys.stderr)
+                    status = 1
+                else:
+                    print(
+                        f"{path}: {v.format} hasvideo={str(info.hasvideo).lower()}"
+                        f" hasaudio={str(info.hasaudio).lower()}"
+                    )
+            else:
+                print(f"{path}: {v.errorinfo()[0]}", file=sys.stderr)
+                status = 1
     return status
 
 

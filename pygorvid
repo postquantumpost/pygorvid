@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#set -x
+for d in p g r
+do
+    $d/pygorvid $*
+done
