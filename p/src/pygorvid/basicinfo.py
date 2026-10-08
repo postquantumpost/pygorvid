@@ -9,6 +9,8 @@ class BasicVideoStreamInfo:
     width: int = 0
     height: int = 0
     framerate: float = 0.0
+    frame_count: int = 0
+    duration_seconds: float = 0.0
 
 
 @dataclass

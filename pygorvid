@@ -2,5 +2,5 @@
 #set -x
 for d in p g r
 do
-    $d/pygorvid $*
+    $d/pygorvid --prefix j${d}_ $*
 done

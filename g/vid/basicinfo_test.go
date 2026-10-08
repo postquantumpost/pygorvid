@@ -112,14 +112,17 @@ func mktrackWithAudioInfo(sampleRate uint32, channels uint16) []byte {
 func TestGetBasicInfoVideoStreams(t *testing.T) {
 	p := writeMp4(t, mkbox("moov",
 		mktrackWithVideoInfo(1920, 1080, 300, 1000, 30000),
-		mktrackWithVideoInfo(640, 480, 240, 1000, 24000),
+		mktrackWithVideoInfo(640, 480, 3, 15000, 30000),
 	))
 	m := NewMp4File()
 	if !m.Open(p) {
 		t.Fatal(m.ErrorInfo())
 	}
 	got := m.GetBasicInfo()
-	want := []BasicVideoStreamInfo{{Width: 1920, Height: 1080, FrameRate: 30}, {Width: 640, Height: 480, FrameRate: 24}}
+	want := []BasicVideoStreamInfo{
+		{Width: 1920, Height: 1080, FrameRate: 30, FrameCount: 300, DurationSeconds: 10},
+		{Width: 640, Height: 480, FrameRate: 2, FrameCount: 3, DurationSeconds: 1.5},
+	}
 	if !reflect.DeepEqual(got.VideoStreams, want) {
 		t.Errorf("got %+v, want %+v", got.VideoStreams, want)
 	}

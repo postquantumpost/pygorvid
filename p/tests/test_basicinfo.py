@@ -99,12 +99,24 @@ def test_multiple_video_streams(tmp_path):
         write(
             tmp_path,
             track(b"vide", 1920, 1080, 300, 1000, 30000),
-            track(b"vide", 640, 480, 240, 1000, 24000),
+            track(b"vide", 640, 480, 3, 15000, 30000),
         )
     )
     assert m.getbasicinfo().videostreams == [
-        BasicVideoStreamInfo(width=1920, height=1080, framerate=30.0),
-        BasicVideoStreamInfo(width=640, height=480, framerate=24.0),
+        BasicVideoStreamInfo(
+            width=1920,
+            height=1080,
+            framerate=30.0,
+            frame_count=300,
+            duration_seconds=10.0,
+        ),
+        BasicVideoStreamInfo(
+            width=640,
+            height=480,
+            framerate=2.0,
+            frame_count=3,
+            duration_seconds=1.5,
+        ),
     ]
 
 

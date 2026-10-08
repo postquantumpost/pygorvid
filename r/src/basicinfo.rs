@@ -17,6 +17,8 @@ pub struct BasicVideoStreamInfo {
     pub width: u32,
     pub height: u32,
     pub framerate: f64,
+    pub frame_count: u64,
+    pub duration_seconds: f64,
 }
 
 /// Basic facts about one audio stream.

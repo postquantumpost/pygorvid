@@ -156,7 +156,7 @@ fn basic_info_audio_stream_values() {
 fn basic_info_video_stream_values() {
     let tracks = vec![
         mktrack_with_video_info(b"vide", 1920, 1080, 300, 1000, 30000),
-        mktrack_with_video_info(b"vide", 640, 480, 240, 1000, 24000),
+        mktrack_with_video_info(b"vide", 640, 480, 3, 15000, 30000),
     ];
     let (dir, path) = write("video-streams", &mkbox(b"moov", &tracks.concat()));
     let mut file = Mp4File::new();
@@ -167,12 +167,16 @@ fn basic_info_video_stream_values() {
             BasicVideoStreamInfo {
                 width: 1920,
                 height: 1080,
-                framerate: 30.0
+                framerate: 30.0,
+                frame_count: 300,
+                duration_seconds: 10.0,
             },
             BasicVideoStreamInfo {
                 width: 640,
                 height: 480,
-                framerate: 24.0
+                framerate: 2.0,
+                frame_count: 3,
+                duration_seconds: 1.5,
             },
         ]
     );

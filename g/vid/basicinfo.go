@@ -10,9 +10,11 @@ type BasicInfo struct {
 
 // BasicVideoStreamInfo holds basic facts about one video stream.
 type BasicVideoStreamInfo struct {
-	Width     uint32
-	Height    uint32
-	FrameRate float64
+	Width           uint32
+	Height          uint32
+	FrameRate       float64
+	FrameCount      uint64
+	DurationSeconds float64
 }
 
 // BasicAudioStreamInfo holds basic facts about one audio stream.

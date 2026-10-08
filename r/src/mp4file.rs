@@ -109,21 +109,22 @@ fn video_stream_info(track: &dyn crate::mp4boxes::Mp4Box) -> BasicVideoStreamInf
         .iter()
         .find_map(|b| b.timescale())
         .unwrap_or(0);
-    if timescale == 0 {
-        return stream;
-    }
     let mut samples = 0.0;
     let mut duration = 0.0;
+    let mut frame_count = 0u64;
     for b in find(children, &[b"mdia", b"minf", b"stbl", b"stts"]) {
         if let Some(entries) = b.sample_timing() {
             for (sample_count, sample_delta) in entries {
                 samples += f64::from(*sample_count);
                 duration += f64::from(*sample_count) * f64::from(*sample_delta);
+                frame_count = frame_count.saturating_add(u64::from(*sample_count));
             }
         }
     }
-    if duration > 0.0 {
-        stream.framerate = samples * f64::from(timescale) / duration;
+    stream.frame_count = frame_count;
+    if timescale > 0 && duration > 0.0 {
+        stream.duration_seconds = duration / f64::from(timescale);
+        stream.framerate = samples / stream.duration_seconds;
     }
     stream
 }

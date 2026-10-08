@@ -118,20 +118,18 @@ func getBasicVideoStreamInfo(track *trakBox) BasicVideoStreamInfo {
 			timescale = mdhd.timescale
 		}
 	}
-	if timescale == 0 {
-		return stream
-	}
-	var samples, duration float64
+	var duration float64
 	for _, b := range find([]box{track}, "trak", "mdia", "minf", "stbl", "stts") {
 		if stts, ok := b.(*sttsBox); ok {
 			for _, entry := range stts.entries {
-				samples += float64(entry.sampleCount)
+				stream.FrameCount += uint64(entry.sampleCount)
 				duration += float64(entry.sampleCount) * float64(entry.sampleDelta)
 			}
 		}
 	}
-	if duration > 0 {
-		stream.FrameRate = samples * float64(timescale) / duration
+	if timescale > 0 && duration > 0 {
+		stream.DurationSeconds = duration / float64(timescale)
+		stream.FrameRate = float64(stream.FrameCount) / stream.DurationSeconds
 	}
 	return stream
 }

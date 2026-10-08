@@ -91,8 +91,6 @@ class Mp4File:
         for box in find([track], "trak", "mdia", "mdhd"):
             if isinstance(box, MdhdBox):
                 timescale = box.timescale
-        if timescale == 0:
-            return stream
         samples = 0
         duration = 0
         for box in find([track], "trak", "mdia", "minf", "stbl", "stts"):
@@ -100,8 +98,10 @@ class Mp4File:
                 for sample_count, sample_delta in box.entries:
                     samples += sample_count
                     duration += sample_count * sample_delta
-        if duration > 0:
-            stream.framerate = samples * timescale / duration
+        stream.frame_count = samples
+        if timescale > 0 and duration > 0:
+            stream.duration_seconds = duration / timescale
+            stream.framerate = samples / stream.duration_seconds
         return stream
 
     @staticmethod

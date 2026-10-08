@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -x
 ./pygorvid samples/samp3.mp4
+./pygorvid --extractframe 5 --output frame5.png --input samples/samp3.mp4
