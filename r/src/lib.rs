@@ -3,10 +3,13 @@
 mod basicinfo;
 mod mp4boxes;
 mod mp4file;
+mod videosamplereader;
 mod vidfile;
 
 pub use basicinfo::{BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo};
+pub use mp4boxes::AvcConfiguration;
 pub use mp4file::Mp4File;
+pub use videosamplereader::{CompressedSample, VideoSampleReader};
 pub use vidfile::{construct, open_file, VidFile};
 
 use std::fs::File;

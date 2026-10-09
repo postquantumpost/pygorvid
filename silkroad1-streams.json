@@ -1,0 +1,907 @@
+{
+  "excluded_sample_count": 12,
+  "excluded_samples": [
+    {
+      "file": "samples/boss2.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 15583735
+    },
+    {
+      "file": "samples/elden.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 21375785303
+    },
+    {
+      "file": "samples/ew0.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 57916990
+    },
+    {
+      "file": "samples/ghost0.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 879759680
+    },
+    {
+      "file": "samples/ghost1.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 4371458954
+    },
+    {
+      "file": "samples/gstoryv1.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 18078007
+    },
+    {
+      "file": "samples/jogaku.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 26393837
+    },
+    {
+      "file": "samples/jori.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 303172150
+    },
+    {
+      "file": "samples/loc1.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 65428633
+    },
+    {
+      "file": "samples/place_name.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 34528352
+    },
+    {
+      "file": "samples/samp.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 339154512
+    },
+    {
+      "file": "samples/samp2.mp4",
+      "reason": "exceeds 15000000-byte working limit",
+      "size_bytes": 102672625
+    }
+  ],
+  "format_version": 1,
+  "generation_tools": {
+    "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+    "ffprobe": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers"
+  },
+  "hash_manifest": "silkroad1.sha256",
+  "sample_count": 10,
+  "sample_size_limit_bytes": 15000000,
+  "samples": [
+    {
+      "file": "samples/boss0.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 477,
+              "5": 2,
+              "7": 2,
+              "8": 2,
+              "9": 479
+            },
+            "slice_type_counts": {
+              "B": 318,
+              "I": 2,
+              "P": 159
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/boss1.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 355,
+              "5": 2,
+              "7": 2,
+              "8": 2,
+              "9": 357
+            },
+            "slice_type_counts": {
+              "B": 236,
+              "I": 2,
+              "P": 119
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/boss3.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 342,
+              "5": 2,
+              "7": 2,
+              "8": 2,
+              "9": 344
+            },
+            "slice_type_counts": {
+              "B": 228,
+              "I": 2,
+              "P": 114
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/ew1.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 476,
+              "5": 2,
+              "7": 2,
+              "8": 2,
+              "9": 478
+            },
+            "slice_type_counts": {
+              "B": 317,
+              "I": 2,
+              "P": 159
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/grace1.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 656,
+              "5": 3,
+              "7": 2,
+              "8": 2,
+              "9": 659
+            },
+            "slice_type_counts": {
+              "B": 437,
+              "I": 3,
+              "P": 219
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/grace2.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 418,
+              "5": 2,
+              "7": 2,
+              "8": 2,
+              "9": 420
+            },
+            "slice_type_counts": {
+              "B": 278,
+              "I": 2,
+              "P": 140
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/place1.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 678,
+              "5": 3,
+              "7": 2,
+              "8": 2,
+              "9": 681
+            },
+            "slice_type_counts": {
+              "B": 452,
+              "I": 3,
+              "P": 226
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/rest_at_grace.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60/1",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 35,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "0164042affe100106764042aace501e0089f9601e1108b2c01000468ee3c80fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "6e764c0ffdacc7894b402e5b9ce52e6f9da537425663eaebb1208e236e0de114",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 35,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 1080,
+          "index": 0,
+          "level": 42,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60/1",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 505,
+              "5": 3,
+              "7": 2,
+              "8": 2,
+              "9": 508
+            },
+            "slice_type_counts": {
+              "B": 336,
+              "I": 3,
+              "P": 169
+            }
+          },
+          "time_base": "1/60",
+          "width": 1920
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 5,
+            "hex": "119056e500",
+            "sha256": "b3108813350006ef07740046fab14af9c374938867d16db02fe1a8baa5e72f10"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 5,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/samp3.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60000/1001",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 61,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "01640034ffe1002a27640034ac2d9003c0043ec050808080a000007d20003a981d08000393860000f42417bdf076870c648001000428ee3cb0fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "ac5730cc17f7cc8f80a91a28a98d5b79b7d7edffa7e6669119959a83d48caea9",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 61,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 2160,
+          "index": 0,
+          "level": 52,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60000/1001",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 70,
+              "5": 3,
+              "6": 73,
+              "7": 1,
+              "8": 1
+            },
+            "slice_type_counts": {
+              "B": 52,
+              "I": 3,
+              "P": 18
+            }
+          },
+          "time_base": "1/60000",
+          "width": 3840
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 2,
+            "hex": "1190",
+            "sha256": "b65f22439176f7827a0d82a66b34477888f0287450985d8e3dc836d7e32ce79b"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 2,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    },
+    {
+      "file": "samples/story1.mp4",
+      "streams": [
+        {
+          "avg_frame_rate": "60000/1001",
+          "bit_depth": 8,
+          "bits_per_raw_sample": "8",
+          "chroma_format": "4:2:0",
+          "chroma_location": "left",
+          "codec_configuration": {
+            "bytes": 61,
+            "entropy_coding_modes": [
+              "cabac"
+            ],
+            "hex": "01640034ffe1002a27640034ac2d9003c0043ec050808080a000007d20003a981d08000393860000f42417bdf076870c648001000428ee3cb0fdf8f800",
+            "nal_length_size": 4,
+            "picture_parameter_sets": [
+              {
+                "entropy_coding_mode": "cabac",
+                "pic_parameter_set_id": 0,
+                "seq_parameter_set_id": 0
+              }
+            ],
+            "pps_count": 1,
+            "sha256": "ac5730cc17f7cc8f80a91a28a98d5b79b7d7edffa7e6669119959a83d48caea9",
+            "sps_count": 1
+          },
+          "codec_name": "h264",
+          "codec_tag_string": "avc1",
+          "codec_type": "video",
+          "color_primaries": "bt709",
+          "color_range": "tv",
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "extradata_size": 61,
+          "field_order": "progressive",
+          "has_b_frames": 2,
+          "height": 2160,
+          "index": 0,
+          "level": 52,
+          "pix_fmt": "yuv420p",
+          "profile": "High",
+          "r_frame_rate": "60000/1001",
+          "refs": 1,
+          "sample_aspect_ratio": "1:1",
+          "slice_summary": {
+            "nal_unit_type_counts": {
+              "1": 164,
+              "5": 6,
+              "6": 170,
+              "7": 1,
+              "8": 1
+            },
+            "slice_type_counts": {
+              "B": 123,
+              "I": 6,
+              "P": 41
+            }
+          },
+          "time_base": "1/60000",
+          "width": 3840
+        },
+        {
+          "avg_frame_rate": "0/0",
+          "channel_layout": "stereo",
+          "channels": 2,
+          "codec_configuration": {
+            "bytes": 2,
+            "hex": "1190",
+            "sha256": "b65f22439176f7827a0d82a66b34477888f0287450985d8e3dc836d7e32ce79b"
+          },
+          "codec_name": "aac",
+          "codec_tag_string": "mp4a",
+          "codec_type": "audio",
+          "extradata_size": 2,
+          "index": 1,
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "sample_rate": "48000",
+          "time_base": "1/48000"
+        }
+      ]
+    }
+  ],
+  "slice_summary_method": "FFmpeg trace_headers bitstream filter with video stream copy; no frame decoding",
+  "source_sample_count": 22
+}
