@@ -1,14 +1,29 @@
 //! Video container detection without ffmpeg.
 
 mod basicinfo;
+mod bitreader;
+mod cabac;
 mod mp4boxes;
 mod mp4file;
+mod nal;
+mod pps;
+mod slice;
+mod sps;
 mod videosamplereader;
 mod vidfile;
 
 pub use basicinfo::{BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo};
+pub use bitreader::BitReader;
+pub use cabac::{place_luma4x4_scan_levels, CabacArithmeticDecoder, CabacContextModel};
 pub use mp4boxes::AvcConfiguration;
 pub use mp4file::Mp4File;
+pub use nal::{ebsp_to_rbsp, parse_nal_header, NalHeader};
+pub use pps::{parse_pps, PpsInfo};
+pub use slice::{
+    group_slices_into_pictures, parse_slice_header, same_primary_picture, PictureIdentity,
+    SliceHeader,
+};
+pub use sps::{parse_sps, SpsInfo};
 pub use videosamplereader::{CompressedSample, VideoSampleReader};
 pub use vidfile::{construct, open_file, VidFile};
 

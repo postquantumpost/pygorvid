@@ -25,14 +25,14 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 16. [x] Test demuxed sample counts, byte ranges, timestamps, key-frame markers, and parameter sets against all eligible files in Go, Python, and Rust.
 
 **Phase 3: H.264 bitstream primitives**
-17. Create a `BitReader` with bounded reads, bit alignment, and tested unsigned/signed Exp-Golomb decoding.
-18. Implement RBSP extraction, emulation-prevention removal, and NAL unit header parsing.
-19. Parse and validate SPS fields used by the corpus, including dimensions, chroma format, bit depth, frame numbering, POC, reference counts, and cropping.
-20. Parse PPS fields used by the corpus, including entropy mode, slice groups, weighting, and deblocking controls.
-21. Parse slice headers and identify picture boundaries and access-unit membership.
-22. Add table-driven bitstream tests for truncation, malformed Exp-Golomb values, invalid parameter-set references, and emulation-prevention edge cases.
+17. [x] Create a `BitReader` in Go, Python, and Rust with bounded reads, byte alignment, and tested unsigned/signed Exp-Golomb decoding.
+18. [x] Implement RBSP extraction, emulation-prevention removal, and NAL unit header parsing in Go, Python, and Rust.
+19. [x] Parse and validate SPS fields used by the corpus, including dimensions, chroma format, bit depth, frame numbering, POC, reference counts, and cropping.
+20. [x] Parse corpus-used PPS fields, including entropy mode, slice-group validation, weighting, and deblocking controls.
+21. [x] Parse supported slice headers, identify picture boundaries, and group VCL slices into primary pictures within access units.
+22. [x] Add table-driven bitstream tests for truncation, malformed Exp-Golomb values, invalid parameter-set references, and emulation-prevention edge cases.
 23. Implement whichever CAVLC/CABAC paths the Phase 1 inventory proves necessary, initially with isolated symbol/codeword vectors.
-24. Verify parsed SPS/PPS and slice metadata across every eligible input before attempting pixel reconstruction.
+24. [x] Verify parsed SPS/PPS and slice metadata across every eligible input before attempting pixel reconstruction.
 
 **Phase 4: Native decoder objects and reconstruction**
 25. Define a language-neutral decoder contract and an idiomatic `H264Decoder` object in Go, Python, and Rust; each owns parameter sets, reference state, and frame reordering state.
@@ -115,24 +115,60 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 17.4 Add signed Exp-Golomb decode and boundary vectors.
 - 18.1 Remove emulation-prevention bytes and verify RBSP round trips.
 - 18.2 Parse NAL headers and validate forbidden bits/type handling.
-- 19.1 Parse SPS profile, constraints, level, chroma format, and bit depth.
-- 19.2 Parse SPS dimensions and cropping; validate computed frame sizes.
-- 19.3 Parse frame numbering and each POC mode separately.
-- 19.4 Parse reference limits and frame/field flags used by the corpus.
-- 20.1 Parse PPS identifiers and core slice/entropy flags.
-- 20.2 Parse only the corpus-used PPS weighting, deblocking, and optional tools.
-- 21.1 Parse common slice-header fields through picture identity.
-- 21.2 Add separate I-, P-, and B-slice header handling.
-- 21.3 Group slices into pictures/access units and test boundary conditions.
-- 22.1 Add malformed/truncated vectors for each primitive before cross-porting it.
+- 19.1 [x] Parse SPS profile, constraints, level, chroma format, and bit depth in Go, Python, and Rust.
+- 19.2 [x] Parse SPS dimensions and cropping; validate computed frame sizes in Go, Python, and Rust.
+- 19.3 [x] Parse frame-number syntax and retain the fields and offsets for POC types 0, 1, and 2 in Go, Python, and Rust.
+- 19.4 [x] Parse SPS reference limits and frame/field flags in Go, Python, and Rust.
+- 20.1 [x] Parse PPS identifiers and core entropy/field-order flags in Go, Python, and Rust.
+- 20.2 [x] Parse corpus-used PPS weighting, deblocking, QP, and optional transform fields; reject unassessed FMO/scaling-matrix tools explicitly.
+- 21.1 [x] Parse common slice-header fields through picture identity in Go, Python, and Rust.
+- 21.2 [x] Parse remaining I-, P-, and B-slice header syntax through the end of the supported header.
+- 21.2.1 [x] Parse redundant-picture counts, B direct-prediction flags, and P/B reference-count overrides with bounds checks.
+- 21.2.2 [x] Parse ref-list reordering, decoded-reference marking, CABAC/QP, and deblocking syntax; reject unobserved weighted-prediction tables explicitly.
+- 21.3 [x] Group consecutive VCL slices into primary pictures and test picture-identity boundary conditions.
+- 22.1 [x] Add malformed/truncated vectors for bit reads, NAL/RBSP, SPS/PPS/slice syntax, and invalid PPS/SPS references across Go, Python, and Rust.
 
 **Entropy decoding (step 23)**
-- 23.1 Inspect corpus parameter sets and slices to determine CAVLC/CABAC needs before coding either path.
-- 23.2 If CAVLC is required, test coeff-token tables before level, run-before, and residual assembly.
-- 23.3 If CABAC is required, test arithmetic-engine initialization and renormalization independently.
-- 23.4 Add CABAC context initialization/update, then regular, bypass, and terminate-bin paths.
+- 23.1 [x] Inspect all 10 active video PPS records: CABAC is present in each; CAVLC is not observed.
+- 23.2 [x] Not applicable to the active corpus: no CAVLC PPS records were observed.
+- 23.3 [x] Initialize CABAC arithmetic state and independently test offset validation, renormalization, truncation rollback, and invalid ranges in Go, Python, and Rust.
+- 23.4.1 [x] Initialize generic CABAC contexts from `(m, n, SliceQPY)` and adapt MPS/LPS state using the 64-state transition table.
+- 23.4.2 [x] Decode CABAC bypass and terminate bins in Go, Python, and Rust; reject reads after termination and preserve state on truncation.
+- 23.4.3 [x] Decode regular CABAC bins using the 64x4 LPS range table, update contexts, and preserve decoder/model state on truncated renormalization.
+- 23.4 [x] Add generic CABAC context initialization/update and regular, bypass, and terminate-bin paths.
+- 23.5.1 [x] Decode the context-coded `mb_qp_delta` syntax element from caller-initialized contexts 60-63, including signed mapping, previous-delta context selection, and transactional failure.
+- 23.5.2 [x] Decode P/B `mb_skip_flag` using available, non-skipped left/top neighbors to derive its context increment; reject other slice types.
+- 23.5.3 [x] Decode I-slice `mb_type` branches for Intra_NxN, I16x16, and I_PCM using contexts 3-10; reject P/B macroblock types until their bins are mapped.
+- 23.5.4 [x] Decode `intra_chroma_pred_mode` values 0-3 using neighbor-derived context 64-66 and continuation context 67.
+- 23.5.5 [x] Decode `prev_intra4x4_pred_mode_flag` and `rem_intra4x4_pred_mode` using contexts 68-69, including predicted-mode skip mapping.
+- 23.5.6 [x] Decode `transform_size_8x8_flag` using contexts 399-401 and the available left/top transform flags.
+- 23.5.7 [x] Decode the four luma coded-block-pattern bins using contexts 73-76 with neighbor/current-bit context derivation; leave chroma CBP separate.
+- 23.5.8 [x] Decode chroma coded-block-pattern values 0-2 using contexts 77-84 and left/top chroma-CBP context derivation.
+- 23.5.9 [x] Decode luma 4x4 `coded_block_flag` using contexts 93-96 and left/top nonzero counts.
+- 23.5.10 [x] Decode frame-scan luma 4x4 significance/last flags and imply scan position 15 when no earlier last flag terminates the scan.
+- 23.5.11 [x] Decode one `coeff_abs_level_minus1` using caller-selected regular-bin contexts and bounded bypass escape; keep sign and coefficient placement separate.
+- 23.5.12 [x] Decode `coeff_sign_flag` as a bypass bin and apply it to the decoded coefficient magnitude.
+- 23.5.13 [x] Decode significant luma 4x4 coefficients in reverse scan order with adaptive level contexts; return signed scan-order levels without placement/dequantization.
+- 23.5.14 [x] Map signed frame-scan luma 4x4 levels into raster coefficient positions; leave dequantization and inverse transforms separate.
+- 23.5.15 [x] Decode significance, signed levels, and raster placement as one transactional luma 4x4 residual-block operation.
+- 23.5.16 [x] Verify a truncated residual-block sign rolls back arithmetic state and contexts that adapted during significance and level decoding.
 - 23.5 Map decoded bins to one syntax element at a time; then reconstruct residual coefficient blocks.
 - 23.6 Compare each path against standards-derived vectors and fail explicitly on unsupported syntax.
+- 23.6.1 [x] Reject an overlong coefficient escape prefix explicitly and preserve decoder/context state across Go, Python, and Rust.
+- 23.6.2 [x] Verify coefficient escape prefix/suffix mapping against state-seeded vectors for suffix values 0 and 1 in all three languages.
+- 23.6.3 [x] Verify regular-bin MPS/LPS selection immediately below and above the normative `rangeMPS` threshold in all three languages.
+- 23.6.4 [x] Verify terminate-bin continuation/termination immediately below and at the `range - 2` threshold in all three languages.
+- 23.6.5 [x] Verify bypass-bin threshold behavior at offsets 254 and 255 for range 510 in all three languages.
+- 23.6.6 [x] Verify the full 64-state LPS transition vector, state-zero MPS flip, and MPS saturation edges in all three languages.
+- 23.6.7 [x] Verify selected `rangeLPS` values across all four range classes and representative context states, including renormalization and context updates.
+- 23.6.8 [x] Verify context initialization at the `preCtxState` 63/64 split and with a negative product requiring arithmetic right shift in all three languages.
+- 23.6.9 [x] Verify context initialization at the maximum legal `SliceQPY` with positive and negative products in all three languages.
+- 23.6.10 [x] Verify CABAC arithmetic initialization accepts offsets 0 and 509 and consumes exactly nine initialization bits in all three languages.
+- 23.6.11 [x] Verify context-init accepts legal `m`, `n`, and `SliceQPY` endpoints and rejects values immediately outside each range in all three languages.
+- 23.6.12 [x] Verify regular and repeated terminate bins are rejected after termination without mutating decoder or context state in all three languages.
+- 23.6.13 [x] Verify signed coefficient decoding accepts maximum positive/negative 32-bit magnitudes and rejects overflow before consuming a sign bin.
+- 23.6.14 [x] Verify MPS context transitions for every state from 0 through 63 in all three languages.
+- 23.6.15 [x] Verify all 256 `rangeLPS` table entries across four range classes and 64 context states in all three languages.
 
 **Decoder reconstruction (steps 25-36)**
 - 25.1 Define the frame, error, decoder-state, and `decode_frame(index)` contracts without implementing codecs.
@@ -207,6 +243,18 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - `p/src/pygorvid/cli.py` — replace `subprocess.run` extraction path.
 - `r/src/mp4boxes.rs` and `r/src/mp4file.rs` — Rust trait-based box parsing and file API patterns.
 - `r/src/videosamplereader.rs` and `r/tests/videosamplereader.rs` — Rust sample reader and synthetic/compact-fixture tests.
+- `g/vid/bitreader.go`, `p/src/pygorvid/bitreader.py`, and `r/src/bitreader.rs` — bounded bit readers with byte alignment and UE/SE decoding.
+- `g/vid/bitreader_test.go`, `p/tests/test_bitreader.py`, and `r/tests/bitreader.rs` — shared boundary, truncation, alignment, and Exp-Golomb vectors.
+- `g/vid/cabac.go`, `p/src/pygorvid/cabac.py`, and `r/src/cabac.rs` — CABAC context initialization/adaptation, arithmetic bins, mapped macroblock/intra/CBP syntax, luma4x4 significance and coefficient levels, and frame-scan-to-raster placement; dequantization/inverse transforms remain separate.
+- `g/vid/cabac_test.go`, `p/tests/test_cabac.py`, and CABAC unit tests in `r/src/cabac.rs` — cross-language bin/range-class vectors, syntax context derivation, significance/last maps, coefficient-level prefix/escape/sign, scan-to-raster placement, residual node-context adaptation, truncation rollback, and invalid-state checks.
+- `g/vid/nal.go`, `p/src/pygorvid/nal.py`, and `r/src/nal.rs` — NAL header parsing and strict EBSP-to-RBSP conversion.
+- `g/vid/nal_test.go`, `p/tests/test_nal.py`, and `r/tests/nal.rs` — header extraction, valid escapes, malformed EBSP, and RBSP edge vectors.
+- `g/vid/sps.go`, `p/src/pygorvid/sps.py`, and `r/src/sps.rs` — SPS profile, chroma, bit depth, dimensions/cropping, frame-number, POC, reference, and frame/field parsing.
+- `g/vid/sps_test.go`, `p/tests/test_sps.py`, and `r/tests/sps.rs` — SPS syntax, POC modes, reference/frame flags, dimensions/crops, and compact-fixture checks.
+- `g/vid/pps.go`, `p/src/pygorvid/pps.py`, and `r/src/pps.rs` — PPS identifiers, weighting, QP, deblocking, and transform-extension parsing.
+- `g/vid/pps_test.go`, `p/tests/test_pps.py`, and `r/tests/pps.rs` — PPS tool vectors, bounds, unsupported-tool errors, and compact-fixture checks.
+- `g/vid/slice.go`, `p/src/pygorvid/slice.py`, and `r/src/slice.rs` — supported I/P/B slice syntax, primary-picture comparison, and consecutive picture grouping.
+- `g/vid/slice_test.go`, `p/tests/test_slice.py`, and `r/tests/slice.rs` — slice-header branches, identity-boundary vectors, picture grouping, malformed syntax, and compact-fixture scans.
 - `r/src/bin/vidprobe.rs` — replace `Command::new("ffmpeg")` extraction path.
 - `g/vid/basicinfo_test.go`, `p/tests/test_basicinfo.py`, and `r/tests/basicinfo.rs` — synthetic MP4 fixture patterns to extend for demux tests.
 - `README.md` — document the supported native codec subset and remove the runtime FFmpeg requirement after integration.
