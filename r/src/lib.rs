@@ -7,6 +7,7 @@ mod mp4boxes;
 mod mp4file;
 mod nal;
 mod pps;
+mod reconstruction;
 mod slice;
 mod sps;
 mod videosamplereader;
@@ -19,6 +20,18 @@ pub use mp4boxes::AvcConfiguration;
 pub use mp4file::Mp4File;
 pub use nal::{ebsp_to_rbsp, parse_nal_header, NalHeader};
 pub use pps::{parse_pps, PpsInfo};
+pub use reconstruction::{
+    inverse_scale_luma4x4, inverse_scale_luma8x8, inverse_transform_luma4x4,
+    inverse_transform_luma8x8, predict_luma_intra4x4_dc, predict_luma_intra4x4_diagonal_down_left,
+    predict_luma_intra4x4_diagonal_down_right, predict_luma_intra4x4_horizontal,
+    predict_luma_intra4x4_horizontal_down, predict_luma_intra4x4_horizontal_up,
+    predict_luma_intra4x4_vertical, predict_luma_intra4x4_vertical_left,
+    predict_luma_intra4x4_vertical_right, predict_luma_intra8x8_dc,
+    predict_luma_intra8x8_diagonal_down_left, predict_luma_intra8x8_diagonal_down_right,
+    predict_luma_intra8x8_horizontal, predict_luma_intra8x8_horizontal_down,
+    predict_luma_intra8x8_horizontal_up, predict_luma_intra8x8_vertical,
+    predict_luma_intra8x8_vertical_left, predict_luma_intra8x8_vertical_right,
+};
 pub use slice::{
     group_slices_into_pictures, parse_slice_header, same_primary_picture, PictureIdentity,
     SliceHeader,

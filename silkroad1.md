@@ -171,7 +171,7 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 23.6.15 [x] Verify all 256 `rangeLPS` table entries across four range classes and 64 context states in all three languages.
 
 **Decoder reconstruction (steps 25-36)**
-- 25.1 Define the frame, error, decoder-state, and `decode_frame(index)` contracts without implementing codecs.
+- 25.1 [x] Define the frame, error, decoder-state, and `decode_frame(index)` contracts without implementing codecs.
 - 25.2 Implement inverse scaling separately from each required 4x4 and 8x8 inverse transform.
 - 27.1 Implement intra 4x4 modes by mode family; test each edge-neighbor case.
 - 27.2 Add 8x8 luma modes, then 16x16 luma and chroma modes as separate tasks.
@@ -187,6 +187,82 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 34.1 Support requesting frame zero; then add dependency decoding and later-frame selection.
 - 35.1 Add one unsupported-feature check per excluded profile/tool and verify stable errors.
 - 36.1 Choose one reference implementation; port each passed algorithm increment separately to the other two languages.
+
+**Decoder reconstruction small tasks**
+- 25.2.1 [x] Implement and vector-test Go 4x4 luma inverse scaling with an explicit scaling list; leave scaling-list parsing/default selection and inverse transforms separate.
+- 25.2.2 [x] Port 4x4 luma inverse scaling and matching vectors to Python, preserving explicit scaling-list input.
+- 25.2.3 [x] Port 4x4 luma inverse scaling and matching vectors to Rust, preserving explicit scaling-list input.
+- 25.2.4 [x] Implement and vector-test the Go 4x4 luma inverse integer transform on dequantized coefficients, including final rounding.
+- 25.2.5 [x] Port the 4x4 luma inverse integer transform and matching vectors to Python.
+- 25.2.6 [x] Port the 4x4 luma inverse integer transform and matching vectors to Rust.
+- 25.2.7 [x] Implement and vector-test the Go 8x8 luma inverse integer transform on dequantized coefficients, including final rounding.
+- 25.2.8 [x] Port the 8x8 luma inverse integer transform and matching vectors to Python.
+- 25.2.9 [x] Port the 8x8 luma inverse integer transform and matching vectors to Rust.
+- 25.2.10 [x] Implement and vector-test Go 8x8 luma inverse scaling with an explicit scaling list; leave scaling-list parsing/default selection separate.
+- 25.2.11 [x] Port 8x8 luma inverse scaling and matching vectors to Python, preserving explicit scaling-list input.
+- 25.2.12 [x] Port 8x8 luma inverse scaling and matching vectors to Rust, preserving explicit scaling-list input.
+- 27.1.1 [x] Implement and vector-test Go luma Intra_4x4_Vertical prediction when all four top reference samples are available.
+- 27.1.2 [x] Port Intra_4x4_Vertical prediction and matching vectors to Python.
+- 27.1.3 [x] Port Intra_4x4_Vertical prediction and matching vectors to Rust.
+- 27.1.4 [x] Implement and vector-test Go luma Intra_4x4_Horizontal prediction when all four left reference samples are available.
+- 27.1.5 [x] Port Intra_4x4_Horizontal prediction and matching vectors to Python.
+- 27.1.6 [x] Port Intra_4x4_Horizontal prediction and matching vectors to Rust.
+- 27.1.7 [x] Implement and vector-test Go luma Intra_4x4_DC prediction for all top/left reference-availability cases.
+- 27.1.8 [x] Port Intra_4x4_DC prediction and matching vectors to Python.
+- 27.1.9 [x] Port Intra_4x4_DC prediction and matching vectors to Rust.
+- 27.1.10 [x] Implement and vector-test Go luma Intra_4x4_Diagonal_Down_Left interpolation from top/top-right references with final-sample extension.
+- 27.1.11 [x] Port Intra_4x4_Diagonal_Down_Left prediction and matching vector to Python.
+- 27.1.12 [x] Port Intra_4x4_Diagonal_Down_Left prediction and matching vector to Rust.
+- 27.1.13 [x] Implement and vector-test Go luma Intra_4x4_Diagonal_Down_Right using top, left, and top-left references.
+- 27.1.14 [x] Port Intra_4x4_Diagonal_Down_Right prediction and matching vector to Python.
+- 27.1.15 [x] Port Intra_4x4_Diagonal_Down_Right prediction and matching vector to Rust.
+- 27.1.16 [x] Implement and vector-test Go luma Intra_4x4_Vertical_Right using top, left, and top-left references.
+- 27.1.17 [x] Port Intra_4x4_Vertical_Right prediction and matching vector to Python.
+- 27.1.18 [x] Port Intra_4x4_Vertical_Right prediction and matching vector to Rust.
+- 27.1.19 [x] Implement and vector-test Go luma Intra_4x4_Horizontal_Down as the transpose of Vertical_Right with bottom-left reference extension.
+- 27.1.20 [x] Port Intra_4x4_Horizontal_Down prediction and matching vector to Python.
+- 27.1.21 [x] Port Intra_4x4_Horizontal_Down prediction and matching vector to Rust.
+- 27.1.22 [x] Implement and vector-test Go luma Intra_4x4_Vertical_Left using top-reference interpolation phases.
+- 27.1.23 [x] Port Intra_4x4_Vertical_Left prediction and matching vector to Python.
+- 27.1.24 [x] Port Intra_4x4_Vertical_Left prediction and matching vector to Rust.
+- 27.1.25 [x] Implement and vector-test Go luma Intra_4x4_Horizontal_Up as the transpose of Vertical_Left.
+- 27.1.26 [x] Port Intra_4x4_Horizontal_Up prediction and matching vector to Python.
+- 27.1.27 [x] Port Intra_4x4_Horizontal_Up prediction and matching vector to Rust.
+- 27.2.1 [x] Implement Go Intra_8x8_Vertical prediction from eight already-filtered top reference samples.
+- 27.2.2 [x] Port Intra_8x8_Vertical prediction and matching vector to Python.
+- 27.2.3 [x] Port Intra_8x8_Vertical prediction and matching vector to Rust.
+- 27.2.4 [x] Implement Go Intra_8x8_Horizontal prediction from eight already-filtered left reference samples.
+- 27.2.5 [x] Port Intra_8x8_Horizontal prediction and matching vector to Python.
+- 27.2.6 [x] Port Intra_8x8_Horizontal prediction and matching vector to Rust.
+- 27.2.7 [x] Implement and vector-test Go Intra_8x8_DC for both, one, or neither available filtered reference edges.
+- 27.2.8 [x] Port Intra_8x8_DC prediction and matching vectors to Python.
+- 27.2.9 [x] Port Intra_8x8_DC prediction and matching vectors to Rust.
+- 27.2.10 [x] Implement and vector-test Go Intra_8x8_Diagonal_Down_Left from 16 filtered top samples with right-edge extension.
+- 27.2.11 [x] Port Intra_8x8_Diagonal_Down_Left prediction and matching vector to Python.
+- 27.2.12 [x] Port Intra_8x8_Diagonal_Down_Left prediction and matching vector to Rust.
+- 27.2.13 [x] Implement and vector-test Go Intra_8x8_Diagonal_Down_Right from filtered top, left, and top-left references.
+- 27.2.14 [x] Port Intra_8x8_Diagonal_Down_Right prediction and matching vector to Python.
+- 27.2.15 [x] Port Intra_8x8_Diagonal_Down_Right prediction and matching vector to Rust.
+- 27.2.16 [x] Implement and vector-test Go Intra_8x8_Vertical_Right across top and left interpolation phases.
+- 27.2.17 [x] Port Intra_8x8_Vertical_Right prediction and matching vector to Python.
+- 27.2.18 [x] Port Intra_8x8_Vertical_Right prediction and matching vector to Rust.
+- 27.2.19 [x] Implement and vector-test Go Intra_8x8_Horizontal_Down as the transpose of Vertical_Right.
+- 27.2.20 [x] Port Intra_8x8_Horizontal_Down prediction and matching vector to Python.
+- 27.2.21 [x] Port Intra_8x8_Horizontal_Down prediction and matching vector to Rust.
+- 27.2.22 [x] Implement and vector-test Go Intra_8x8_Vertical_Left across even and odd top-reference phases.
+- 27.2.23 [x] Port Intra_8x8_Vertical_Left prediction and matching vector to Python.
+- 27.2.24 [x] Port Intra_8x8_Vertical_Left prediction and matching vector to Rust.
+- 27.2.25 [x] Implement and vector-test Go Intra_8x8_Horizontal_Up as the transpose of Vertical_Left.
+- 27.2.26 [x] Port Intra_8x8_Horizontal_Up prediction and matching vector to Python.
+- 27.2.27 [x] Port Intra_8x8_Horizontal_Up prediction and matching vector to Rust.
+
+**Decoder Contract (25.1)**
+- `Frame` is a display-order, SPS-cropped, planar 8-bit YUV 4:2:0 image. It carries width/height and tightly packed row-major Y, U, and V planes. Y contains `width * height` samples; each chroma plane contains `ceil(width/2) * ceil(height/2)` samples. No RGB or color-range conversion occurs here.
+- A returned frame owns its plane storage; subsequent decoder calls do not mutate previously returned frames.
+- `H264Decoder` owns its sample reader, parsed SPS/PPS sets, decoded-picture/reference state, and presentation-order queue. Dependencies may be decoded in coded order while callers request frames in presentation order.
+- `decode_frame(index)` takes a zero-based presentation-order index, decodes any required dependencies, and returns the requested complete frame. It never returns a partial frame.
+- Errors distinguish unavailable frame indices, malformed input, unsupported syntax/features, missing references, and I/O failures. Language mappings are Go `DecodeFrame(index uint64) (Frame, error)`, Python `decode_frame(index: int) -> Frame` raising `DecodeError`, and Rust `decode_frame(index: usize) -> Result<Frame, DecodeError>`.
+- Calls on one decoder are sequential; concurrent access is not promised. This contract defines API/data behavior only, not decoder algorithms or internal DPB/POC representation.
 
 **Image encoders (steps 37-47)**
 - 37.1 Freeze pixel-buffer dimensions, stride, color range, and ownership; test buffer layout.
