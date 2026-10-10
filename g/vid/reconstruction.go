@@ -17,6 +17,7 @@ var ErrLumaDeblockingPlaneLayout = errors.New("luma deblocking plane layout or e
 var ErrLumaDeblockingMacroblockAddress = errors.New("luma deblocking macroblock address or slice map is invalid")
 var ErrChromaIntraPredictionMode = errors.New("chroma intra prediction mode is outside [0,3]")
 var ErrChromaIntraPredictionReference = errors.New("required chroma intra prediction reference is unavailable")
+var ErrLumaIntra4x4Macroblock = errors.New("luma Intra_4x4 macroblock input is invalid")
 
 var lumaAlphaTable = [52]uint8{
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1787,6 +1788,96 @@ func inverseTransformLuma4x4(coefficients [16]int64) (residual [16]int64) {
 	return residual
 }
 
+func reconstructLuma4x4Residual(levels [16]int32, scalingList [16]uint8, qpy int) ([16]int64, error) {
+	coefficients, err := inverseScaleLuma4x4(levels, scalingList, qpy)
+	if err != nil {
+		return [16]int64{}, err
+	}
+	return inverseTransformLuma4x4(coefficients), nil
+}
+
+func reconstructIntra16x16LumaDC(levels [16]int32, scalingList [16]uint8, qpy int) ([16]int64, error) {
+	var transformed [16]int64
+	if qpy < 0 || qpy > 51 {
+		return transformed, ErrInverseScaleQPYOutOfRange
+	}
+	if scalingList[0] == 0 {
+		return transformed, ErrInverseScaleListZero
+	}
+	hadamard := func(values [4]int64) [4]int64 {
+		return [4]int64{
+			values[0] + values[1] + values[2] + values[3],
+			values[0] + values[1] - values[2] - values[3],
+			values[0] - values[1] - values[2] + values[3],
+			values[0] - values[1] + values[2] - values[3],
+		}
+	}
+	var horizontal [16]int64
+	for row := 0; row < 4; row++ {
+		var line [4]int64
+		for column := range line {
+			line[column] = int64(levels[row*4+column])
+		}
+		rowResult := hadamard(line)
+		copy(horizontal[row*4:row*4+4], rowResult[:])
+	}
+	for column := 0; column < 4; column++ {
+		line := [4]int64{horizontal[column], horizontal[4+column], horizontal[8+column], horizontal[12+column]}
+		columnResult := hadamard(line)
+		for row := 0; row < 4; row++ {
+			transformed[row*4+column] = columnResult[row]
+		}
+	}
+	factor := inverseScale4x4Factors[qpy%6][0] * int64(scalingList[0])
+	for index, value := range transformed {
+		if qpy >= 36 {
+			transformed[index] = value * factor << (qpy/6 - 6)
+		} else {
+			shift := 6 - qpy/6
+			rounding := int64(1) << (5 - qpy/6)
+			transformed[index] = (value*factor + rounding) >> shift
+		}
+	}
+	return transformed, nil
+}
+
+var ErrLumaIntra16x16Macroblock = errors.New("Intra_16x16 macroblock references or mode are invalid")
+
+func ReconstructLumaIntra16x16Macroblock(mode uint8, top, left *[16]uint8, topLeft uint8, topLeftAvailable bool, residual [256]int64) ([256]uint8, error) {
+	var prediction [256]uint8
+	switch mode {
+	case 0:
+		if top == nil {
+			return [256]uint8{}, ErrLumaIntra16x16Macroblock
+		}
+		prediction = predictLumaIntra16x16Vertical(*top)
+	case 1:
+		if left == nil {
+			return [256]uint8{}, ErrLumaIntra16x16Macroblock
+		}
+		prediction = predictLumaIntra16x16Horizontal(*left)
+	case 2:
+		prediction = predictLumaIntra16x16DC(top, left)
+	case 3:
+		if top == nil || left == nil || !topLeftAvailable {
+			return [256]uint8{}, ErrLumaIntra16x16Macroblock
+		}
+		prediction = predictLumaIntra16x16Plane(*top, *left, topLeft)
+	default:
+		return [256]uint8{}, ErrLumaIntra16x16Macroblock
+	}
+	for index, predicted := range prediction {
+		value := int64(predicted) + residual[index]
+		if value < 0 {
+			value = 0
+		} else if value > 255 {
+			value = 255
+		}
+		prediction[index] = uint8(value)
+	}
+	return prediction, nil
+}
+
 func inverseTransformChromaDC2x2(coefficients [4]int32) (transformed [4]int64) {
 	c00, c01 := int64(coefficients[0]), int64(coefficients[1])
 	c10, c11 := int64(coefficients[2]), int64(coefficients[3])
@@ -2398,4 +2489,195 @@ func predictLumaIntra4x4HorizontalUp(left [8]uint8) (prediction [16]uint8) {
 		}
 	}
 	return prediction
+}
+
+// LumaIntra4x4Block contains decoded block syntax and already-gathered neighbors.
+type LumaIntra4x4Block struct {
+	Mode             uint8
+	Top              [8]uint8
+	Left             [8]uint8
+	TopLeft          uint8
+	TopAvailable     bool
+	LeftAvailable    bool
+	TopLeftAvailable bool
+	Residual         [16]int64
+}
+
+// ReconstructLumaIntra4x4Macroblock reconstructs luma blocks in syntax scan order and places them in raster order.
+func ReconstructLumaIntra4x4Macroblock(blocks [16]LumaIntra4x4Block) ([256]uint8, error) {
+	var macroblock [256]uint8
+	blockX := [16]int{0, 4, 0, 4, 8, 12, 8, 12, 0, 4, 0, 4, 8, 12, 8, 12}
+	blockY := [16]int{0, 0, 4, 4, 0, 0, 4, 4, 8, 8, 12, 12, 8, 8, 12, 12}
+	for blockIndex, block := range blocks {
+		var prediction [16]uint8
+		switch block.Mode {
+		case 0:
+			if !block.TopAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4Vertical([4]uint8(block.Top[:4]))
+		case 1:
+			if !block.LeftAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4Horizontal([4]uint8(block.Left[:4]))
+		case 2:
+			var top, left *[4]uint8
+			if block.TopAvailable {
+				top = (*[4]uint8)(block.Top[:4])
+			}
+			if block.LeftAvailable {
+				left = (*[4]uint8)(block.Left[:4])
+			}
+			prediction = predictLumaIntra4x4DC(top, left)
+		case 3:
+			if !block.TopAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4DiagonalDownLeft(block.Top)
+		case 4:
+			if !block.TopAvailable || !block.LeftAvailable || !block.TopLeftAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4DiagonalDownRight(block.Top, [4]uint8(block.Left[:4]), block.TopLeft)
+		case 5:
+			if !block.TopAvailable || !block.LeftAvailable || !block.TopLeftAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4VerticalRight(block.Top, [4]uint8(block.Left[:4]), block.TopLeft)
+		case 6:
+			if !block.TopAvailable || !block.LeftAvailable || !block.TopLeftAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4HorizontalDown([4]uint8(block.Top[:4]), [4]uint8(block.Left[:4]), block.TopLeft)
+		case 7:
+			if !block.TopAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4VerticalLeft(block.Top)
+		case 8:
+			if !block.LeftAvailable {
+				return [256]uint8{}, ErrLumaIntra4x4Macroblock
+			}
+			prediction = predictLumaIntra4x4HorizontalUp(block.Left)
+		default:
+			return [256]uint8{}, ErrLumaIntra4x4Macroblock
+		}
+		originX, originY := blockX[blockIndex], blockY[blockIndex]
+		for row := 0; row < 4; row++ {
+			for column := 0; column < 4; column++ {
+				sampleIndex := row*4 + column
+				value := int64(prediction[sampleIndex])
+				residual := block.Residual[sampleIndex]
+				if residual > 255-value {
+					value = 255
+				} else if residual < -value {
+					value = 0
+				} else {
+					value += residual
+				}
+				macroblock[(originY+row)*16+originX+column] = uint8(value)
+			}
+		}
+	}
+	return macroblock, nil
+}
+
+type LumaIntra8x8Block struct {
+	Mode             uint8
+	Top              [16]uint8
+	Left             [16]uint8
+	TopLeft          uint8
+	TopAvailable     bool
+	LeftAvailable    bool
+	TopLeftAvailable bool
+	Residual         [64]int64
+}
+
+var ErrLumaIntra8x8Macroblock = errors.New("Intra_8x8 macroblock references or mode are invalid")
+
+// ReconstructLumaIntra8x8Macroblock reconstructs four 8x8 blocks in raster order.
+// Top and left references must already be filtered per clause 8.3.2.2.1.
+func ReconstructLumaIntra8x8Macroblock(blocks [4]LumaIntra8x8Block) ([256]uint8, error) {
+	var macroblock [256]uint8
+	for blockIndex, block := range blocks {
+		var prediction [64]uint8
+		top8 := [8]uint8(block.Top[:8])
+		left8 := [8]uint8(block.Left[:8])
+		switch block.Mode {
+		case 0:
+			if !block.TopAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8Vertical(top8)
+		case 1:
+			if !block.LeftAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8Horizontal(left8)
+		case 2:
+			var top, left *[8]uint8
+			if block.TopAvailable {
+				top = &top8
+			}
+			if block.LeftAvailable {
+				left = &left8
+			}
+			prediction = predictLumaIntra8x8DC(top, left)
+		case 3:
+			if !block.TopAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8DiagonalDownLeft(block.Top)
+		case 4:
+			if !block.TopAvailable || !block.LeftAvailable || !block.TopLeftAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8DiagonalDownRight(block.Top, left8, block.TopLeft)
+		case 5:
+			if !block.TopAvailable || !block.LeftAvailable || !block.TopLeftAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8VerticalRight(block.Top, left8, block.TopLeft)
+		case 6:
+			if !block.TopAvailable || !block.LeftAvailable || !block.TopLeftAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8HorizontalDown(top8, block.Left, block.TopLeft)
+		case 7:
+			if !block.TopAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8VerticalLeft(block.Top)
+		case 8:
+			if !block.LeftAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8HorizontalUp(block.Left)
+		case 9:
+			if !block.TopAvailable || !block.LeftAvailable {
+				return [256]uint8{}, ErrLumaIntra8x8Macroblock
+			}
+			prediction = predictLumaIntra8x8Plane(block.Top, block.Left)
+		default:
+			return [256]uint8{}, ErrLumaIntra8x8Macroblock
+		}
+		originX, originY := (blockIndex%2)*8, (blockIndex/2)*8
+		for row := 0; row < 8; row++ {
+			for column := 0; column < 8; column++ {
+				sampleIndex := row*8 + column
+				value := int64(prediction[sampleIndex])
+				residual := block.Residual[sampleIndex]
+				if residual > 255-value {
+					value = 255
+				} else if residual < -value {
+					value = 0
+				} else {
+					value += residual
+				}
+				macroblock[(originY+row)*16+originX+column] = uint8(value)
+			}
+		}
+	}
+	return macroblock, nil
 }

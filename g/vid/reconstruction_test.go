@@ -1724,6 +1724,50 @@ func TestYuv420FrameBuilderPlacesCroppedRasterMacroblocks(t *testing.T) {
 	}
 }
 
+func TestReconstructLumaIntra4x4MacroblockDispatchesAndPlacesScanBlocks(t *testing.T) {
+	var blocks [16]LumaIntra4x4Block
+	for index := range blocks {
+		blocks[index].Mode = uint8(index % 9)
+		blocks[index].TopAvailable = true
+		blocks[index].LeftAvailable = true
+		blocks[index].TopLeftAvailable = true
+		blocks[index].TopLeft = 90
+		for sample := 0; sample < 8; sample++ {
+			blocks[index].Top[sample] = uint8(10 + sample*10)
+			blocks[index].Left[sample] = uint8(90 + sample*10)
+		}
+	}
+	blocks[0].Residual[0] = -11
+	blocks[1].Residual[0] = 300
+
+	got, err := ReconstructLumaIntra4x4Macroblock(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0] != 0 || got[4] != 255 {
+		t.Fatalf("residual clipping at macroblock origin = %d/%d; want 0/255", got[0], got[4])
+	}
+	if got[4+3] != 90 || got[3*16+4] != 120 {
+		t.Fatalf("Intra_4x4_Horizontal block = %v; want row samples 90..120", got[4:8])
+	}
+	if got[4*16] != 65 {
+		t.Fatalf("scan block 2 raster origin = %d; want DC prediction 65", got[4*16])
+	}
+	if got[4*16+4] != predictLumaIntra4x4DiagonalDownLeft(blocks[3].Top)[0] {
+		t.Fatalf("scan block 3 was not placed at raster block (1,1): got %d", got[4*16+4])
+	}
+
+	blocks[7].TopAvailable = false
+	if _, err := ReconstructLumaIntra4x4Macroblock(blocks); !errors.Is(err, ErrLumaIntra4x4Macroblock) {
+		t.Fatalf("missing top reference error = %v; want Intra_4x4 macroblock error", err)
+	}
+	blocks[7].TopAvailable = true
+	blocks[9].Mode = 9
+	if _, err := ReconstructLumaIntra4x4Macroblock(blocks); !errors.Is(err, ErrLumaIntra4x4Macroblock) {
+		t.Fatalf("invalid prediction mode error = %v; want Intra_4x4 macroblock error", err)
+	}
+}
+
 func TestDeriveChromaQPCMatchesTable815(t *testing.T) {
 	qpcForQPI := [22]int{29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39}
 	for qpy := 0; qpy <= 51; qpy++ {
@@ -1880,6 +1924,21 @@ func TestInverseTransformLuma4x4DCAndImpulseVectors(t *testing.T) {
 	}
 	if got := inverseTransformLuma4x4(horizontalFrequency); got != wantHorizontalFrequency {
 		t.Fatalf("horizontal-frequency inverse transform = %v; want %v", got, wantHorizontalFrequency)
+	}
+}
+
+func TestReconstructLuma4x4ResidualScalesThenTransforms(t *testing.T) {
+	levels := [16]int32{64}
+	var scalingList [16]uint8
+	for index := range scalingList {
+		scalingList[index] = 16
+	}
+	got, err := reconstructLuma4x4Residual(levels, scalingList, 0)
+	if err != nil || got != [16]int64{10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10} {
+		t.Fatalf("reconstructed residual = %v, %v; want sixteen 10s", got, err)
+	}
+	if _, err := reconstructLuma4x4Residual(levels, scalingList, 52); !errors.Is(err, ErrInverseScaleQPYOutOfRange) {
+		t.Fatalf("invalid QPY error = %v; want QPY range error", err)
 	}
 }
 

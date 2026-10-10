@@ -1968,6 +1968,45 @@ def reconstruct_chroma4x4_residual(
     return inverse_transform_luma4x4(scaled)
 
 
+def reconstruct_intra16x16_luma_dc(
+    raster_levels: Sequence[int], scaling_list: Sequence[int], qpy: int
+) -> list[int]:
+    """Apply the Intra_16x16 4x4 DC Hadamard and clause 8.5.10 scaling."""
+    if not isinstance(qpy, int) or isinstance(qpy, bool) or not 0 <= qpy <= 51:
+        raise InverseScaleError("inverse scaling QPY is outside [0,51]")
+    if len(raster_levels) != 16 or any(
+        not isinstance(level, int) or isinstance(level, bool) or not -(1 << 31) <= level < (1 << 31)
+        for level in raster_levels
+    ):
+        raise InverseScaleError("I16x16 DC levels must contain 16 signed 32-bit values")
+    if len(scaling_list) != 16 or any(
+        not isinstance(weight, int) or isinstance(weight, bool) or not 1 <= weight <= 255
+        for weight in scaling_list
+    ):
+        raise InverseScaleError("inverse scaling list must contain 16 values in [1,255]")
+
+    def hadamard(values: Sequence[int]) -> list[int]:
+        a, b, c, d = values
+        return [a + b + c + d, a + b - c - d, a - b - c + d, a - b + c - d]
+
+    horizontal = [0] * 16
+    for row in range(4):
+        horizontal[row * 4 : row * 4 + 4] = hadamard(raster_levels[row * 4 : row * 4 + 4])
+    transformed = [0] * 16
+    for column in range(4):
+        column_values = hadamard([horizontal[row * 4 + column] for row in range(4)])
+        for row, value in enumerate(column_values):
+            transformed[row * 4 + column] = value
+
+    factor = _INVERSE_SCALE_4X4_FACTORS[qpy % 6][0] * scaling_list[0]
+    if qpy >= 36:
+        shift = qpy // 6 - 6
+        return [value * factor << shift for value in transformed]
+    shift = 6 - qpy // 6
+    rounding = 1 << (5 - qpy // 6)
+    return [(value * factor + rounding) >> shift for value in transformed]
+
+
 def assemble_chroma420_residual_macroblock(blocks: Sequence[Sequence[int]]) -> list[int]:
     """Place four raster-ordered 4x4 residual blocks into an 8x8 chroma macroblock."""
     if not isinstance(blocks, Sequence) or isinstance(blocks, (str, bytes)) or len(blocks) != 4:
@@ -2153,6 +2192,37 @@ def predict_luma_intra16x16_plane(
             value = (a + b * (column - 7) + c * (row - 7) + 16) >> 5
             prediction[row * 16 + column] = min(255, max(0, value))
     return prediction
+
+
+def reconstruct_luma_intra16x16_macroblock(
+    mode: int,
+    top: Optional[Sequence[int]],
+    left: Optional[Sequence[int]],
+    top_left: int,
+    top_left_available: bool,
+    residual: Sequence[int],
+) -> list[int]:
+    if len(residual) != 256 or any(
+        not isinstance(value, int) or isinstance(value, bool) for value in residual
+    ):
+        raise InverseTransformError("I16x16 residual must contain 256 integer samples")
+    if mode == 0:
+        if top is None:
+            raise IntraPredictionError("top references are required for I16x16 vertical mode")
+        prediction = predict_luma_intra16x16_vertical(top)
+    elif mode == 1:
+        if left is None:
+            raise IntraPredictionError("left references are required for I16x16 horizontal mode")
+        prediction = predict_luma_intra16x16_horizontal(left)
+    elif mode == 2:
+        prediction = predict_luma_intra16x16_dc(top, left)
+    elif mode == 3:
+        if top is None or left is None or not top_left_available:
+            raise IntraPredictionError("plane I16x16 mode requires top, left, and top-left references")
+        prediction = predict_luma_intra16x16_plane(top, left, top_left)
+    else:
+        raise IntraPredictionError("I16x16 prediction mode is outside [0,3]")
+    return [min(255, max(0, predicted + value)) for predicted, value in zip(prediction, residual)]
 
 
 def predict_luma_intra8x8_horizontal(left: Sequence[int]) -> list[int]:
@@ -2835,6 +2905,175 @@ def predict_luma_intra4x4_horizontal_up(left: Sequence[int]) -> list[int]:
     return prediction
 
 
+@dataclass(frozen=True)
+class LumaIntra4x4Block:
+    mode: int
+    residual: Sequence[int] = (0,) * 16
+    top: Optional[Sequence[int]] = None
+    left: Optional[Sequence[int]] = None
+    top_left: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class LumaIntra8x8Block:
+    mode: int
+    residual: Sequence[int] = (0,) * 64
+    top: Optional[Sequence[int]] = None
+    left: Optional[Sequence[int]] = None
+    top_left: Optional[int] = None
+
+
+def reconstruct_luma_intra4x4_macroblock(
+    blocks: Sequence[LumaIntra4x4Block],
+) -> list[int]:
+    """Reconstruct syntax-order 4x4 luma blocks into one raster-order macroblock."""
+    if len(blocks) != 16:
+        raise IntraPredictionError("Intra_4x4 macroblock requires sixteen decoded blocks")
+    block_x = (0, 4, 0, 4, 8, 12, 8, 12, 0, 4, 0, 4, 8, 12, 8, 12)
+    block_y = (0, 0, 4, 4, 0, 0, 4, 4, 8, 8, 12, 12, 8, 8, 12, 12)
+    macroblock = [0] * 256
+    for block_index, block in enumerate(blocks):
+        if not isinstance(block, LumaIntra4x4Block):
+            raise IntraPredictionError("Intra_4x4 macroblock contains an invalid block")
+        if (
+            not isinstance(block.mode, int)
+            or isinstance(block.mode, bool)
+            or not 0 <= block.mode <= 8
+            or len(block.residual) != 16
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in block.residual)
+        ):
+            raise IntraPredictionError("Intra_4x4 macroblock block syntax is invalid")
+        mode = block.mode
+        top = block.top
+        left = block.left
+        top_left = block.top_left
+        if mode == 0:
+            if top is None:
+                raise IntraPredictionError("top references are required for Intra_4x4_Vertical")
+            prediction = predict_luma_intra4x4_vertical(top[:4])
+        elif mode == 1:
+            if left is None:
+                raise IntraPredictionError("left references are required for Intra_4x4_Horizontal")
+            prediction = predict_luma_intra4x4_horizontal(left[:4])
+        elif mode == 2:
+            prediction = predict_luma_intra4x4_dc(
+                None if top is None else top[:4],
+                None if left is None else left[:4],
+            )
+        elif mode == 3:
+            if top is None:
+                raise IntraPredictionError("top references are required for Intra_4x4_DDL")
+            prediction = predict_luma_intra4x4_diagonal_down_left(top[:8])
+        elif mode == 4:
+            if top is None or left is None or top_left is None:
+                raise IntraPredictionError("top, left, and top-left references are required for Intra_4x4_DDR")
+            prediction = predict_luma_intra4x4_diagonal_down_right(top[:8], left[:4], top_left)
+        elif mode == 5:
+            if top is None or left is None or top_left is None:
+                raise IntraPredictionError("top, left, and top-left references are required for Intra_4x4_VR")
+            prediction = predict_luma_intra4x4_vertical_right(top[:8], left[:4], top_left)
+        elif mode == 6:
+            if top is None or left is None or top_left is None:
+                raise IntraPredictionError("top, left, and top-left references are required for Intra_4x4_HD")
+            prediction = predict_luma_intra4x4_horizontal_down(top[:4], left[:4], top_left)
+        elif mode == 7:
+            if top is None:
+                raise IntraPredictionError("top references are required for Intra_4x4_VL")
+            prediction = predict_luma_intra4x4_vertical_left(top[:8])
+        else:
+            if left is None:
+                raise IntraPredictionError("left references are required for Intra_4x4_HU")
+            prediction = predict_luma_intra4x4_horizontal_up(left[:8])
+
+        origin_x, origin_y = block_x[block_index], block_y[block_index]
+        for row in range(4):
+            for column in range(4):
+                sample_index = row * 4 + column
+                predicted = prediction[sample_index]
+                residual = block.residual[sample_index]
+                if residual < -predicted:
+                    sample = 0
+                elif residual > 255 - predicted:
+                    sample = 255
+                else:
+                    sample = predicted + residual
+                macroblock[(origin_y + row) * 16 + origin_x + column] = sample
+    return macroblock
+
+
+def reconstruct_luma_intra8x8_macroblock(
+    blocks: Sequence[LumaIntra8x8Block],
+) -> list[int]:
+    """Reconstruct four syntax-order 8x8 luma blocks into one raster macroblock.
+
+    Top and left references are expected to be gathered and filtered already.
+    """
+    if len(blocks) != 4:
+        raise IntraPredictionError("Intra_8x8 macroblock requires four decoded blocks")
+    macroblock = [0] * 256
+    for block_index, block in enumerate(blocks):
+        if not isinstance(block, LumaIntra8x8Block):
+            raise IntraPredictionError("Intra_8x8 macroblock contains an invalid block")
+        if (
+            not isinstance(block.mode, int)
+            or isinstance(block.mode, bool)
+            or not 0 <= block.mode <= 9
+            or len(block.residual) != 64
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in block.residual)
+        ):
+            raise IntraPredictionError("Intra_8x8 macroblock block syntax is invalid")
+        top, left, top_left = block.top, block.left, block.top_left
+        mode = block.mode
+        if mode == 0:
+            if top is None:
+                raise IntraPredictionError("top references are required for Intra_8x8_Vertical")
+            prediction = predict_luma_intra8x8_vertical(top[:8])
+        elif mode == 1:
+            if left is None:
+                raise IntraPredictionError("left references are required for Intra_8x8_Horizontal")
+            prediction = predict_luma_intra8x8_horizontal(left[:8])
+        elif mode == 2:
+            prediction = predict_luma_intra8x8_dc(
+                None if top is None else top[:8],
+                None if left is None else left[:8],
+            )
+        elif mode == 3:
+            if top is None:
+                raise IntraPredictionError("top references are required for Intra_8x8_DDL")
+            prediction = predict_luma_intra8x8_diagonal_down_left(top[:16])
+        elif mode == 4:
+            if top is None or left is None or top_left is None:
+                raise IntraPredictionError("top, left, and top-left references are required for Intra_8x8_DDR")
+            prediction = predict_luma_intra8x8_diagonal_down_right(top[:16], left[:8], top_left)
+        elif mode == 5:
+            if top is None or left is None or top_left is None:
+                raise IntraPredictionError("top, left, and top-left references are required for Intra_8x8_VR")
+            prediction = predict_luma_intra8x8_vertical_right(top[:16], left[:8], top_left)
+        elif mode == 6:
+            if top is None or left is None or top_left is None:
+                raise IntraPredictionError("top, left, and top-left references are required for Intra_8x8_HD")
+            prediction = predict_luma_intra8x8_horizontal_down(top[:8], left[:16], top_left)
+        elif mode == 7:
+            if top is None:
+                raise IntraPredictionError("top references are required for Intra_8x8_VL")
+            prediction = predict_luma_intra8x8_vertical_left(top[:16])
+        elif mode == 8:
+            if left is None:
+                raise IntraPredictionError("left references are required for Intra_8x8_HU")
+            prediction = predict_luma_intra8x8_horizontal_up(left[:16])
+        else:
+            if top is None or left is None:
+                raise IntraPredictionError("top and left references are required for Intra_8x8_Plane")
+            prediction = predict_luma_intra8x8_plane(top[:16], left[:16])
+        origin_x, origin_y = (block_index % 2) * 8, (block_index // 2) * 8
+        for row in range(8):
+            for column in range(8):
+                index = row * 8 + column
+                sample = prediction[index] + block.residual[index]
+                macroblock[(origin_y + row) * 16 + origin_x + column] = min(255, max(0, sample))
+    return macroblock
+
+
 def inverse_transform_luma4x4(coefficients: Sequence[int]) -> list[int]:
     """Transform dequantized raster-order coefficients into residual samples."""
     if len(coefficients) != 16 or any(
@@ -2857,6 +3096,13 @@ def inverse_transform_luma4x4(coefficients: Sequence[int]) -> list[int]:
         for row, value in enumerate(transformed):
             residual[row * 4 + column] = (value + 32) >> 6
     return residual
+
+
+def reconstruct_luma4x4_residual(
+    levels: Sequence[int], scaling_list: Sequence[int], qpy: int
+) -> list[int]:
+    """Apply luma 4x4 inverse scaling and inverse transform to raster-order levels."""
+    return inverse_transform_luma4x4(inverse_scale_luma4x4(levels, scaling_list, qpy))
 
 
 def inverse_transform_chroma_dc2x2(coefficients: Sequence[int]) -> list[int]:

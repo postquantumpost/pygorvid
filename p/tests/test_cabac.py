@@ -5,14 +5,37 @@ from pygorvid import (
     CABACArithmeticDecoder,
     CABACContextModel,
     CABACError,
+    CABACChroma420References,
+    CABACChroma420EdgeState,
+    CABACIIntraMacroblockInput,
+    CABACIntra4x4EdgeState,
+    CABACIntra16x16EdgeState,
+    CABACInterNeighbor,
     CABACTerminatedError,
+    derive_cabac_mvd_context_increment,
+    derive_cabac_reference_index_context_increment,
+    derive_coded_block_flag_cond_term,
     initialize_i_intra_chroma_pred_mode_contexts,
     initialize_i_intra4x4_pred_mode_contexts,
     initialize_i_intra_mb_type_contexts,
     initialize_i_transform_size_8x8_contexts,
+    initialize_inter_prediction_contexts,
+    initialize_i_chroma_coded_block_pattern_contexts,
+    initialize_i_luma_coded_block_pattern_contexts,
+    initialize_i_luma4x4_coded_block_flag_contexts,
+    initialize_i_mb_qp_delta_contexts,
+    initialize_p_inter_mb_type_contexts,
+    initialize_slice_contexts,
+    reconstruct_intra16x16_luma_dc,
+    LumaIntra4x4Block,
+    LumaIntra8x8Block,
+    reconstruct_intra16x16_luma_dc,
     place_chroma4x4_scan_levels,
     place_luma4x4_scan_levels,
+    residual_context_bases,
+    Yuv420FrameBuilder,
 )
+from pygorvid.cabac import _RANGE_LPS, derive_intra4x4_predicted_mode
 
 
 def test_initializes_range_and_nine_bit_offset():
@@ -81,6 +104,7 @@ def test_context_initialization_matches_signed_shift_boundary_vectors():
         model = CABACContextModel(m, n, slice_qpy)
         assert (model.state_index, model.mps) == expected
 
+    initialize_p_inter_mb_type_contexts,
 
 def test_i_intra_mb_type_contexts_match_table_912():
     contexts = initialize_i_intra_mb_type_contexts(26)
@@ -91,6 +115,314 @@ def test_i_intra_mb_type_contexts_match_table_912():
     for slice_qpy in (-1, 52):
         with pytest.raises(CABACError, match="initialization value"):
             initialize_i_intra_mb_type_contexts(slice_qpy)
+
+
+def test_p_inter_mb_type_contexts_match_table_913():
+    expected = (
+        ((54, False), (14, False), (54, True), (6, False)),
+        ((54, False), (22, False), (54, True), (1, True)),
+        ((12, False), (1, False), (35, True), (47, False)),
+    )
+    for cabac_init_idc, expected_contexts in enumerate(expected):
+        contexts = initialize_p_inter_mb_type_contexts(cabac_init_idc, 0)
+        assert [(model.state_index, model.mps) for model in contexts] == list(expected_contexts)
+    for cabac_init_idc, slice_qpy in ((-1, 26), (3, 26), (0, -1), (0, 52)):
+        with pytest.raises(CABACError, match="outside"):
+            initialize_p_inter_mb_type_contexts(cabac_init_idc, slice_qpy)
+
+
+def test_inter_prediction_contexts_match_tables_915_and_916():
+    mvd_x, mvd_y, ref_idx = initialize_inter_prediction_contexts(0, 0)
+    assert [(model.state_index, model.mps) for model in mvd_x] == [
+        (5, True), (17, True), (32, True), (8, False), (3, True), (22, True), (24, True)
+    ]
+    assert [(model.state_index, model.mps) for model in mvd_y] == [
+        (5, False), (12, True), (30, True), (9, False), (5, True), (17, True), (24, True)
+    ]
+    assert [(model.state_index, model.mps) for model in ref_idx] == [
+        (3, True), (10, True), (10, True), (16, True), (8, True), (5, False)
+    ]
+    for cabac_init_idc, slice_qpy in ((-1, 26), (3, 26), (0, -1), (0, 52)):
+        with pytest.raises(CABACError, match="outside"):
+            initialize_inter_prediction_contexts(cabac_init_idc, slice_qpy)
+
+
+def test_inter_reference_index_context_increment():
+    neighbor = CABACInterNeighbor(available=True, prediction_mode_matches=True, reference_index=1)
+    assert derive_cabac_reference_index_context_increment(neighbor, CABACInterNeighbor()) == 1
+    assert derive_cabac_reference_index_context_increment(CABACInterNeighbor(), neighbor) == 2
+    assert derive_cabac_reference_index_context_increment(neighbor, neighbor) == 3
+    for blocked in (
+        CABACInterNeighbor(),
+        CABACInterNeighbor(available=True, skip=True, prediction_mode_matches=True, reference_index=1),
+        CABACInterNeighbor(available=True, intra=True, prediction_mode_matches=True, reference_index=1),
+        CABACInterNeighbor(available=True, prediction_mode_matches=False, reference_index=1),
+        CABACInterNeighbor(available=True, prediction_mode_matches=True, reference_index=0),
+    ):
+        assert derive_cabac_reference_index_context_increment(blocked, CABACInterNeighbor()) == 0
+    field_neighbor = CABACInterNeighbor(
+        available=True, prediction_mode_matches=True, reference_index=1, is_field=True
+    )
+    assert derive_cabac_reference_index_context_increment(
+        field_neighbor, CABACInterNeighbor(), mbaff_frame=True
+    ) == 0
+    field_neighbor = CABACInterNeighbor(
+        available=True, prediction_mode_matches=True, reference_index=2, is_field=True
+    )
+    assert derive_cabac_reference_index_context_increment(
+        field_neighbor, CABACInterNeighbor(), mbaff_frame=True
+    ) == 1
+
+    decoder = CABACArithmeticDecoder(bytes(8))
+    contexts = [_model(index, False) for index in range(6)]
+    decoder.decode_reference_index_for_partition(1, neighbor, neighbor, contexts)
+    assert [model.state_index for model in contexts] == [0, 1, 2, 4, 4, 5]
+
+
+def test_inter_mvd_context_increment():
+    def neighbor(x=0, y=0, **kwargs):
+        return CABACInterNeighbor(
+            available=True,
+            prediction_mode_matches=True,
+            motion_vector_difference=(x, y),
+            **kwargs,
+        )
+
+    vectors = (
+        (neighbor(1, 1), neighbor(1, 1), 0, False, False, 0),
+        (neighbor(2, 2), neighbor(1, 1), 0, False, False, 1),
+        (neighbor(20, 20), neighbor(13, 13), 0, False, False, 2),
+        (neighbor(33, 33), CABACInterNeighbor(), 0, False, False, 2),
+        (CABACInterNeighbor(motion_vector_difference=(90, 90)), CABACInterNeighbor(), 0, False, False, 0),
+        (CABACInterNeighbor(available=True, skip=True, motion_vector_difference=(90, 90)), CABACInterNeighbor(), 0, False, False, 0),
+        (CABACInterNeighbor(available=True, intra=True, motion_vector_difference=(90, 90)), CABACInterNeighbor(), 0, False, False, 0),
+        (CABACInterNeighbor(available=True, motion_vector_difference=(90, 90)), CABACInterNeighbor(), 0, False, False, 0),
+        (neighbor(0, 2, is_field=True), CABACInterNeighbor(), 1, True, False, 1),
+        (neighbor(0, 7), CABACInterNeighbor(), 1, True, True, 1),
+        (neighbor(2, 0, is_field=True), CABACInterNeighbor(), 0, True, False, 0),
+        (CABACInterNeighbor(available=True, prediction_mode_matches=True, motion_vector_difference=(-(1 << 31), 0)), CABACInterNeighbor(), 0, False, False, 2),
+    )
+    for left, top, component, mbaff, current_field, expected in vectors:
+        assert derive_cabac_mvd_context_increment(
+            left, top, component, mbaff, current_field
+        ) == expected
+    with pytest.raises(CABACError, match="component index"):
+        derive_cabac_mvd_context_increment(CABACInterNeighbor(), CABACInterNeighbor(), 2)
+
+    decoder = CABACArithmeticDecoder(bytes(8))
+    contexts = [_model(index, False) for index in range(7)]
+    decoder.decode_motion_vector_difference_for_partition(
+        0, neighbor(2, 0), neighbor(1, 0), contexts
+    )
+    assert [model.state_index for model in contexts] == [0, 2, 2, 3, 4, 5, 6]
+
+
+def _states(models):
+    return [(model.state_index, model.mps) for model in models]
+
+
+def test_slice_contexts_match_syntax_initializers():
+    contexts = _states(initialize_slice_contexts(7, 3, 26))
+    assert len(contexts) == 460
+    for first, models in (
+        (3, initialize_i_intra_mb_type_contexts(26)),
+        (60, initialize_i_mb_qp_delta_contexts(26)),
+        (64, initialize_i_intra_chroma_pred_mode_contexts(26)),
+        (68, initialize_i_intra4x4_pred_mode_contexts(26)),
+        (73, initialize_i_luma_coded_block_pattern_contexts(26)),
+        (77, initialize_i_chroma_coded_block_pattern_contexts(26)),
+        (93, initialize_i_luma4x4_coded_block_flag_contexts(26)),
+        (399, initialize_i_transform_size_8x8_contexts(26)),
+    ):
+        assert contexts[first:first + len(models)] == _states(models)
+    for cabac_init_idc in range(3):
+        contexts = _states(initialize_slice_contexts(5, cabac_init_idc, 30))
+        mvd_x, mvd_y, ref_idx = initialize_inter_prediction_contexts(cabac_init_idc, 30)
+        assert contexts[14:18] == _states(initialize_p_inter_mb_type_contexts(cabac_init_idc, 30))
+        assert contexts[40:47] == _states(mvd_x)
+        assert contexts[47:54] == _states(mvd_y)
+        assert contexts[54:60] == _states(ref_idx)
+
+
+def test_slice_contexts_use_standard_columns():
+    for slice_type, cabac_init_idc, ctx_idx, expected in (
+        (2, 0, 85, (31, True)),
+        (2, 0, 227, (2, True)),
+        (2, 0, 402, (28, True)),
+        (0, 0, 105, (17, True)),
+        (1, 1, 30, (10, False)),
+        (6, 2, 459, (32, True)),
+    ):
+        model = initialize_slice_contexts(slice_type, cabac_init_idc, 26)[ctx_idx]
+        assert (model.state_index, model.mps) == expected
+    with pytest.raises(CABACError, match="slice type"):
+        initialize_slice_contexts(10, 0, 26)
+    for slice_type in (0, 1):
+        with pytest.raises(CABACError, match="init idc"):
+            initialize_slice_contexts(slice_type, 3, 26)
+    with pytest.raises(CABACError, match="initialization value"):
+        initialize_slice_contexts(2, 0, 52)
+
+
+def test_residual_context_bases_follow_tables_934_and_940():
+    assert [residual_context_bases(category) for category in range(6)] == [
+        (85, 105, 166, 227), (89, 120, 181, 237), (93, 134, 195, 247),
+        (97, 149, 210, 257), (101, 152, 213, 266), (None, 402, 417, 426),
+    ]
+    with pytest.raises(CABACError, match="ctxBlockCat"):
+        residual_context_bases(6)
+
+
+def _model(state_index, mps):
+    model = CABACContextModel.__new__(CABACContextModel)
+    model._state_index = state_index
+    model._value_mps = mps
+    return model
+
+
+def _forced_residual_contexts(*mps_true):
+    return [_model(61, index in mps_true) for index in range(460)]
+
+
+def test_coded_block_flag_cond_term():
+    for arguments, expected in (
+        ((False, True, False, False, False), True),
+        ((False, False, False, False, False), False),
+        ((True, False, True, False, False), True),
+        ((True, True, False, False, True), False),
+        ((True, False, False, True, False), False),
+        ((True, False, False, True, True), True),
+    ):
+        assert derive_coded_block_flag_cond_term(*arguments) is expected
+
+
+def test_residual_block_chroma_dc_forced_bins():
+    # With a zero offset every regular bin decodes as its MPS and every bypass bin as 0.
+    contexts = _forced_residual_contexts(98, 149, 151, 212, 259)
+    decoder = CABACArithmeticDecoder(bytes(16))
+    levels, coded = decoder.decode_residual_block(3, True, False, contexts)
+    assert coded and levels == [2, 0, 1] + [0] * 13
+    used = {98, 149, 210, 150, 151, 212, 258, 259, 262}
+    assert [model.state_index for model in contexts] == [
+        62 if index in used else 61 for index in range(460)
+    ]
+
+    contexts = _forced_residual_contexts(97, 149, 150, 151, *range(257, 267))
+    decoder = CABACArithmeticDecoder(bytes(64))
+    levels, coded = decoder.decode_residual_block(3, False, False, contexts)
+    assert coded and levels[:4] == [15, 15, 15, 15]
+    # Category 3 caps the greater-than-one context at ctxIdx 265, leaving 266 to category 4.
+    assert [contexts[index].state_index for index in (257, 265, 266)] == [62, 62, 61]
+
+
+def test_residual_block_uncoded_and_category_range():
+    contexts = _forced_residual_contexts()
+    decoder = CABACArithmeticDecoder(bytes(4))
+    assert decoder.decode_residual_block(0, True, True, contexts) == ([0] * 16, False)
+    assert contexts[88].state_index == 62
+    with pytest.raises(CABACError, match="ctxBlockCat"):
+        decoder.decode_residual_block(5, False, False, contexts)
+    with pytest.raises(CABACError, match="460 slice contexts"):
+        decoder.decode_residual_block(0, False, False, contexts[:459])
+
+
+def test_residual_block_truncation_is_transactional():
+    contexts = _forced_residual_contexts(85, *range(105, 120), *range(227, 237))
+    original = _states(contexts)
+    decoder = CABACArithmeticDecoder(b"\x00\x00")
+    with pytest.raises(CABACError, match="truncated"):
+        decoder.decode_residual_block(0, False, False, contexts)
+    assert _states(contexts) == original
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == (510, 0, 9)
+
+
+def test_residual_block_matches_bank_decoders():
+    slice_contexts = initialize_slice_contexts(2, 0, 28)
+    patterns = (
+        bytes((0x5A, 0x3C, 0x91, 0x07, 0xE2, 0x48, 0xB3, 0x6F, 0x12, 0xC5, 0x7E, 0x29, 0x84, 0xD1, 0x3B, 0xF6, 0x55, 0xAA, 0x0F, 0xF0)),
+        bytes((0x00, 0x7F, 0x10, 0x20, 0x40, 0x80, 0xFF, 0x01, 0x33, 0xCC, 0x99, 0x66, 0x11, 0xEE, 0x22, 0xDD, 0x44, 0xBB, 0x88, 0x77)),
+        bytes((0x1F, 0xE0, 0x3E, 0xC1, 0x7C, 0x83, 0xF8, 0x07, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0x9A, 0xBC, 0xDE, 0xF0)),
+    )
+    for category in (0, 1, 2, 4):
+        bases = residual_context_bases(category)
+        coded_cases = 0
+        for data in patterns:
+            for cond_terms in range(4):
+                cond_a, cond_b = bool(cond_terms & 1), bool(cond_terms & 2)
+                contexts = [_model(model.state_index, model.mps) for model in slice_contexts]
+                generic = CABACArithmeticDecoder(data)
+                banks = [
+                    [_model(model.state_index, model.mps) for model in slice_contexts[base:base + length]]
+                    for base, length in zip(bases, (4, 15, 15, 10))
+                ]
+                bank = CABACArithmeticDecoder(data)
+                generic_error = bank_error = None
+                try:
+                    levels, coded = generic.decode_residual_block(category, cond_a, cond_b, contexts)
+                except CABACError as error:
+                    generic_error = error
+                try:
+                    if category in (0, 2):
+                        want_raster, want_coded = bank.decode_luma4x4_residual_block_with_flag(
+                            int(cond_a), int(cond_b), *banks
+                        )
+                    else:
+                        want_raster, want_coded = bank.decode_chroma4x4_ac_residual_block(
+                            cond_a, cond_b, *banks
+                        )
+                except CABACError as error:
+                    bank_error = error
+                assert (generic_error is None) == (bank_error is None)
+                if generic_error is not None:
+                    continue
+                coded_cases += coded
+                got_raster = (
+                    place_luma4x4_scan_levels(levels)
+                    if category in (0, 2)
+                    else place_chroma4x4_scan_levels(0, levels[:15])
+                )
+                assert (got_raster, coded) == (want_raster, want_coded)
+                assert (generic.code_range, generic.code_offset, generic._bits._bit_offset) == (
+                    bank.code_range, bank.code_offset, bank._bits._bit_offset
+                )
+                for base, models in zip(bases, banks):
+                    assert _states(contexts[base:base + len(models)]) == _states(models)
+        assert coded_cases > 0
+
+
+def test_luma8x8_residual_block_follows_table_943():
+    # Only significance ctxIdxInc 7 (ctxIdx 409) has MPS 1, so significant positions reveal Table 9-43.
+    positions = (23, 24, 25, 31, 32, 39, 63)
+    contexts = _forced_residual_contexts(409)
+    levels = CABACArithmeticDecoder(bytes(64)).decode_luma8x8_residual_block(contexts)
+    assert levels == [1 if index in positions else 0 for index in range(64)]
+    used = {*range(402, 417), 419, 420, 427, 428, 429, 430}
+    assert [model.state_index for model in contexts] == [
+        62 if index in used else 61 for index in range(460)
+    ]
+
+    contexts = _forced_residual_contexts(409, *range(426, 436))
+    levels = CABACArithmeticDecoder(bytes(256)).decode_luma8x8_residual_block(contexts)
+    assert levels == [15 if index in positions else 0 for index in range(64)]
+    assert [contexts[index].state_index for index in range(426, 436)] == [
+        61 if index in (428, 429, 430) else 62 for index in range(426, 436)
+    ]
+
+
+def test_luma8x8_residual_block_last_flag_and_truncation():
+    contexts = _forced_residual_contexts(402, 417)
+    levels = CABACArithmeticDecoder(bytes(8)).decode_luma8x8_residual_block(contexts)
+    assert levels == [1] + [0] * 63
+
+    contexts = _forced_residual_contexts(*range(402, 417), *range(426, 436))
+    original = _states(contexts)
+    decoder = CABACArithmeticDecoder(b"\x00\x00")
+    with pytest.raises(CABACError, match="truncated"):
+        decoder.decode_luma8x8_residual_block(contexts)
+    assert _states(contexts) == original
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == (510, 0, 9)
+    with pytest.raises(CABACError, match="460 slice contexts"):
+        decoder.decode_luma8x8_residual_block(contexts[:459])
 
 
 def test_i_intra_prediction_contexts_match_tables_916_and_917():
@@ -477,6 +809,29 @@ def test_mb_skip_flag_rejects_intra_slice_types():
             decoder.decode_mb_skip_flag(slice_type, contexts, False, False, False, False)
 
 
+@pytest.mark.parametrize(
+    ("maximum", "increment", "mps", "expected"),
+    (
+        (0, 0, [False] * 6, 0),
+        (3, 2, [False] * 6, 0),
+        (3, 1, [False, True, False, False, False, False], 1),
+        (3, 0, [True, False, False, False, True, False], 2),
+        (3, 3, [False, False, False, True, True, True], 3),
+    ),
+)
+def test_reference_index_decodes_truncated_unary(maximum, increment, mps, expected):
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(b"")
+    decoder._code_range = 510
+    decoder._code_offset = 0
+    decoder._terminated = False
+    contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(6)]
+    for model, value_mps in zip(contexts, mps):
+        model._state_index = 63
+        model._value_mps = value_mps
+    assert decoder.decode_reference_index(maximum, increment, contexts) == expected
+
+
 def test_i_intra_mb_type_decodes_intra_nxn_i16x16_and_pcm():
     def make_contexts():
         return [CABACContextModel(0, 63, 26) for _ in range(8)]
@@ -506,6 +861,706 @@ def test_i_intra_mb_type_decodes_intra_nxn_i16x16_and_pcm():
     contexts = make_contexts()
     assert pcm.decode_i_intra_mb_type(2, contexts, False, False, False, False) == 25
     assert pcm._terminated
+
+
+def test_intra_nxn_4x4_luma_modes_and_assembly():
+    decoder = CABACArithmeticDecoder(bytes(64))
+    contexts = [_model(63, False) for _ in range(460)]
+    blocks = [
+        LumaIntra4x4Block(2, top=(0,) * 8, left=(0,) * 8, top_left=0)
+        for _ in range(16)
+    ]
+    result = decoder.decode_intra_nxn_4x4_luma_macroblock(
+        contexts,
+        0,
+        0,
+        (16,) * 16,
+        (2,) * 4,
+        (2,) * 4,
+        True,
+        True,
+        CABACIntra4x4EdgeState(),
+        CABACIntra4x4EdgeState(),
+        blocks,
+    )
+    assert result.modes[0] == 0
+    assert result.coded_block_flags == (False,) * 16
+    assert result.samples == (0,) * 256
+
+
+def test_intra_nxn_4x4_luma_residual_and_neighbor_cbf():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[88]._value_mps = True
+    contexts[105]._value_mps = True
+    contexts[166]._value_mps = True
+    blocks = [
+        LumaIntra4x4Block(2, top=(100,) * 8, left=(100,) * 8, top_left=100)
+        for _ in range(16)
+    ]
+    result = decoder.decode_intra_nxn_4x4_luma_macroblock(
+        contexts,
+        1,
+        51,
+        (16,) * 16,
+        (2,) * 4,
+        (2,) * 4,
+        True,
+        True,
+        CABACIntra4x4EdgeState(),
+        CABACIntra4x4EdgeState(),
+        blocks,
+    )
+    assert result.coded_block_flags[0]
+    assert any(result.residuals[0])
+
+
+def test_intra_nxn_4x4_luma_failure_rolls_back():
+    decoder = CABACArithmeticDecoder(bytes(64))
+    contexts = [_model(63, False) for _ in range(460)]
+    original_contexts = _states(contexts)
+    original_state = (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset)
+    blocks = [LumaIntra4x4Block(2) for _ in range(16)]
+    with pytest.raises(ValueError, match="top references"):
+        decoder.decode_intra_nxn_4x4_luma_macroblock(
+            contexts,
+            0,
+            0,
+            (16,) * 16,
+            (2,) * 4,
+            (2,) * 4,
+            False,
+            False,
+            CABACIntra4x4EdgeState(),
+            CABACIntra4x4EdgeState(),
+            blocks,
+        )
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == original_state
+    assert _states(contexts) == original_contexts
+
+
+def test_intra_nxn_8x8_luma_modes_and_transform_flag():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[399]._value_mps = True
+    blocks = [
+        LumaIntra8x8Block(
+            2,
+            top=(0,) * 16,
+            left=(0,) * 16,
+            top_left=0,
+        )
+        for _ in range(4)
+    ]
+    result = decoder.decode_intra_nxn_8x8_luma_macroblock(
+        contexts, True, False, False, 0, 0, (16,) * 64,
+        (2, 2), (2, 2), True, True, blocks,
+    )
+    assert result.transform_size_8x8
+    assert result.modes[0] == 0
+    assert result.samples == (0,) * 256
+    assert result.residuals == ((0,) * 64,) * 4
+
+
+def test_intra_chroma420_macroblock_decodes_dc_and_ac_cbp_for_both_components():
+    for coded_block_pattern_chroma in (1, 2):
+        decoder = CABACArithmeticDecoder(bytes(128))
+        contexts = [_model(63, False) for _ in range(460)]
+        result = decoder.decode_intra_chroma420_macroblock(
+            contexts,
+            0,
+            False,
+            0,
+            False,
+            False,
+            False,
+            coded_block_pattern_chroma,
+            26,
+            (0, 0),
+            ((16,) * 16, (16,) * 16),
+            (CABACChroma420References(), CABACChroma420References()),
+            (CABACChroma420EdgeState(), CABACChroma420EdgeState()),
+            (CABACChroma420EdgeState(), CABACChroma420EdgeState()),
+        )
+        assert result.prediction_mode == 0
+        assert result.qpc == (26, 26)
+        assert result.cb == result.cr == (128,) * 64
+        assert result.cb_residual == result.cr_residual == (0,) * 64
+
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = _forced_residual_contexts(100, 104)
+    result = decoder.decode_intra_chroma420_macroblock(
+        contexts,
+        0,
+        False,
+        0,
+        False,
+        False,
+        False,
+        2,
+        26,
+        (0, 0),
+        ((16,) * 16, (16,) * 16),
+        (CABACChroma420References(), CABACChroma420References()),
+        (CABACChroma420EdgeState(), CABACChroma420EdgeState()),
+        (CABACChroma420EdgeState(), CABACChroma420EdgeState()),
+    )
+    assert any(result.cb_residual)
+    assert any(result.cr_residual)
+    assert result.dc_coded == (True, True)
+    assert result.ac_coded_block_flags[0][0]
+    assert result.ac_coded_block_flags[1][0]
+
+
+def test_i16x16_chroma_prediction_uses_encoded_mode_for_both_components():
+    decoder = CABACArithmeticDecoder(bytes(16))
+    contexts = [_model(63, False) for _ in range(460)]
+    references = (
+        CABACChroma420References(left_available=True, left=(20, 30, 40, 50, 60, 70, 80, 90)),
+        CABACChroma420References(left_available=True, left=(100, 110, 120, 130, 140, 150, 160, 170)),
+    )
+    edges = (CABACChroma420EdgeState(), CABACChroma420EdgeState())
+    result = decoder.decode_intra_chroma420_macroblock(
+        contexts,
+        1,
+        True,
+        2,
+        True,
+        False,
+        False,
+        0,
+        26,
+        (0, 0),
+        ((16,) * 16, (16,) * 16),
+        references,
+        edges,
+        edges,
+    )
+    assert result.prediction_mode == 1
+    assert result.cb[:8] == (20,) * 8
+    assert result.cb[56:] == (90,) * 8
+    assert result.cr[:8] == (100,) * 8
+    assert result.cr[56:] == (170,) * 8
+
+    mb_type_contexts = _forced_residual_contexts(100, 104)
+    mb_type_result = CABACArithmeticDecoder(bytes(128)).decode_intra_chroma420_macroblock(
+        mb_type_contexts,
+        0,
+        True,
+        9,
+        True,
+        False,
+        False,
+        0,
+        26,
+        (0, 0),
+        ((16,) * 16, (16,) * 16),
+        (CABACChroma420References(), CABACChroma420References()),
+        edges,
+        edges,
+    )
+    assert mb_type_result.prediction_mode == 0
+    assert any(mb_type_result.cb_residual)
+    assert any(mb_type_result.cr_residual)
+
+
+def test_i_intra_macroblock_dispatches_and_places_all_planes():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    blocks = tuple(
+        LumaIntra4x4Block(
+            2,
+            top=(90,) * 8,
+            left=(90,) * 8,
+            top_left=90,
+        )
+        for _ in range(16)
+    )
+    input = CABACIIntraMacroblockInput(
+        slice_type=2,
+        previous_qpy=26,
+        luma_4x4_blocks=blocks,
+    )
+    builder = Yuv420FrameBuilder(1, 1)
+    result = decoder.decode_i_intra_macroblock(input, contexts, builder, 0)
+    frame = builder.finish()
+    assert result.macroblock_type == 0
+    assert result.coded_block_pattern_luma == result.coded_block_pattern_chroma == 0
+    assert result.qpy == 26
+    assert tuple(frame.y) == result.luma
+    assert tuple(frame.u) == result.cb
+    assert tuple(frame.v) == result.cr
+
+
+def test_i16x16_dispatch_derives_chroma_cbp_but_decodes_chroma_mode():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[3]._value_mps = True
+    contexts[7]._value_mps = True
+    contexts[8]._value_mps = True
+    input = CABACIIntraMacroblockInput(
+        slice_type=2,
+        previous_qpy=26,
+        intra16x16_top=(90,) * 16,
+        intra16x16_top_available=True,
+    )
+    builder = Yuv420FrameBuilder(1, 1)
+    result = decoder.decode_i_intra_macroblock(input, contexts, builder, 0)
+    assert result.macroblock_type == 9
+    assert result.coded_block_pattern_chroma == 2
+    assert result.qpy == 26
+    assert result.luma == (90,) * 256
+    assert builder.finish().u == bytes((128,)) * 64
+
+
+def test_i_pcm_dispatch_places_planes_and_restarts_cabac():
+    data = bytes((0x80,)) + bytes((0x11,)) * 256 + bytes((0x22,)) * 64 + bytes((0x33,)) * 64 + bytes(2)
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(data)
+    decoder._code_range = 510
+    decoder._code_offset = 509
+    decoder._terminated = False
+    contexts = [_model(0, False) for _ in range(460)]
+    builder = Yuv420FrameBuilder(1, 1)
+    result = decoder.decode_i_intra_macroblock(
+        CABACIIntraMacroblockInput(slice_type=2), contexts, builder, 0
+    )
+    assert result.macroblock_type == 25
+    assert (decoder.code_range, decoder.code_offset, decoder._terminated) == (510, 0, False)
+    frame = builder.finish()
+    assert frame.y == bytes((0x11,)) * 256
+    assert frame.u == bytes((0x22,)) * 64
+    assert frame.v == bytes((0x33,)) * 64
+
+
+def test_i_nxn_dispatch_selects_8x8_transform_branch():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[399]._value_mps = True
+    blocks = tuple(
+        LumaIntra8x8Block(
+            2,
+            top=(90,) * 16,
+            left=(90,) * 16,
+            top_left=90,
+        )
+        for _ in range(4)
+    )
+    input = CABACIIntraMacroblockInput(
+        slice_type=2,
+        previous_qpy=26,
+        transform_8x8_mode_enabled=True,
+        luma_8x8_blocks=blocks,
+    )
+    result = decoder.decode_i_intra_macroblock(
+        input, contexts, Yuv420FrameBuilder(1, 1), 0
+    )
+    assert result.transform_size_8x8
+    assert result.luma == (90,) * 256
+
+
+def test_i_intra_macroblock_builder_failure_rolls_back_cabac_state():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    original_contexts = _states(contexts)
+    original_decoder = (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset)
+    builder = Yuv420FrameBuilder(1, 1)
+    builder.place_macroblock(0, bytes(256), bytes(64), bytes(64))
+    blocks = tuple(
+        LumaIntra4x4Block(
+            2,
+            top=(90,) * 8,
+            left=(90,) * 8,
+            top_left=90,
+        )
+        for _ in range(16)
+    )
+    with pytest.raises(ValueError, match="invalid or duplicated"):
+        decoder.decode_i_intra_macroblock(
+            CABACIIntraMacroblockInput(slice_type=2, previous_qpy=26, luma_4x4_blocks=blocks),
+            contexts,
+            builder,
+            0,
+        )
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == original_decoder
+    assert _states(contexts) == original_contexts
+
+
+def test_intra_nxn_8x8_luma_category5_residual_and_rollback():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[399]._value_mps = True
+    contexts[402]._value_mps = True
+    contexts[417]._value_mps = True
+    blocks = [
+        LumaIntra8x8Block(
+            2,
+            top=(100,) * 16,
+            left=(100,) * 16,
+            top_left=100,
+        )
+        for _ in range(4)
+    ]
+    result = decoder.decode_intra_nxn_8x8_luma_macroblock(
+        contexts, True, False, False, 1, 51, (16,) * 64,
+        (2, 2), (2, 2), True, True, blocks,
+    )
+    assert result.transform_size_8x8
+    assert any(result.residuals[0])
+
+    truncated = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    truncated._bits = BitReader(b"")
+    truncated._code_range = 510
+    truncated._code_offset = 0
+    truncated._terminated = False
+    truncated_contexts = [_model(63, False) for _ in range(460)]
+    truncated_contexts[399]._value_mps = True
+    before = (truncated.code_range, truncated.code_offset, truncated._bits._bit_offset)
+    original_contexts = _states(truncated_contexts)
+    with pytest.raises(CABACError):
+        truncated.decode_intra_nxn_8x8_luma_macroblock(
+            truncated_contexts, True, False, False, 1, 0, (16,) * 64,
+            (2, 2), (2, 2), True, True, blocks,
+        )
+    assert (truncated.code_range, truncated.code_offset, truncated._bits._bit_offset) == before
+    assert _states(truncated_contexts) == original_contexts
+
+
+def test_reconstruct_i16x16_luma_dc_hadamard_and_scaling():
+    assert reconstruct_intra16x16_luma_dc([1] + [0] * 15, [16] * 16, 51) == [896] * 16
+    with pytest.raises(ValueError, match="scaling list"):
+        reconstruct_intra16x16_luma_dc([1] + [0] * 15, [0] * 16, 0)
+
+
+def test_decode_i16x16_luma_dc_and_prediction():
+    decoder = CABACArithmeticDecoder(bytes(64))
+    contexts = [_model(63, False) for _ in range(460)]
+    for index in (96, 134, 195):
+        contexts[index]._value_mps = True
+    result = decoder.decode_intra16x16_luma_macroblock(
+        1,
+        contexts,
+        51,
+        [16] * 16,
+        [100] * 16,
+        None,
+        0,
+        False,
+        CABACIntra16x16EdgeState(),
+        CABACIntra16x16EdgeState(),
+    )
+    assert (result.prediction_mode, result.coded_block_pattern_luma, result.dc_coded) == (0, 0, True)
+    assert any(result.residual)
+    assert result.samples[0] != 100
+
+
+def test_decode_i16x16_luma_ac_residuals():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    for index in (92, 96, 120, 134, 166, 181):
+        contexts[index]._value_mps = True
+    result = decoder.decode_intra16x16_luma_macroblock(
+        13,
+        contexts,
+        51,
+        [16] * 16,
+        [100] * 16,
+        None,
+        0,
+        False,
+        CABACIntra16x16EdgeState(),
+        CABACIntra16x16EdgeState(),
+    )
+    assert result.coded_block_pattern_luma == 15
+    assert all(result.ac_coded_block_flags)
+    assert any(result.residual)
+
+
+def test_i16x16_luma_dc_hadamard_scaling_and_decode():
+    levels = [1] + [0] * 15
+    scaled = reconstruct_intra16x16_luma_dc(levels, (16,) * 16, 51)
+    assert scaled == [896] * 16
+
+    decoder = CABACArithmeticDecoder(bytes(64))
+    contexts = [_model(63, False) for _ in range(460)]
+    for index in (96, 134, 195):
+        contexts[index]._value_mps = True
+    top = (100,) * 16
+    result = decoder.decode_intra16x16_luma_macroblock(
+        1, contexts, 51, (16,) * 16, top, None, 0, False,
+        CABACIntra16x16EdgeState(), CABACIntra16x16EdgeState(),
+    )
+    assert result.prediction_mode == 0
+    assert result.coded_block_pattern_luma == 0
+    assert result.dc_coded
+    assert any(result.residual)
+    assert result.samples[0] != 100
+
+
+def test_i16x16_luma_ac_residuals_decode():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    for index in (92, 96, 120, 134, 166, 181):
+        contexts[index]._value_mps = True
+    top = (100,) * 16
+    result = decoder.decode_intra16x16_luma_macroblock(
+        13, contexts, 51, (16,) * 16, top, None, 0, False,
+        CABACIntra16x16EdgeState(), CABACIntra16x16EdgeState(),
+    )
+    assert result.coded_block_pattern_luma == 15
+    assert all(result.ac_coded_block_flags)
+    assert any(result.residual)
+
+
+def test_ipcm_intra_macroblock_places_samples_and_restarts_cabac():
+    data = bytearray(1 + 256 + 64 + 64 + 2)
+    data[0] = 0x80
+    data[1:257] = bytes((0x11,)) * 256
+    data[257:321] = bytes((0x22,)) * 64
+    data[321:385] = bytes((0x33,)) * 64
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(bytes(data))
+    decoder._code_range = 510
+    decoder._code_offset = 509
+    decoder._terminated = False
+    contexts = [_model(0, False) for _ in range(8)]
+    builder = Yuv420FrameBuilder(1, 1)
+
+    decoder.decode_ipcm_intra_macroblock(2, contexts, False, False, False, False, builder, 0)
+
+    assert (decoder.code_range, decoder.code_offset, decoder._terminated) == (510, 0, False)
+    assert decoder._bits._bit_offset == 8 + 384 * 8 + 9
+    assert contexts[0].mps
+    frame = builder.finish()
+    assert len(frame.y) == 256 and frame.y[0] == frame.y[-1] == 0x11
+    assert len(frame.u) == 64 and frame.u[0] == frame.u[-1] == 0x22
+    assert len(frame.v) == 64 and frame.v[0] == frame.v[-1] == 0x33
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    (
+        (b"\x80\x11", "truncated I_PCM samples"),
+        (b"\xc0", "alignment bit is not zero"),
+        (b"\x80" + bytes((0x11,)) * 384 + b"\xff\x00", "initial offset"),
+    ),
+)
+def test_ipcm_intra_macroblock_failures_are_transactional(data, message):
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(data)
+    decoder._code_range = 510
+    decoder._code_offset = 509
+    decoder._terminated = False
+    contexts = [_model(0, False) for _ in range(8)]
+    original_contexts = _states(contexts)
+    original_state = (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset)
+    builder = Yuv420FrameBuilder(1, 1)
+    with pytest.raises(CABACError, match=message):
+        decoder.decode_ipcm_intra_macroblock(2, contexts, False, False, False, False, builder, 0)
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == original_state
+    assert _states(contexts) == original_contexts
+    assert not builder._written[0]
+
+
+class _TestEncoder:
+    """Clause 9.3.4.2 arithmetic encoder, used only to build decoder vectors."""
+
+    def __init__(self):
+        self.low, self.code_range, self.outstanding = 0, 510, 0
+        self.first_bit, self.flushed = True, False
+        self.bits = []
+
+    def _put_bit(self, bit):
+        if self.first_bit:
+            self.first_bit = False
+        else:
+            self.bits.append(bit)
+        self.bits.extend([1 - bit] * self.outstanding)
+        self.outstanding = 0
+
+    def _renormalize(self):
+        while self.code_range < 256:
+            if self.low < 256:
+                self._put_bit(0)
+            elif self.low >= 512:
+                self.low -= 512
+                self._put_bit(1)
+            else:
+                self.low -= 256
+                self.outstanding += 1
+            self.code_range <<= 1
+            self.low <<= 1
+
+    def decision(self, model, bin_value):
+        range_lps = _RANGE_LPS[(self.code_range >> 6) & 3][model._state_index]
+        self.code_range -= range_lps
+        if bin_value != model._value_mps:
+            self.low += self.code_range
+            self.code_range = range_lps
+        model.update(bin_value)
+        self._renormalize()
+
+    def terminate(self, bin_value):
+        self.code_range -= 2
+        if not bin_value:
+            self._renormalize()
+            return
+        self.low += self.code_range
+        self.code_range = 2
+        self._renormalize()
+        self._put_bit((self.low >> 9) & 1)
+        self.bits.extend([(self.low >> 8) & 1, 1])
+        self.flushed = True
+
+    def encode_bin_string(self, contexts, bins, ctx_idx):
+        for index, char in enumerate(bins):
+            context = ctx_idx(index, bins[:index])
+            if context == 276:
+                self.terminate(char == "1")
+            else:
+                self.decision(contexts[context], char == "1")
+
+    def data(self):
+        if not self.flushed:
+            self.terminate(True)
+        data = bytearray((len(self.bits) + 7) // 8 + 4)
+        for index, bit in enumerate(self.bits):
+            if bit:
+                data[index // 8] |= 0x80 >> (index % 8)
+        return bytes(data)
+
+
+# Table 9-36 I mb_type bin strings and Table 9-37 B mb_type bin strings.
+_I_MB_TYPE_BINS = (
+    "0", "100000", "100001", "100010", "100011", "1001000", "1001001", "1001010", "1001011",
+    "1001100", "1001101", "1001110", "1001111", "101000", "101001", "101010", "101011",
+    "1011000", "1011001", "1011010", "1011011", "1011100", "1011101", "1011110", "1011111", "11",
+)
+_B_MB_TYPE_BINS = (
+    "0", "100", "101", "110000", "110001", "110010", "110011", "110100", "110101", "110110", "110111",
+    "111110", "1110000", "1110001", "1110010", "1110011", "1110100", "1110101", "1110110", "1110111",
+    "1111000", "1111001", "111111",
+)
+
+
+def _intra_suffix_context(offset):
+    def context(bin_idx, prior):
+        if bin_idx == 0:
+            return offset
+        if bin_idx == 1:
+            return 276
+        if bin_idx in (2, 3):
+            return offset + bin_idx - 1
+        if bin_idx == 4 and prior[3] != "0":
+            return offset + 2
+        return offset + 3
+
+    return context
+
+
+def _inter_mb_type_symbols(slice_type, increment):
+    if slice_type % 5 == 0:
+        def prefix_context(bin_idx, prior):
+            return 17 if bin_idx == 2 and prior[1] == "1" else 14 + bin_idx
+
+        plain = [(value, bins) for value, bins in enumerate(("000", "011", "010", "001"))]
+        intra_prefix, intra_base, suffix_offset = "1", 5, 17
+    else:
+        def prefix_context(bin_idx, prior):
+            if bin_idx == 0:
+                return 27 + increment
+            if bin_idx == 1:
+                return 30
+            return 31 if bin_idx == 2 and prior[1] != "0" else 32
+
+        plain = list(enumerate(_B_MB_TYPE_BINS))
+        intra_prefix, intra_base, suffix_offset = "111101", 23, 32
+    symbols = [(value, bins, prefix_context, None) for value, bins in plain]
+    symbols += [
+        (intra_base + value, intra_prefix, prefix_context, suffix)
+        for value, suffix in enumerate(_I_MB_TYPE_BINS)
+    ]
+    suffix_context = _intra_suffix_context(suffix_offset)
+
+    def encode(encoder, contexts, symbol):
+        _, bins, context, suffix = symbol
+        encoder.encode_bin_string(contexts, bins, context)
+        if suffix is not None:
+            encoder.encode_bin_string(contexts, suffix, suffix_context)
+
+    return symbols, encode
+
+
+@pytest.mark.parametrize(
+    ("slice_type", "left", "top", "left_direct", "top_direct", "increment"),
+    (
+        (0, True, True, False, False, 0),
+        (5, False, False, False, False, 0),
+        (1, False, False, False, False, 0),
+        (6, True, False, False, False, 1),
+        (1, True, True, False, False, 2),
+        (1, True, True, True, False, 1),
+    ),
+)
+def test_inter_mb_type_round_trip(slice_type, left, top, left_direct, top_direct, increment):
+    symbols, encode = _inter_mb_type_symbols(slice_type, increment)
+    # Every value is coded twice to exercise adaptation; I_PCM terminates the stream, so it is last.
+    symbols = symbols[:-1] + symbols[:-1] + symbols[-1:]
+    slice_contexts = initialize_slice_contexts(slice_type, 1, 30)
+    encoder_contexts = [_model(m.state_index, m.mps) for m in slice_contexts]
+    encoder = _TestEncoder()
+    for symbol in symbols:
+        encode(encoder, encoder_contexts, symbol)
+    decoder = CABACArithmeticDecoder(encoder.data())
+    decoder_contexts = [_model(m.state_index, m.mps) for m in slice_contexts]
+    for symbol in symbols:
+        assert decoder.decode_inter_mb_type(
+            slice_type, decoder_contexts, left, top, left_direct, top_direct
+        ) == symbol[0]
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+    assert decoder._terminated
+
+
+def test_sub_mb_type_round_trip():
+    def b_context(bin_idx, prior):
+        if bin_idx < 2:
+            return 36 + bin_idx
+        return 38 if bin_idx == 2 and prior[1] != "0" else 39
+
+    for slice_type, bin_strings, context in (
+        (0, ("1", "00", "011", "010"), lambda bin_idx, _: 21 + bin_idx),
+        (1, ("0", "100", "101", "11000", "11001", "11010", "11011", "111000", "111001",
+             "111010", "111011", "11110", "11111"), b_context),
+    ):
+        slice_contexts = initialize_slice_contexts(slice_type, 2, 33)
+        encoder_contexts = [_model(m.state_index, m.mps) for m in slice_contexts]
+        encoder = _TestEncoder()
+        for bins in bin_strings * 2:
+            encoder.encode_bin_string(encoder_contexts, bins, context)
+        decoder = CABACArithmeticDecoder(encoder.data())
+        decoder_contexts = [_model(m.state_index, m.mps) for m in slice_contexts]
+        for want in list(range(len(bin_strings))) * 2:
+            assert decoder.decode_sub_mb_type(slice_type, decoder_contexts) == want
+        assert _states(decoder_contexts) == _states(encoder_contexts)
+
+
+def test_inter_mb_type_and_sub_mb_type_reject_invalid_input_transactionally():
+    contexts = initialize_slice_contexts(1, 0, 26)
+    decoder = CABACArithmeticDecoder(b"\x5a\x3c")
+    for slice_type in (2, 4, 10):
+        with pytest.raises(CABACError, match="unsupported"):
+            decoder.decode_inter_mb_type(slice_type, contexts, False, False)
+        with pytest.raises(CABACError, match="unsupported"):
+            decoder.decode_sub_mb_type(slice_type, contexts)
+    with pytest.raises(CABACError, match="460 slice contexts"):
+        decoder.decode_inter_mb_type(1, contexts[:459], False, False)
+    while True:
+        state = (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset, _states(contexts))
+        try:
+            decoder.decode_inter_mb_type(1, contexts, False, False)
+        except CABACError:
+            break
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset, _states(contexts)) == state
 
 
 def test_i_intra_mb_type_context_selection_and_failure_are_transactional():
@@ -599,6 +1654,38 @@ def test_intra4x4_pred_mode_decodes_previous_flag_and_remainder():
     contexts[1]._state_index = 62
     contexts[1]._value_mps = True
     assert remainder.decode_intra4x4_pred_mode(7, contexts) == 8
+
+
+def test_derive_intra4x4_predicted_mode_uses_syntax_scan_neighbors():
+    decoded = [7, 5, 4, 6, 3] + [0] * 11
+    top = [3, 2, 1, 0]
+    left = [5, 6, 7, 8]
+    assert derive_intra4x4_predicted_mode(decoded, 0, top, left, True, True) == 3
+    assert derive_intra4x4_predicted_mode(decoded, 1, top, left, True, True) == 2
+    assert derive_intra4x4_predicted_mode(decoded, 2, top, left, True, True) == 6
+    assert derive_intra4x4_predicted_mode(decoded, 4, top, left, True, True) == 1
+    assert derive_intra4x4_predicted_mode(decoded, 0, top, left, False, True) == 2
+    with pytest.raises(CABACError, match="neighbor state"):
+        derive_intra4x4_predicted_mode(decoded, 16, top, left, True, True)
+
+
+def test_decode_intra4x4_pred_modes_and_rollback():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [CABACContextModel(0, 63, 26), CABACContextModel(0, 63, 26)]
+    modes = decoder.decode_intra4x4_pred_modes(contexts, [0] * 4, [0] * 4, False, False)
+    assert len(modes) == 16
+    assert all(0 <= mode <= 8 for mode in modes)
+
+    truncated = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    truncated._bits = BitReader(b"")
+    truncated._code_range = 510
+    truncated._code_offset = 0
+    truncated._terminated = False
+    contexts = [CABACContextModel(0, 63, 26), CABACContextModel(0, 63, 26)]
+    with pytest.raises(CABACError, match="truncated bitstream"):
+        truncated.decode_intra4x4_pred_modes(contexts, [0] * 4, [0] * 4, False, False)
+    assert (truncated.code_range, truncated.code_offset, truncated._bits._bit_offset) == (510, 0, 0)
+    assert [(model.state_index, model.mps) for model in contexts] == [(0, False), (0, False)]
 
 
 def test_intra4x4_pred_mode_rejects_invalid_mode_and_rolls_back():
@@ -1083,6 +2170,118 @@ def test_place_chroma4x4_scan_levels_inserts_dc_and_maps_ac_positions():
     ]
     with pytest.raises(CABACError, match="one integer DC and 15 integer AC"):
         place_chroma4x4_scan_levels(100, [1, 2, 3])
+
+
+def test_luma4x4_residual_block_with_coded_flag():
+    def make_contexts(length, state_index=0, mps=False):
+        contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(length)]
+        for context in contexts:
+            context._state_index = state_index
+            context._value_mps = mps
+        return contexts
+
+    def make_block_contexts():
+        coded = make_contexts(4)
+        significant = make_contexts(15, 63)
+        last = make_contexts(15, 63)
+        coefficients = make_contexts(10, 63)
+        return coded, significant, last, coefficients
+
+    decoder = CABACArithmeticDecoder(bytes(128))
+    coded, significant, last, coefficients = make_block_contexts()
+    levels, has_residual = decoder.decode_luma4x4_residual_block_with_flag(
+        0, 0, coded, significant, last, coefficients
+    )
+    assert levels == [0] * 16
+    assert not has_residual
+
+    decoder = CABACArithmeticDecoder(bytes(128))
+    coded, significant, last, coefficients = make_block_contexts()
+    coded[0]._value_mps = True
+    _, has_residual = decoder.decode_luma4x4_residual_block_with_flag(
+        0, 0, coded, significant, last, coefficients
+    )
+    assert has_residual
+
+    truncated = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    truncated._bits = BitReader(b"")
+    truncated._code_range = 510
+    truncated._code_offset = 0
+    truncated._terminated = False
+    coded, significant, last, coefficients = make_block_contexts()
+    coded[0]._value_mps = True
+    with pytest.raises(CABACError, match="truncated bitstream"):
+        truncated.decode_luma4x4_residual_block_with_flag(
+            0, 0, coded, significant, last, coefficients
+        )
+    assert (truncated.code_range, truncated.code_offset, truncated._bits._bit_offset) == (510, 0, 0)
+    assert (coded[0].state_index, coded[0].mps) == (0, True)
+    assert significant[0].state_index == 63
+
+
+def test_chroma4x4_ac_residual_block_places_implied_final_coefficient_and_rolls_back():
+    def make_contexts(length, mps=False):
+        contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(length)]
+        for model in contexts:
+            model._state_index = 63
+            model._value_mps = mps
+        return contexts
+
+    def make_decoder(data):
+        decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+        decoder._bits = BitReader(data)
+        decoder._code_range = 510
+        decoder._code_offset = 0
+        decoder._terminated = False
+        return decoder
+
+    coded = make_contexts(4)
+    significant, last, coefficients = make_contexts(15), make_contexts(15), make_contexts(10)
+    levels, has_residual = make_decoder(b"").decode_chroma4x4_ac_residual_block(
+        False, False, coded, significant, last, coefficients
+    )
+    assert levels == [0] * 16
+    assert not has_residual
+
+    coded = make_contexts(4)
+    coded[0]._value_mps = True
+    significant, last, coefficients = make_contexts(15), make_contexts(15), make_contexts(10)
+    levels, has_residual = make_decoder(b"\x00").decode_chroma4x4_ac_residual_block(
+        False, False, coded, significant, last, coefficients
+    )
+    assert levels == [0] * 15 + [1]
+    assert has_residual
+
+    decoder = make_decoder(b"")
+    coded = make_contexts(4)
+    coded[0]._value_mps = True
+    significant, last, coefficients = make_contexts(15), make_contexts(15), make_contexts(10)
+    with pytest.raises(CABACError, match="truncated bitstream"):
+        decoder.decode_chroma4x4_ac_residual_block(
+            False, False, coded, significant, last, coefficients
+        )
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == (510, 0, 0)
+    assert (coded[0].state_index, coded[0].mps) == (63, True)
+
+
+def test_decode_and_reconstruct_luma4x4_residual_validates_before_consuming():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    coded = [CABACContextModel(0, 63, 26) for _ in range(4)]
+    significant = [CABACContextModel(0, 127, 26) for _ in range(15)]
+    last = [CABACContextModel(0, 127, 26) for _ in range(15)]
+    coefficients = [CABACContextModel(0, 127, 26) for _ in range(10)]
+    residual, has_residual = decoder.decode_and_reconstruct_luma4x4_residual(
+        0, 0, coded, significant, last, coefficients, [16] * 16, 0
+    )
+    assert residual == [0] * 16
+    assert not has_residual
+
+    bit_offset = decoder._bits._bit_offset
+    with pytest.raises(ValueError, match="QPY"):
+        decoder.decode_and_reconstruct_luma4x4_residual(
+            0, 0, coded, significant, last, coefficients, [16] * 16, 52
+        )
+    assert decoder._bits._bit_offset == bit_offset
 
 
 def test_luma4x4_residual_block_decodes_places_and_rolls_back():

@@ -13,6 +13,7 @@ var (
 	ErrCABACQPYDeltaOutOfRange   = errors.New("CABAC mb_qp_delta exceeds the 8-bit QP range")
 	ErrCABACUnsupportedSyntax    = errors.New("CABAC syntax is unsupported for this slice type")
 	ErrCABACIntraPredModeRange   = errors.New("CABAC intra4x4 prediction mode is outside [0,8]")
+	ErrCABACIntraPredNeighbors   = errors.New("CABAC intra4x4 prediction neighbors are invalid")
 	ErrCABACCBPOutOfRange        = errors.New("CABAC luma coded_block_pattern is outside [0,15]")
 	ErrCABACChromaCBPOutOfRange  = errors.New("CABAC chroma coded_block_pattern is outside [0,2]")
 	ErrCABACNonzeroCountRange    = errors.New("CABAC luma 4x4 nonzero count is outside [0,16]")
@@ -20,6 +21,7 @@ var (
 	ErrCABACCoeffSignRange       = errors.New("CABAC coefficient magnitude exceeds the signed output range")
 	ErrCABACEmptyResidualBlock   = errors.New("CABAC residual block has no significant coefficients")
 	ErrCABACTerminated           = errors.New("CABAC decoder is already terminated")
+	ErrCABACPCMAlignment         = errors.New("I_PCM alignment bit is not zero")
 )
 
 var ErrCABACMotionVectorDifferenceOutOfRange = errors.New("CABAC motion-vector difference exceeds the signed output range")
@@ -31,6 +33,21 @@ const cabacMaxMotionVectorDifference uint32 = uint32(^uint32(0) >> 1)
 var cabacIIntraMBTypeInit = [8][2]int{
 	{20, -15}, {2, 54}, {3, 74}, {-28, 127},
 	{-23, 104}, {-6, 53}, {-1, 54}, {7, 51},
+}
+var cabacPInterMBTypeInit = [3][4][2]int{
+	{{1, 9}, {0, 49}, {-37, 118}, {5, 57}},
+	{{-2, 9}, {4, 41}, {-29, 118}, {2, 65}},
+	{{-10, 51}, {-3, 62}, {-27, 99}, {26, 16}},
+}
+var cabacInterMVDInit = [3][14][2]int{
+	{{-3, 69}, {-6, 81}, {-11, 96}, {6, 55}, {7, 67}, {-5, 86}, {2, 88}, {0, 58}, {-3, 76}, {-10, 94}, {5, 54}, {4, 69}, {-3, 81}, {0, 88}},
+	{{-2, 69}, {-5, 82}, {-10, 96}, {2, 59}, {2, 75}, {-3, 87}, {-3, 100}, {1, 56}, {-3, 74}, {-6, 85}, {0, 59}, {-3, 81}, {-7, 86}, {-5, 95}},
+	{{-11, 89}, {-15, 103}, {-21, 116}, {19, 57}, {20, 58}, {4, 84}, {6, 96}, {1, 63}, {-5, 85}, {-13, 106}, {5, 63}, {6, 75}, {-3, 90}, {-1, 101}},
+}
+var cabacInterRefIdxInit = [3][6][2]int{
+	{{-7, 67}, {-5, 74}, {-4, 74}, {-5, 80}, {-7, 72}, {1, 58}},
+	{{-1, 66}, {-1, 77}, {1, 70}, {-2, 86}, {-5, 72}, {0, 61}},
+	{{3, 55}, {-4, 79}, {-2, 75}, {-12, 97}, {-7, 50}, {1, 60}},
 }
 var cabacIMBQPDeltaInit = [4][2]int{{0, 41}, {0, 63}, {0, 63}, {0, 63}}
 var cabacIIntraChromaPredModeInit = [4][2]int{{-9, 83}, {4, 86}, {0, 97}, {-7, 72}}
@@ -97,6 +114,52 @@ func NewCABACIIntraMBTypeContexts(sliceQPY int) ([8]CABACContextModel, error) {
 		contexts[index] = *model
 	}
 	return contexts, nil
+}
+
+// NewCABACPInterMBTypeContexts initializes ctxIdx 14-17 from H.264 Table 9-13.
+func NewCABACPInterMBTypeContexts(cabacInitIDC uint8, sliceQPY int) ([4]CABACContextModel, error) {
+	if cabacInitIDC > 2 {
+		return [4]CABACContextModel{}, ErrCABACContextInitRange
+	}
+	var contexts [4]CABACContextModel
+	for index, values := range cabacPInterMBTypeInit[cabacInitIDC] {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [4]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACInterPredictionContexts initializes MVD contexts 40-53 and the ref_idx contexts 54-59
+// that ref_idx_l0 and ref_idx_l1 share (Table 9-34 assigns both ctxIdxOffset 54).
+func NewCABACInterPredictionContexts(cabacInitIDC uint8, sliceQPY int) ([7]CABACContextModel, [7]CABACContextModel, [6]CABACContextModel, error) {
+	var mvdX, mvdY [7]CABACContextModel
+	var refIdx [6]CABACContextModel
+	if cabacInitIDC > 2 {
+		return mvdX, mvdY, refIdx, ErrCABACContextInitRange
+	}
+	for index := range mvdX {
+		model, err := NewCABACContextModel(cabacInterMVDInit[cabacInitIDC][index][0], cabacInterMVDInit[cabacInitIDC][index][1], sliceQPY)
+		if err != nil {
+			return [7]CABACContextModel{}, [7]CABACContextModel{}, [6]CABACContextModel{}, err
+		}
+		mvdX[index] = *model
+		model, err = NewCABACContextModel(cabacInterMVDInit[cabacInitIDC][index+7][0], cabacInterMVDInit[cabacInitIDC][index+7][1], sliceQPY)
+		if err != nil {
+			return [7]CABACContextModel{}, [7]CABACContextModel{}, [6]CABACContextModel{}, err
+		}
+		mvdY[index] = *model
+	}
+	for index, parameters := range cabacInterRefIdxInit[cabacInitIDC] {
+		model, err := NewCABACContextModel(parameters[0], parameters[1], sliceQPY)
+		if err != nil {
+			return [7]CABACContextModel{}, [7]CABACContextModel{}, [6]CABACContextModel{}, err
+		}
+		refIdx[index] = *model
+	}
+	return mvdX, mvdY, refIdx, nil
 }
 
 // NewCABACIMBQPDeltaContexts initializes ctxIdx 60-63 from H.264 Table 9-17.
@@ -188,6 +251,58 @@ func NewCABACILuma4x4CodedBlockFlagContexts(sliceQPY int) ([4]CABACContextModel,
 		contexts[index] = *model
 	}
 	return contexts, nil
+}
+
+// CABACContextCount covers ctxIdx 0-459, every context used by 4:2:0 CABAC slices.
+const CABACContextCount = 460
+
+// NewCABACSliceContexts initializes ctxIdx 0-459 for one slice from Tables 9-12 to 9-24.
+// I/SI slices ignore cabacInitIDC; entries unused by the slice type initialize from (0, 0).
+func NewCABACSliceContexts(sliceType, cabacInitIDC uint8, sliceQPY int) ([CABACContextCount]CABACContextModel, error) {
+	var contexts [CABACContextCount]CABACContextModel
+	if sliceType > 9 {
+		return contexts, ErrCABACUnsupportedSyntax
+	}
+	column := 0
+	if kind := sliceType % 5; kind != 2 && kind != 4 {
+		if cabacInitIDC > 2 {
+			return contexts, ErrCABACContextInitRange
+		}
+		column = int(cabacInitIDC) + 1
+	}
+	for index, values := range cabacContextInitTable[column] {
+		model, err := NewCABACContextModel(int(values[0]), int(values[1]), sliceQPY)
+		if err != nil {
+			return [CABACContextCount]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// CABACResidualContextBases holds the first frame-coded ctxIdx of each residual syntax element.
+// CodedBlockFlag is -1 for ctxBlockCat 5, whose flag is inferred when ChromaArrayType != 3.
+type CABACResidualContextBases struct {
+	CodedBlockFlag int
+	Significant    int
+	Last           int
+	AbsLevel       int
+}
+
+// CABACResidualContextBasesForCategory adds Table 9-40 ctxIdxBlockCatOffset to the Table 9-34 offsets.
+func CABACResidualContextBasesForCategory(ctxBlockCat uint8) (CABACResidualContextBases, error) {
+	switch {
+	case ctxBlockCat < 5:
+		return CABACResidualContextBases{
+			CodedBlockFlag: 85 + [5]int{0, 4, 8, 12, 16}[ctxBlockCat],
+			Significant:    105 + [5]int{0, 15, 29, 44, 47}[ctxBlockCat],
+			Last:           166 + [5]int{0, 15, 29, 44, 47}[ctxBlockCat],
+			AbsLevel:       227 + [5]int{0, 10, 20, 30, 39}[ctxBlockCat],
+		}, nil
+	case ctxBlockCat == 5:
+		return CABACResidualContextBases{CodedBlockFlag: -1, Significant: 402, Last: 417, AbsLevel: 426}, nil
+	}
+	return CABACResidualContextBases{}, ErrCABACUnsupportedSyntax
 }
 
 func (model *CABACContextModel) StateIndex() uint8 { return model.stateIndex }
@@ -343,6 +458,136 @@ func (decoder *CABACArithmeticDecoder) DecodeMBSkipFlag(sliceType uint8, context
 	return decoder.DecodeBin(&contexts[contextIndex])
 }
 
+// CABACInterNeighbor contains the parsed neighbour facts needed by clauses 9.3.3.1.1.6 and 9.3.3.1.1.7.
+type CABACInterNeighbor struct {
+	Available              bool
+	Skip                   bool
+	Intra                  bool
+	PredictionModeMatches  bool
+	ReferenceIndex         uint8
+	MotionVectorDifference [2]int32
+	IsField                bool
+}
+
+// DeriveCABACReferenceIndexContextIncrement derives ctxIdxInc 0-3 for ref_idx_lX.
+func DeriveCABACReferenceIndexContextIncrement(left, top CABACInterNeighbor, mbaffFrame, currentIsField bool) uint8 {
+	contextIncrement := uint8(0)
+	for index, neighbor := range [2]CABACInterNeighbor{left, top} {
+		if !neighbor.Available || neighbor.Skip || neighbor.Intra || !neighbor.PredictionModeMatches {
+			continue
+		}
+		zeroThreshold := uint8(0)
+		if mbaffFrame && !currentIsField && neighbor.IsField {
+			zeroThreshold = 1
+		}
+		if neighbor.ReferenceIndex > zeroThreshold {
+			if index == 0 {
+				contextIncrement |= 1
+			} else {
+				contextIncrement |= 2
+			}
+		}
+	}
+	return contextIncrement
+}
+
+// DeriveCABACMotionVectorDifferenceContextIncrement derives the 0-2 increment for one MVD component.
+func DeriveCABACMotionVectorDifferenceContextIncrement(left, top CABACInterNeighbor, component uint8, mbaffFrame, currentIsField bool) (uint8, error) {
+	if component > 1 {
+		return 0, ErrCABACContextState
+	}
+	leftAbs := cabacMVDNeighborMagnitude(left, component, mbaffFrame, currentIsField)
+	topAbs := cabacMVDNeighborMagnitude(top, component, mbaffFrame, currentIsField)
+	if leftAbs > 32 || topAbs > 32 || leftAbs+topAbs > 32 {
+		return 2, nil
+	}
+	if leftAbs+topAbs > 2 {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func cabacMVDNeighborMagnitude(neighbor CABACInterNeighbor, component uint8, mbaffFrame, currentIsField bool) uint64 {
+	if !neighbor.Available || neighbor.Skip || neighbor.Intra || !neighbor.PredictionModeMatches {
+		return 0
+	}
+	value := int64(neighbor.MotionVectorDifference[component])
+	if value < 0 {
+		value = -value
+	}
+	if component == 1 && mbaffFrame {
+		if !currentIsField && neighbor.IsField {
+			value *= 2
+		} else if currentIsField && !neighbor.IsField {
+			value /= 2
+		}
+	}
+	return uint64(value)
+}
+
+// DecodeReferenceIndexForPartition derives the neighbour context before decoding ref_idx_lX.
+func (decoder *CABACArithmeticDecoder) DecodeReferenceIndexForPartition(maxRefIdxMinus1 uint32, left, top CABACInterNeighbor, mbaffFrame, currentIsField bool, contexts *[6]CABACContextModel) (uint8, error) {
+	contextIncrement := DeriveCABACReferenceIndexContextIncrement(left, top, mbaffFrame, currentIsField)
+	return decoder.DecodeReferenceIndex(maxRefIdxMinus1, contextIncrement, contexts)
+}
+
+// DecodeMotionVectorDifferenceForPartition derives absMvdComp from the A/B partitions before decoding one component.
+func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifferenceForPartition(component uint8, left, top CABACInterNeighbor, mbaffFrame, currentIsField bool, contexts *[7]CABACContextModel) (int32, error) {
+	contextIncrement, err := DeriveCABACMotionVectorDifferenceContextIncrement(left, top, component, mbaffFrame, currentIsField)
+	if err != nil {
+		return 0, err
+	}
+	return decoder.decodeMotionVectorDifferenceWithContext(contextIncrement, contexts)
+}
+
+// DecodeReferenceIndex decodes ref_idx_l0/l1 truncated unary syntax.
+// contexts represent six consecutive models from ctxIdxOffset; neighborContextInc is derived per clause 9.3.3.1.1.6.
+func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint32, neighborContextInc uint8, contexts *[6]CABACContextModel) (uint8, error) {
+	if contexts == nil || neighborContextInc > 3 {
+		return 0, ErrCABACContextState
+	}
+	for _, context := range contexts {
+		if context.stateIndex >= 64 {
+			return 0, ErrCABACContextState
+		}
+	}
+	if maxRefIdxMinus1 > 31 {
+		return 0, ErrCABACUnsupportedSyntax
+	}
+	if maxRefIdxMinus1 == 0 {
+		return 0, nil
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	first, err := trial.DecodeBin(&trialContexts[neighborContextInc])
+	if err != nil {
+		return 0, err
+	}
+	refIdx := uint8(0)
+	if first {
+		refIdx = 1
+		for uint32(refIdx) < maxRefIdxMinus1 {
+			contextIndex := 5
+			if refIdx == 1 {
+				contextIndex = 4
+			}
+			continued, err := trial.DecodeBin(&trialContexts[contextIndex])
+			if err != nil {
+				return 0, err
+			}
+			if !continued {
+				break
+			}
+			refIdx++
+		}
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return refIdx, nil
+}
+
 // DecodeIIntraMBType decodes I-slice mb_type using caller-initialized contexts 3-10.
 func (decoder *CABACArithmeticDecoder) DecodeIIntraMBType(sliceType uint8, contexts *[8]CABACContextModel, leftAvailable, leftIntra16OrPCM, topAvailable, topIntra16OrPCM bool) (uint8, error) {
 	if contexts == nil {
@@ -418,6 +663,1118 @@ func (decoder *CABACArithmeticDecoder) DecodeIIntraMBType(sliceType uint8, conte
 	decoder.commitTrial(&trial, &readerCopy)
 	*contexts = trialContexts
 	return mbType, nil
+}
+
+// DecodeIPCMIntraMacroblock decodes an 8-bit 4:2:0 I_PCM macroblock and places it into the frame builder.
+// The arithmetic engine is reinitialized after the raw PCM samples as required by clause 9.3.1.2.
+func (decoder *CABACArithmeticDecoder) DecodeIPCMIntraMacroblock(sliceType uint8, contexts *[8]CABACContextModel, leftAvailable, leftIntra16OrPCM, topAvailable, topIntra16OrPCM bool, builder *Yuv420FrameBuilder, address int) error {
+	if decoder == nil || decoder.bits == nil || contexts == nil || builder == nil {
+		return ErrCABACContextState
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	mbType, err := trial.DecodeIIntraMBType(sliceType, &trialContexts, leftAvailable, leftIntra16OrPCM, topAvailable, topIntra16OrPCM)
+	if err != nil {
+		return err
+	}
+	if mbType != 25 {
+		return ErrCABACUnsupportedSyntax
+	}
+
+	for readerCopy.bitOffset%8 != 0 {
+		zero, err := trial.bits.ReadBit()
+		if err != nil {
+			return fmt.Errorf("I_PCM alignment: %w", err)
+		}
+		if zero {
+			return ErrCABACPCMAlignment
+		}
+	}
+	var yBlock [256]uint8
+	var uBlock, vBlock [64]uint8
+	for index := range yBlock {
+		sample, err := trial.bits.ReadBits(8)
+		if err != nil {
+			return fmt.Errorf("I_PCM luma samples: %w", err)
+		}
+		yBlock[index] = uint8(sample)
+	}
+	for index := range uBlock {
+		sample, err := trial.bits.ReadBits(8)
+		if err != nil {
+			return fmt.Errorf("I_PCM Cb samples: %w", err)
+		}
+		uBlock[index] = uint8(sample)
+	}
+	for index := range vBlock {
+		sample, err := trial.bits.ReadBits(8)
+		if err != nil {
+			return fmt.Errorf("I_PCM Cr samples: %w", err)
+		}
+		vBlock[index] = uint8(sample)
+	}
+	offset, err := trial.bits.ReadBits(9)
+	if err != nil {
+		return fmt.Errorf("I_PCM CABAC reinitialization: %w", err)
+	}
+	if offset >= cabacInitialRange {
+		return ErrCABACOffsetOutOfRange
+	}
+	if err := builder.PlaceMacroblock(address, yBlock, uBlock, vBlock); err != nil {
+		return err
+	}
+	trial.codeRange = cabacInitialRange
+	trial.codeOffset = offset
+	trial.terminated = false
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return nil
+}
+
+// CABACIntra4x4EdgeState supplies the coded-block facts for one external macroblock edge.
+type CABACIntra4x4EdgeState struct {
+	Available               bool
+	IsIPCM                  bool
+	TransformBlockAvailable [4]bool
+	TransformBlockCoded     [4]bool
+}
+
+// Intra4x4LumaMacroblockResult contains syntax-order modes/flags and a raster-order luma block.
+type Intra4x4LumaMacroblockResult struct {
+	Modes           [16]uint8
+	CodedBlockFlags [16]bool
+	Residuals       [16][16]int64
+	Samples         [256]uint8
+}
+
+type Intra8x8LumaMacroblockResult struct {
+	TransformSize8x8 bool
+	Modes            [4]uint8
+	Residuals        [4][64]int64
+	Samples          [256]uint8
+}
+
+type CABACIntra16x16EdgeState struct {
+	Available                 bool
+	IsIPCM                    bool
+	DCTransformBlockAvailable bool
+	DCTransformBlockCoded     bool
+	ACTransformBlockAvailable [4]bool
+	ACTransformBlockCoded     [4]bool
+}
+
+type Intra16x16LumaMacroblockResult struct {
+	PredictionMode        uint8
+	CodedBlockPatternLuma uint8
+	DCCoded               bool
+	DCLevels              [16]int64
+	ACCodedBlockFlags     [16]bool
+	Residual              [256]int64
+	Samples               [256]uint8
+}
+
+type CABACChroma420References struct {
+	TopAvailable     bool
+	LeftAvailable    bool
+	TopLeftAvailable bool
+	Top              [8]uint8
+	Left             [8]uint8
+	TopLeft          uint8
+}
+
+// AC edge entries are ordered top-to-bottom for a left edge and left-to-right for a top edge.
+type CABACChroma420EdgeState struct {
+	Available        bool
+	IsIPCM           bool
+	DCBlockAvailable bool
+	DCBlockCoded     bool
+	ACBlockAvailable [2]bool
+	ACBlockCoded     [2]bool
+}
+
+type IntraChroma420MacroblockResult struct {
+	PredictionMode    uint8
+	QPC               [2]int
+	DCCoded           [2]bool
+	ACCodedBlockFlags [2][4]bool
+	Cb                [64]uint8
+	Cr                [64]uint8
+	CbResidual        [64]int64
+	CrResidual        [64]int64
+}
+
+type CABACIIntraMacroblockInput struct {
+	SliceType                  uint8
+	LeftAvailable              bool
+	LeftIntra16OrPCM           bool
+	TopAvailable               bool
+	TopIntra16OrPCM            bool
+	PreviousQPY                int
+	PreviousQPDelta            int
+	LeftLumaCBP                uint8
+	TopLumaCBP                 uint8
+	LeftChromaCBP              uint8
+	TopChromaCBP               uint8
+	Transform8x8ModeEnabled    bool
+	LeftHas8x8Transform        bool
+	TopHas8x8Transform         bool
+	TopModes4x4                [4]uint8
+	LeftModes4x4               [4]uint8
+	TopModes8x8                [2]uint8
+	LeftModes8x8               [2]uint8
+	TopModeAvailable           bool
+	LeftModeAvailable          bool
+	Luma4x4TopEdge             CABACIntra4x4EdgeState
+	Luma4x4LeftEdge            CABACIntra4x4EdgeState
+	Luma16x16TopEdge           CABACIntra16x16EdgeState
+	Luma16x16LeftEdge          CABACIntra16x16EdgeState
+	Luma4x4Blocks              [16]LumaIntra4x4Block
+	Luma8x8Blocks              [4]LumaIntra8x8Block
+	Intra16x16Top              [16]uint8
+	Intra16x16Left             [16]uint8
+	Intra16x16TopAvailable     bool
+	Intra16x16LeftAvailable    bool
+	Intra16x16TopLeft          uint8
+	Intra16x16TopLeftAvailable bool
+	ChromaLeftModeNonzero      bool
+	ChromaTopModeNonzero       bool
+	ChromaReferences           [2]CABACChroma420References
+	ChromaLeftEdges            [2]CABACChroma420EdgeState
+	ChromaTopEdges             [2]CABACChroma420EdgeState
+	Luma4x4ScalingList         [16]uint8
+	Luma8x8ScalingList         [64]uint8
+	ChromaScalingLists         [2][16]uint8
+	ChromaQPIndexOffsets       [2]int
+}
+
+type CABACIIntraMacroblockResult struct {
+	MacroblockType          uint8
+	CodedBlockPatternLuma   uint8
+	CodedBlockPatternChroma uint8
+	TransformSize8x8        bool
+	Intra16x16LumaMode      uint8
+	ChromaPredictionMode    uint8
+	Luma4x4Modes            [16]uint8
+	Luma8x8Modes            [4]uint8
+	QPDelta                 int
+	QPY                     int
+	Luma                    [256]uint8
+	Cb                      [64]uint8
+	Cr                      [64]uint8
+	Luma4x4CodedBlockFlags  [16]bool
+	ChromaDCCoded           [2]bool
+	ChromaACCodedFlags      [2][4]bool
+}
+
+var luma4x4BlockScanToRaster = [16]uint8{0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15}
+
+// DecodeIntraNxN4x4LumaMacroblock decodes Intra_4x4 modes and luma residuals for an I_NxN macroblock.
+// Neighbor samples in blocks are caller-gathered; top/left modes and edge CBF state describe external neighbors.
+func (decoder *CABACArithmeticDecoder) DecodeIntraNxN4x4LumaMacroblock(contexts *[CABACContextCount]CABACContextModel, codedBlockPatternLuma uint8, qpy int, scalingList [16]uint8, topModes, leftModes [4]uint8, topModeAvailable, leftModeAvailable bool, topEdge, leftEdge CABACIntra4x4EdgeState, blocks [16]LumaIntra4x4Block) (Intra4x4LumaMacroblockResult, error) {
+	var result Intra4x4LumaMacroblockResult
+	if contexts == nil || codedBlockPatternLuma > 15 {
+		return result, ErrCABACContextState
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var modeContexts [2]CABACContextModel
+	copy(modeContexts[:], trialContexts[68:70])
+	modes, err := trial.DecodeIntra4x4PredModes(&modeContexts, topModes, leftModes, topModeAvailable, leftModeAvailable)
+	if err != nil {
+		return Intra4x4LumaMacroblockResult{}, err
+	}
+	copy(trialContexts[68:70], modeContexts[:])
+	result.Modes = modes
+	for blockIndex := range blocks {
+		rasterIndex := int(luma4x4BlockScanToRaster[blockIndex])
+		blockX, blockY := rasterIndex%4, rasterIndex/4
+		blocks[blockIndex].Mode = modes[blockIndex]
+		cbpIndex := blockY/2*2 + blockX/2
+		if codedBlockPatternLuma&(1<<cbpIndex) == 0 {
+			blocks[blockIndex].Residual = [16]int64{}
+			continue
+		}
+		leftCond := deriveIntra4x4LumaCondTerm(blockIndex, blockX, blockY, true, result.CodedBlockFlags, leftEdge, true)
+		topCond := deriveIntra4x4LumaCondTerm(blockIndex, blockX, blockY, false, result.CodedBlockFlags, topEdge, true)
+		levels, coded, err := trial.DecodeResidualBlock(0, leftCond, topCond, &trialContexts)
+		if err != nil {
+			return Intra4x4LumaMacroblockResult{}, err
+		}
+		result.CodedBlockFlags[blockIndex] = coded
+		if !coded {
+			blocks[blockIndex].Residual = [16]int64{}
+			continue
+		}
+		rasterLevels := PlaceLuma4x4ScanLevels(levels)
+		residual, err := reconstructLuma4x4Residual(rasterLevels, scalingList, qpy)
+		if err != nil {
+			return Intra4x4LumaMacroblockResult{}, err
+		}
+		blocks[blockIndex].Residual = residual
+		result.Residuals[blockIndex] = residual
+	}
+	result.Samples, err = ReconstructLumaIntra4x4Macroblock(blocks)
+	if err != nil {
+		return Intra4x4LumaMacroblockResult{}, err
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
+}
+
+var luma8x8ScanToRaster = [64]uint8{
+	0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+	12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+	35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+	58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+}
+
+func PlaceLuma8x8ScanLevels(scanLevels [64]int32) (rasterLevels [64]int32) {
+	for scanIndex, rasterIndex := range luma8x8ScanToRaster {
+		rasterLevels[rasterIndex] = scanLevels[scanIndex]
+	}
+	return rasterLevels
+}
+
+// DecodeIntraNxN8x8LumaMacroblock handles I_NxN macroblocks whose CABAC transform flag selects 8x8.
+// Sample references in blocks must already be gathered and filtered per clause 8.3.2.2.1.
+func (decoder *CABACArithmeticDecoder) DecodeIntraNxN8x8LumaMacroblock(contexts *[CABACContextCount]CABACContextModel, transform8x8ModeEnabled, leftHas8x8Transform, topHas8x8Transform bool, codedBlockPatternLuma uint8, qpy int, scalingList [64]uint8, topModes, leftModes [2]uint8, topModeAvailable, leftModeAvailable bool, blocks [4]LumaIntra8x8Block) (Intra8x8LumaMacroblockResult, error) {
+	var result Intra8x8LumaMacroblockResult
+	if contexts == nil || codedBlockPatternLuma > 15 {
+		return result, ErrCABACContextState
+	}
+	if !transform8x8ModeEnabled {
+		return result, ErrCABACUnsupportedSyntax
+	}
+	if _, err := inverseScaleLuma8x8([64]int32{}, scalingList, qpy); err != nil {
+		return result, err
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var transformContexts [3]CABACContextModel
+	copy(transformContexts[:], trialContexts[399:402])
+	transform8x8, err := trial.DecodeTransformSize8x8Flag(&transformContexts, leftHas8x8Transform, topHas8x8Transform)
+	if err != nil {
+		return Intra8x8LumaMacroblockResult{}, err
+	}
+	copy(trialContexts[399:402], transformContexts[:])
+	if !transform8x8 {
+		return Intra8x8LumaMacroblockResult{}, ErrCABACUnsupportedSyntax
+	}
+	var modeContexts [2]CABACContextModel
+	copy(modeContexts[:], trialContexts[68:70])
+	for blockIndex := 0; blockIndex < 4; blockIndex++ {
+		blockX, blockY := blockIndex%2, blockIndex/2
+		leftAvailable, topAvailable := leftModeAvailable, topModeAvailable
+		leftMode, topMode := leftModes[blockY], topModes[blockX]
+		if blockX > 0 {
+			leftAvailable = true
+			leftMode = result.Modes[blockIndex-1]
+		}
+		if blockY > 0 {
+			topAvailable = true
+			topMode = result.Modes[blockIndex-2]
+		}
+		predictedMode := uint8(2)
+		if leftAvailable && topAvailable {
+			predictedMode = min(leftMode, topMode)
+		}
+		mode, err := trial.DecodeIntra4x4PredMode(predictedMode, &modeContexts)
+		if err != nil {
+			return Intra8x8LumaMacroblockResult{}, err
+		}
+		result.Modes[blockIndex] = mode
+	}
+	copy(trialContexts[68:70], modeContexts[:])
+	for blockIndex := range blocks {
+		blocks[blockIndex].Mode = result.Modes[blockIndex]
+		if codedBlockPatternLuma&(1<<blockIndex) == 0 {
+			blocks[blockIndex].Residual = [64]int64{}
+			continue
+		}
+		levels, err := trial.DecodeLuma8x8ResidualBlock(&trialContexts)
+		if err != nil {
+			return Intra8x8LumaMacroblockResult{}, err
+		}
+		rasterLevels := PlaceLuma8x8ScanLevels(levels)
+		coefficients, err := inverseScaleLuma8x8(rasterLevels, scalingList, qpy)
+		if err != nil {
+			return Intra8x8LumaMacroblockResult{}, err
+		}
+		blocks[blockIndex].Residual = inverseTransformLuma8x8(coefficients)
+		result.Residuals[blockIndex] = blocks[blockIndex].Residual
+	}
+	result.Samples, err = ReconstructLumaIntra8x8Macroblock(blocks)
+	if err != nil {
+		return Intra8x8LumaMacroblockResult{}, err
+	}
+	result.TransformSize8x8 = true
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
+}
+
+// DecodeIntra16x16LumaMacroblock decodes I16x16 luma DC/AC residuals and reconstructs its luma plane.
+// The I16x16 mb_type and QPY are supplied by the enclosing macroblock-layer parser.
+func (decoder *CABACArithmeticDecoder) DecodeIntra16x16LumaMacroblock(mbType uint8, contexts *[CABACContextCount]CABACContextModel, qpy int, scalingList [16]uint8, top, left *[16]uint8, topLeft uint8, topLeftAvailable bool, topEdge, leftEdge CABACIntra16x16EdgeState) (Intra16x16LumaMacroblockResult, error) {
+	var result Intra16x16LumaMacroblockResult
+	if contexts == nil || mbType < 1 || mbType > 24 {
+		return result, ErrCABACUnsupportedSyntax
+	}
+	if _, err := reconstructIntra16x16LumaDC([16]int32{}, scalingList, qpy); err != nil {
+		return result, err
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	result.PredictionMode = (mbType - 1) % 4
+	if mbType >= 13 {
+		result.CodedBlockPatternLuma = 15
+	}
+
+	dcCondLeft := DeriveCABACCodedBlockFlagCondTerm(leftEdge.Available, true, leftEdge.IsIPCM, leftEdge.DCTransformBlockAvailable, leftEdge.DCTransformBlockCoded)
+	dcCondTop := DeriveCABACCodedBlockFlagCondTerm(topEdge.Available, true, topEdge.IsIPCM, topEdge.DCTransformBlockAvailable, topEdge.DCTransformBlockCoded)
+	dcScanLevels, dcCoded, err := trial.DecodeResidualBlock(2, dcCondLeft, dcCondTop, &trialContexts)
+	if err != nil {
+		return Intra16x16LumaMacroblockResult{}, err
+	}
+	result.DCCoded = dcCoded
+	if dcCoded {
+		dcRasterLevels := PlaceLuma4x4ScanLevels(dcScanLevels)
+		result.DCLevels, err = reconstructIntra16x16LumaDC(dcRasterLevels, scalingList, qpy)
+		if err != nil {
+			return Intra16x16LumaMacroblockResult{}, err
+		}
+	}
+
+	for blockIndex := 0; blockIndex < 16; blockIndex++ {
+		rasterIndex := int(luma4x4BlockScanToRaster[blockIndex])
+		blockX, blockY := rasterIndex%4, rasterIndex/4
+		if result.CodedBlockPatternLuma&(1<<((blockY/2)*2+blockX/2)) != 0 {
+			condLeft := deriveIntra16x16ACCondTerm(blockIndex, blockX, blockY, true, result.ACCodedBlockFlags, leftEdge)
+			condTop := deriveIntra16x16ACCondTerm(blockIndex, blockX, blockY, false, result.ACCodedBlockFlags, topEdge)
+			acLevels, coded, err := trial.DecodeResidualBlock(1, condLeft, condTop, &trialContexts)
+			if err != nil {
+				return Intra16x16LumaMacroblockResult{}, err
+			}
+			result.ACCodedBlockFlags[blockIndex] = coded
+			if coded {
+				var scanLevels [16]int32
+				copy(scanLevels[1:], acLevels[:15])
+				rasterLevels := PlaceLuma4x4ScanLevels(scanLevels)
+				rasterLevels[0] = 0
+				coefficients, err := inverseScaleLuma4x4(rasterLevels, scalingList, qpy)
+				if err != nil {
+					return Intra16x16LumaMacroblockResult{}, err
+				}
+				coefficients[0] = result.DCLevels[rasterIndex]
+				blockResidual := inverseTransformLuma4x4(coefficients)
+				for row := 0; row < 4; row++ {
+					destination := (blockY*4+row)*16 + blockX*4
+					copy(result.Residual[destination:destination+4], blockResidual[row*4:row*4+4])
+				}
+				continue
+			}
+		}
+		coefficients, err := inverseScaleLuma4x4([16]int32{}, scalingList, qpy)
+		if err != nil {
+			return Intra16x16LumaMacroblockResult{}, err
+		}
+		coefficients[0] = result.DCLevels[rasterIndex]
+		blockResidual := inverseTransformLuma4x4(coefficients)
+		for row := 0; row < 4; row++ {
+			destination := (blockY*4+row)*16 + blockX*4
+			copy(result.Residual[destination:destination+4], blockResidual[row*4:row*4+4])
+		}
+	}
+	result.Samples, err = ReconstructLumaIntra16x16Macroblock(result.PredictionMode, top, left, topLeft, topLeftAvailable, result.Residual)
+	if err != nil {
+		return Intra16x16LumaMacroblockResult{}, err
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
+}
+
+// DecodeIntraChroma420Macroblock decodes/reconstructs 8-bit 4:2:0 chroma.
+// intra_chroma_pred_mode is separate from mb_type; I16x16 mb_type only supplies chroma CBP.
+func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *[CABACContextCount]CABACContextModel, mode uint8, modeAlreadyDecoded bool, mbType uint8, intra16x16 bool, leftModeNonzero, topModeNonzero bool, codedBlockPatternChroma uint8, qpy int, qpOffsets [2]int, scalingLists [2][16]uint8, references [2]CABACChroma420References, leftEdges, topEdges [2]CABACChroma420EdgeState) (IntraChroma420MacroblockResult, error) {
+	var result IntraChroma420MacroblockResult
+	if contexts == nil {
+		return result, ErrCABACUnsupportedSyntax
+	}
+	if intra16x16 {
+		if mbType < 1 || mbType > 24 {
+			return result, ErrCABACUnsupportedSyntax
+		}
+		codedBlockPatternChroma = ((mbType - 1) / 4) % 3
+	} else if codedBlockPatternChroma > 2 || mbType != 0 {
+		return result, ErrCABACUnsupportedSyntax
+	}
+	if modeAlreadyDecoded && mode > 3 {
+		return result, ErrCABACIntraPredModeRange
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	if !modeAlreadyDecoded {
+		var modeContexts [4]CABACContextModel
+		copy(modeContexts[:], trialContexts[64:68])
+		decodedMode, err := trial.DecodeIntraChromaPredMode(&modeContexts, leftModeNonzero, topModeNonzero)
+		if err != nil {
+			return IntraChroma420MacroblockResult{}, err
+		}
+		mode = decodedMode
+		copy(trialContexts[64:68], modeContexts[:])
+	}
+	result.PredictionMode = mode
+	for component := 0; component < 2; component++ {
+		qpc, err := deriveChromaQPC(qpy, qpOffsets[component])
+		if err != nil {
+			return IntraChroma420MacroblockResult{}, err
+		}
+		result.QPC[component] = qpc
+		var dcLevels [4]int32
+		var dcSamples [4]int64
+		if codedBlockPatternChroma != 0 {
+			dcCoded, topCoded := chromaDCCondTerms(leftEdges[component], topEdges[component])
+			decoded, coded, err := trial.DecodeResidualBlock(3, dcCoded, topCoded, &trialContexts)
+			if err != nil {
+				return IntraChroma420MacroblockResult{}, err
+			}
+			if coded {
+				result.DCCoded[component] = true
+				copy(dcLevels[:], decoded[:4])
+				transformed := inverseTransformChromaDC2x2(dcLevels)
+				dcSamples, err = inverseScaleChromaDC2x2(transformed, qpc)
+				if err != nil {
+					return IntraChroma420MacroblockResult{}, err
+				}
+			}
+		}
+		var residualBlocks [4][16]int64
+		var acCodedFlags [4]bool
+		for blockIndex := 0; blockIndex < 4; blockIndex++ {
+			if codedBlockPatternChroma == 2 {
+				blockX, blockY := blockIndex%2, blockIndex/2
+				condLeft := chromaACCondTerm(blockIndex, blockX, blockY, true, acCodedFlags, leftEdges[component])
+				condTop := chromaACCondTerm(blockIndex, blockX, blockY, false, acCodedFlags, topEdges[component])
+				acLevels, coded, err := trial.DecodeResidualBlock(4, condLeft, condTop, &trialContexts)
+				if err != nil {
+					return IntraChroma420MacroblockResult{}, err
+				}
+				acCodedFlags[blockIndex] = coded
+				if coded {
+					var acScan [15]int32
+					copy(acScan[:], acLevels[:15])
+					residualBlocks[blockIndex], err = reconstructChroma4x4Residual(dcSamples[blockIndex], acScan, scalingLists[component], qpc)
+					if err != nil {
+						return IntraChroma420MacroblockResult{}, err
+					}
+					continue
+				}
+			}
+			residualBlocks[blockIndex], err = reconstructChroma4x4Residual(dcSamples[blockIndex], [15]int32{}, scalingLists[component], qpc)
+			if err != nil {
+				return IntraChroma420MacroblockResult{}, err
+			}
+		}
+		result.ACCodedBlockFlags[component] = acCodedFlags
+		macroblockResidual := assembleChroma420ResidualMacroblock(residualBlocks)
+		var top, left *[8]uint8
+		var topLeft *uint8
+		if references[component].TopAvailable {
+			top = &references[component].Top
+		}
+		if references[component].LeftAvailable {
+			left = &references[component].Left
+		}
+		if references[component].TopLeftAvailable {
+			topLeft = &references[component].TopLeft
+		}
+		prediction, err := predictChromaIntra8x8(mode, top, left, topLeft)
+		if err != nil {
+			return IntraChroma420MacroblockResult{}, err
+		}
+		samples := reconstructChroma420Macroblock(prediction, macroblockResidual)
+		if component == 0 {
+			result.CbResidual, result.Cb = macroblockResidual, samples
+		} else {
+			result.CrResidual, result.Cr = macroblockResidual, samples
+		}
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
+}
+
+// DecodeIIntraMacroblock decodes one I-slice macroblock in syntax order and places its Y/U/V planes atomically.
+// Per-block sample references and neighbor CBF/CBP facts are caller-gathered from already decoded neighbors.
+func (decoder *CABACArithmeticDecoder) DecodeIIntraMacroblock(input CABACIIntraMacroblockInput, contexts *[CABACContextCount]CABACContextModel, builder *Yuv420FrameBuilder, address int) (CABACIIntraMacroblockResult, error) {
+	var result CABACIIntraMacroblockResult
+	if decoder == nil || decoder.bits == nil || contexts == nil || builder == nil || input.PreviousQPY < 0 || input.PreviousQPY > 51 {
+		return result, ErrCABACContextState
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var mbTypeContexts [8]CABACContextModel
+	copy(mbTypeContexts[:], trialContexts[3:11])
+	mbType, err := trial.DecodeIIntraMBType(input.SliceType, &mbTypeContexts, input.LeftAvailable, input.LeftIntra16OrPCM, input.TopAvailable, input.TopIntra16OrPCM)
+	if err != nil {
+		return result, err
+	}
+	copy(trialContexts[3:11], mbTypeContexts[:])
+	result.MacroblockType = mbType
+	result.QPY = input.PreviousQPY
+	if mbType == 25 {
+		var yBlock [256]uint8
+		var cbBlock, crBlock [64]uint8
+		for readerCopy.bitOffset%8 != 0 {
+			bit, err := trial.bits.ReadBit()
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM alignment: %w", err)
+			}
+			if bit {
+				return CABACIIntraMacroblockResult{}, ErrCABACPCMAlignment
+			}
+		}
+		for index := range yBlock {
+			sample, err := trial.bits.ReadBits(8)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM luma samples: %w", err)
+			}
+			yBlock[index] = uint8(sample)
+		}
+		for index := range cbBlock {
+			sample, err := trial.bits.ReadBits(8)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM Cb samples: %w", err)
+			}
+			cbBlock[index] = uint8(sample)
+		}
+		for index := range crBlock {
+			sample, err := trial.bits.ReadBits(8)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM Cr samples: %w", err)
+			}
+			crBlock[index] = uint8(sample)
+		}
+		offset, err := trial.bits.ReadBits(9)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM CABAC reinitialization: %w", err)
+		}
+		if offset >= cabacInitialRange {
+			return CABACIIntraMacroblockResult{}, ErrCABACOffsetOutOfRange
+		}
+		if err := builder.PlaceMacroblock(address, yBlock, cbBlock, crBlock); err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		trial.codeRange, trial.codeOffset, trial.terminated = cabacInitialRange, offset, false
+		result.Luma, result.Cb, result.Cr = yBlock, cbBlock, crBlock
+		decoder.commitTrial(&trial, &readerCopy)
+		*contexts = trialContexts
+		return result, nil
+	}
+
+	var modes4x4 [16]uint8
+	var modes8x8 [4]uint8
+	if mbType == 0 {
+		if input.Transform8x8ModeEnabled {
+			var transformContexts [3]CABACContextModel
+			copy(transformContexts[:], trialContexts[399:402])
+			result.TransformSize8x8, err = trial.DecodeTransformSize8x8Flag(&transformContexts, input.LeftHas8x8Transform, input.TopHas8x8Transform)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, err
+			}
+			copy(trialContexts[399:402], transformContexts[:])
+		}
+		var modeContexts [2]CABACContextModel
+		copy(modeContexts[:], trialContexts[68:70])
+		if result.TransformSize8x8 {
+			for blockIndex := range modes8x8 {
+				blockX, blockY := blockIndex%2, blockIndex/2
+				leftAvailable, topAvailable := input.LeftModeAvailable, input.TopModeAvailable
+				leftMode, topMode := input.LeftModes8x8[blockY], input.TopModes8x8[blockX]
+				if blockX > 0 {
+					leftAvailable, leftMode = true, modes8x8[blockIndex-1]
+				}
+				if blockY > 0 {
+					topAvailable, topMode = true, modes8x8[blockIndex-2]
+				}
+				predictedMode := uint8(2)
+				if leftAvailable && topAvailable {
+					predictedMode = min(leftMode, topMode)
+				}
+				modes8x8[blockIndex], err = trial.DecodeIntra4x4PredMode(predictedMode, &modeContexts)
+				if err != nil {
+					return CABACIIntraMacroblockResult{}, err
+				}
+			}
+		} else {
+			modes4x4, err = trial.DecodeIntra4x4PredModes(&modeContexts, input.TopModes4x4, input.LeftModes4x4, input.TopModeAvailable, input.LeftModeAvailable)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, err
+			}
+		}
+		copy(trialContexts[68:70], modeContexts[:])
+		var chromaModeContexts [4]CABACContextModel
+		copy(chromaModeContexts[:], trialContexts[64:68])
+		resultChromaMode, modeErr := trial.DecodeIntraChromaPredMode(&chromaModeContexts, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero)
+		if modeErr != nil {
+			return CABACIIntraMacroblockResult{}, modeErr
+		}
+		resultChromaModeForReconstruction := resultChromaMode
+		result.ChromaPredictionMode = resultChromaMode
+		result.Luma4x4Modes = modes4x4
+		result.Luma8x8Modes = modes8x8
+		copy(trialContexts[64:68], chromaModeContexts[:])
+		var lumaContexts [4]CABACContextModel
+		copy(lumaContexts[:], trialContexts[73:77])
+		result.CodedBlockPatternLuma, err = trial.DecodeLumaCodedBlockPattern(input.LeftLumaCBP, input.TopLumaCBP, &lumaContexts)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		copy(trialContexts[73:77], lumaContexts[:])
+		var chromaContexts [8]CABACContextModel
+		copy(chromaContexts[:], trialContexts[77:85])
+		result.CodedBlockPatternChroma, err = trial.DecodeChromaCodedBlockPattern(input.LeftChromaCBP, input.TopChromaCBP, &chromaContexts)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		copy(trialContexts[77:85], chromaContexts[:])
+		result.QPY, result.QPDelta, err = decodeIntraMacroblockQP(&trial, &trialContexts, input, result.CodedBlockPatternLuma, result.CodedBlockPatternChroma, mbType)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		if result.TransformSize8x8 {
+			lumaResult, err := decodeIntraNxN8x8LumaResiduals(&trial, &trialContexts, result.CodedBlockPatternLuma, result.QPY, input.Luma8x8ScalingList, modes8x8, input.Luma8x8Blocks)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, err
+			}
+			result.Luma = lumaResult.Samples
+		} else {
+			lumaResult, err := decodeIntraNxN4x4LumaResiduals(&trial, &trialContexts, result.CodedBlockPatternLuma, result.QPY, input.Luma4x4ScalingList, modes4x4, input.Luma4x4TopEdge, input.Luma4x4LeftEdge, input.Luma4x4Blocks)
+			if err != nil {
+				return CABACIIntraMacroblockResult{}, err
+			}
+			result.Luma, result.Luma4x4CodedBlockFlags = lumaResult.Samples, lumaResult.CodedBlockFlags
+		}
+		chromaResult, err := trial.DecodeIntraChroma420Macroblock(&trialContexts, resultChromaModeForReconstruction, true, 0, false, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		result.Cb, result.Cr = chromaResult.Cb, chromaResult.Cr
+		result.ChromaDCCoded, result.ChromaACCodedFlags = chromaResult.DCCoded, chromaResult.ACCodedBlockFlags
+	} else {
+		result.CodedBlockPatternLuma = 0
+		if mbType >= 13 {
+			result.CodedBlockPatternLuma = 15
+		}
+		result.CodedBlockPatternChroma = ((mbType - 1) / 4) % 3
+		chromaModeContexts := [4]CABACContextModel{}
+		copy(chromaModeContexts[:], trialContexts[64:68])
+		chromaMode, err := trial.DecodeIntraChromaPredMode(&chromaModeContexts, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		copy(trialContexts[64:68], chromaModeContexts[:])
+		result.ChromaPredictionMode = chromaMode
+		result.Intra16x16LumaMode = (mbType - 1) % 4
+		result.QPY, result.QPDelta, err = decodeIntraMacroblockQP(&trial, &trialContexts, input, result.CodedBlockPatternLuma, result.CodedBlockPatternChroma, mbType)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		top, left := (*[16]uint8)(nil), (*[16]uint8)(nil)
+		if input.Intra16x16TopAvailable {
+			top = &input.Intra16x16Top
+		}
+		if input.Intra16x16LeftAvailable {
+			left = &input.Intra16x16Left
+		}
+		lumaResult, err := trial.DecodeIntra16x16LumaMacroblock(mbType, &trialContexts, result.QPY, input.Luma4x4ScalingList, top, left, input.Intra16x16TopLeft, input.Intra16x16TopLeftAvailable, input.Luma16x16TopEdge, input.Luma16x16LeftEdge)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		result.Luma = lumaResult.Samples
+		chromaResult, err := trial.DecodeIntraChroma420Macroblock(&trialContexts, chromaMode, true, mbType, true, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, err
+		}
+		result.Cb, result.Cr = chromaResult.Cb, chromaResult.Cr
+		result.ChromaDCCoded, result.ChromaACCodedFlags = chromaResult.DCCoded, chromaResult.ACCodedBlockFlags
+	}
+	if err := builder.PlaceMacroblock(address, result.Luma, result.Cb, result.Cr); err != nil {
+		return CABACIIntraMacroblockResult{}, err
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
+}
+
+func decodeIntraMacroblockQP(decoder *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, cbpLuma, cbpChroma, mbType uint8) (int, int, error) {
+	qpy := input.PreviousQPY
+	if cbpLuma == 0 && cbpChroma == 0 && mbType == 0 {
+		return qpy, 0, nil
+	}
+	var deltaContexts [4]CABACContextModel
+	copy(deltaContexts[:], contexts[60:64])
+	delta, err := decoder.DecodeMBQPDelta(&deltaContexts, input.PreviousQPDelta)
+	if err != nil {
+		return 0, 0, err
+	}
+	copy(contexts[60:64], deltaContexts[:])
+	return (qpy + delta + 52) % 52, delta, nil
+}
+
+func decodeIntraNxN4x4LumaResiduals(decoder *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, cbp uint8, qpy int, scalingList [16]uint8, modes [16]uint8, topEdge, leftEdge CABACIntra4x4EdgeState, blocks [16]LumaIntra4x4Block) (Intra4x4LumaMacroblockResult, error) {
+	var result Intra4x4LumaMacroblockResult
+	result.Modes = modes
+	for blockIndex := range blocks {
+		rasterIndex := int(luma4x4BlockScanToRaster[blockIndex])
+		blockX, blockY := rasterIndex%4, rasterIndex/4
+		blocks[blockIndex].Mode = modes[blockIndex]
+		cbpIndex := blockY/2*2 + blockX/2
+		if cbp&(1<<cbpIndex) == 0 {
+			blocks[blockIndex].Residual = [16]int64{}
+			continue
+		}
+		condLeft := deriveIntra4x4LumaCondTerm(blockIndex, blockX, blockY, true, result.CodedBlockFlags, leftEdge, true)
+		condTop := deriveIntra4x4LumaCondTerm(blockIndex, blockX, blockY, false, result.CodedBlockFlags, topEdge, true)
+		levels, coded, err := decoder.DecodeResidualBlock(2, condLeft, condTop, contexts)
+		if err != nil {
+			return Intra4x4LumaMacroblockResult{}, err
+		}
+		result.CodedBlockFlags[blockIndex] = coded
+		if coded {
+			residual, err := reconstructLuma4x4Residual(PlaceLuma4x4ScanLevels(levels), scalingList, qpy)
+			if err != nil {
+				return Intra4x4LumaMacroblockResult{}, err
+			}
+			blocks[blockIndex].Residual = residual
+			result.Residuals[blockIndex] = residual
+		} else {
+			blocks[blockIndex].Residual = [16]int64{}
+		}
+	}
+	var err error
+	result.Samples, err = ReconstructLumaIntra4x4Macroblock(blocks)
+	return result, err
+}
+
+func decodeIntraNxN8x8LumaResiduals(decoder *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, cbp uint8, qpy int, scalingList [64]uint8, modes [4]uint8, blocks [4]LumaIntra8x8Block) (Intra8x8LumaMacroblockResult, error) {
+	var result Intra8x8LumaMacroblockResult
+	result.TransformSize8x8, result.Modes = true, modes
+	for blockIndex := range blocks {
+		blocks[blockIndex].Mode = modes[blockIndex]
+		if cbp&(1<<blockIndex) == 0 {
+			blocks[blockIndex].Residual = [64]int64{}
+			continue
+		}
+		levels, err := decoder.DecodeLuma8x8ResidualBlock(contexts)
+		if err != nil {
+			return Intra8x8LumaMacroblockResult{}, err
+		}
+		coefficients, err := inverseScaleLuma8x8(PlaceLuma8x8ScanLevels(levels), scalingList, qpy)
+		if err != nil {
+			return Intra8x8LumaMacroblockResult{}, err
+		}
+		blocks[blockIndex].Residual = inverseTransformLuma8x8(coefficients)
+		result.Residuals[blockIndex] = blocks[blockIndex].Residual
+	}
+	var err error
+	result.Samples, err = ReconstructLumaIntra8x8Macroblock(blocks)
+	return result, err
+}
+
+func chromaDCCondTerms(left, top CABACChroma420EdgeState) (bool, bool) {
+	return DeriveCABACCodedBlockFlagCondTerm(left.Available, true, left.IsIPCM, left.DCBlockAvailable, left.DCBlockCoded),
+		DeriveCABACCodedBlockFlagCondTerm(top.Available, true, top.IsIPCM, top.DCBlockAvailable, top.DCBlockCoded)
+}
+
+func chromaACCondTerm(blockIndex, blockX, blockY int, isLeft bool, codedFlags [4]bool, edge CABACChroma420EdgeState) bool {
+	neighborCoordinate, edgeCoordinate := blockY, blockX
+	if isLeft {
+		neighborCoordinate, edgeCoordinate = blockX, blockY
+	}
+	if neighborCoordinate > 0 {
+		neighborIndex := blockIndex - 1
+		if !isLeft {
+			neighborIndex = blockIndex - 2
+		}
+		return DeriveCABACCodedBlockFlagCondTerm(true, true, false, true, codedFlags[neighborIndex])
+	}
+	if !edge.Available || edge.IsIPCM {
+		return true
+	}
+	return DeriveCABACCodedBlockFlagCondTerm(true, true, false, edge.ACBlockAvailable[edgeCoordinate], edge.ACBlockCoded[edgeCoordinate])
+}
+
+func deriveIntra4x4LumaCondTerm(blockIndex, blockX, blockY int, isLeft bool, codedFlags [16]bool, edge CABACIntra4x4EdgeState, currentIntra bool) bool {
+	neighborCoordinate := blockY
+	edgeCoordinate := blockX
+	if isLeft {
+		neighborCoordinate, edgeCoordinate = blockX, blockY
+	}
+	if neighborCoordinate > 0 {
+		rasterIndex := int(luma4x4BlockScanToRaster[blockIndex])
+		neighborRaster := rasterIndex - 1
+		if !isLeft {
+			neighborRaster = rasterIndex - 4
+		}
+		for neighborIndex, candidate := range luma4x4BlockScanToRaster {
+			if int(candidate) == neighborRaster {
+				return DeriveCABACCodedBlockFlagCondTerm(true, currentIntra, false, true, codedFlags[neighborIndex])
+			}
+		}
+		return false
+	}
+	if !edge.Available {
+		return currentIntra
+	}
+	if edge.IsIPCM {
+		return true
+	}
+	return DeriveCABACCodedBlockFlagCondTerm(true, currentIntra, false, edge.TransformBlockAvailable[edgeCoordinate], edge.TransformBlockCoded[edgeCoordinate])
+}
+
+func deriveIntra16x16ACCondTerm(blockIndex, blockX, blockY int, isLeft bool, codedFlags [16]bool, edge CABACIntra16x16EdgeState) bool {
+	neighborCoordinate, edgeCoordinate := blockY, blockX
+	if isLeft {
+		neighborCoordinate, edgeCoordinate = blockX, blockY
+	}
+	if neighborCoordinate > 0 {
+		rasterIndex := int(luma4x4BlockScanToRaster[blockIndex])
+		neighborRaster := rasterIndex - 1
+		if !isLeft {
+			neighborRaster = rasterIndex - 4
+		}
+		for neighborIndex, candidate := range luma4x4BlockScanToRaster {
+			if int(candidate) == neighborRaster {
+				return DeriveCABACCodedBlockFlagCondTerm(true, true, false, true, codedFlags[neighborIndex])
+			}
+		}
+		return false
+	}
+	if !edge.Available || edge.IsIPCM {
+		return true
+	}
+	return DeriveCABACCodedBlockFlagCondTerm(true, true, false, edge.ACTransformBlockAvailable[edgeCoordinate], edge.ACTransformBlockCoded[edgeCoordinate])
+}
+
+// DecodeInterMBType decodes P/SP mb_type (0-3, intra 5-30) or B mb_type (0-22, intra 23-48)
+// from whole-slice contexts (Tables 9-37, 9-39, and 9-41). B neighbor flags report available
+// neighbors coded as B_Skip or B_Direct_16x16 (clause 9.3.3.1.1.3); P slices ignore neighbors.
+func (decoder *CABACArithmeticDecoder) DecodeInterMBType(sliceType uint8, contexts *[CABACContextCount]CABACContextModel, leftAvailable, topAvailable, leftBSkipOrDirect, topBSkipOrDirect bool) (uint8, error) {
+	if contexts == nil {
+		return 0, ErrCABACContextState
+	}
+	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1) {
+		return 0, ErrCABACUnsupportedSyntax
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var mbType uint8
+	var err error
+	if sliceType%5 == 0 {
+		mbType, err = trial.decodePMBType(&trialContexts)
+	} else {
+		increment := 0
+		if leftAvailable && !leftBSkipOrDirect {
+			increment++
+		}
+		if topAvailable && !topBSkipOrDirect {
+			increment++
+		}
+		mbType, err = trial.decodeBMBType(&trialContexts, increment)
+	}
+	if err != nil {
+		return 0, err
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return mbType, nil
+}
+
+func (decoder *CABACArithmeticDecoder) decodePMBType(contexts *[CABACContextCount]CABACContextModel) (uint8, error) {
+	intra, err := decoder.DecodeBin(&contexts[14])
+	if err != nil {
+		return 0, err
+	}
+	if intra {
+		suffix, err := decoder.decodeIntraMBTypeSuffix(contexts, 17)
+		return 5 + suffix, err
+	}
+	second, err := decoder.DecodeBin(&contexts[15])
+	if err != nil {
+		return 0, err
+	}
+	thirdContext := 16
+	if second {
+		thirdContext = 17
+	}
+	third, err := decoder.DecodeBin(&contexts[thirdContext])
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case second && third:
+		return 1, nil
+	case second:
+		return 2, nil
+	case third:
+		return 3, nil
+	}
+	return 0, nil
+}
+
+func (decoder *CABACArithmeticDecoder) decodeBMBType(contexts *[CABACContextCount]CABACContextModel, increment int) (uint8, error) {
+	bins := func(ctxIdx int, count int) (uint8, error) {
+		value := uint8(0)
+		for range count {
+			bin, err := decoder.DecodeBin(&contexts[ctxIdx])
+			if err != nil {
+				return 0, err
+			}
+			value = value<<1 | boolToUint8(bin)
+		}
+		return value, nil
+	}
+	if first, err := bins(27+increment, 1); err != nil || first == 0 {
+		return 0, err
+	}
+	second, err := bins(30, 1)
+	if err != nil {
+		return 0, err
+	}
+	if second == 0 {
+		third, err := bins(32, 1)
+		return 1 + third, err
+	}
+	third, err := bins(31, 1)
+	if err != nil {
+		return 0, err
+	}
+	rest, err := bins(32, 3)
+	if err != nil {
+		return 0, err
+	}
+	if third == 0 {
+		return 3 + rest, nil
+	}
+	switch rest {
+	case 0b101:
+		suffix, err := decoder.decodeIntraMBTypeSuffix(contexts, 32)
+		return 23 + suffix, err
+	case 0b110:
+		return 11, nil
+	case 0b111:
+		return 22, nil
+	}
+	last, err := bins(32, 1)
+	return 12 + rest<<1 + last, err
+}
+
+// decodeIntraMBTypeSuffix decodes the Table 9-36 suffix of an intra mb_type in P (17) or B (32) slices.
+func (decoder *CABACArithmeticDecoder) decodeIntraMBTypeSuffix(contexts *[CABACContextCount]CABACContextModel, offset int) (uint8, error) {
+	bin := func(ctxIdx int) (uint8, error) {
+		value, err := decoder.DecodeBin(&contexts[ctxIdx])
+		return boolToUint8(value), err
+	}
+	if first, err := bin(offset); err != nil || first == 0 {
+		return 0, err
+	}
+	pcm, err := decoder.DecodeTerminateBin()
+	if err != nil || pcm {
+		return 25, err
+	}
+	mbType := uint8(1)
+	cbpLuma, err := bin(offset + 1)
+	if err != nil {
+		return 0, err
+	}
+	mbType += 12 * cbpLuma
+	cbpChroma, err := bin(offset + 2)
+	if err != nil {
+		return 0, err
+	}
+	if cbpChroma == 1 {
+		chromaTwo, err := bin(offset + 2)
+		if err != nil {
+			return 0, err
+		}
+		mbType += 4 + 4*chromaTwo
+	}
+	high, err := bin(offset + 3)
+	if err != nil {
+		return 0, err
+	}
+	low, err := bin(offset + 3)
+	if err != nil {
+		return 0, err
+	}
+	return mbType + 2*high + low, nil
+}
+
+// DecodeSubMBType decodes sub_mb_type for P/SP (0-3, ctxIdx 21-23) or B (0-12, ctxIdx 36-39) slices.
+func (decoder *CABACArithmeticDecoder) DecodeSubMBType(sliceType uint8, contexts *[CABACContextCount]CABACContextModel) (uint8, error) {
+	if contexts == nil {
+		return 0, ErrCABACContextState
+	}
+	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1) {
+		return 0, ErrCABACUnsupportedSyntax
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var binErr error
+	bin := func(ctxIdx int) uint8 {
+		if binErr != nil {
+			return 0
+		}
+		value, err := trial.DecodeBin(&trialContexts[ctxIdx])
+		binErr = err
+		return boolToUint8(value)
+	}
+	var subType uint8
+	switch {
+	case sliceType%5 == 0 && bin(21) == 1:
+		subType = 0
+	case sliceType%5 == 0 && bin(22) == 0:
+		subType = 1
+	case sliceType%5 == 0:
+		subType = 3 - bin(23)
+	case bin(36) == 0:
+		subType = 0
+	case bin(37) == 0:
+		subType = 1 + bin(39)
+	case bin(38) == 0:
+		high := bin(39)
+		subType = 3 + 2*high + bin(39)
+	case bin(39) == 1:
+		subType = 11 + bin(39)
+	default:
+		high := bin(39)
+		subType = 7 + 2*high + bin(39)
+	}
+	if binErr != nil {
+		return 0, binErr
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return subType, nil
 }
 
 // DecodeIntraChromaPredMode decodes intra_chroma_pred_mode using contexts 64-67.
@@ -512,6 +1869,88 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra4x4PredMode(predictedMode uint
 	decoder.commitTrial(&trial, &readerCopy)
 	*contexts = trialContexts
 	return mode, nil
+}
+
+// DeriveIntra4x4PredictedMode derives predIntra4x4PredMode from decoded A/B neighbors.
+// Modes use luma4x4BlkIdx syntax order, not raster order.
+func DeriveIntra4x4PredictedMode(decodedModes [16]uint8, blockIndex int, topModes, leftModes [4]uint8, topAvailable, leftAvailable bool) (uint8, error) {
+	blockScanToRaster := [16]int{0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15}
+	if blockIndex < 0 || blockIndex >= len(blockScanToRaster) {
+		return 0, ErrCABACIntraPredNeighbors
+	}
+	rasterIndex := blockScanToRaster[blockIndex]
+	column, row := rasterIndex%4, rasterIndex/4
+	var leftMode, topMode uint8
+	leftOK, topOK := false, false
+	if column > 0 {
+		neighborRaster := rasterIndex - 1
+		for scanIndex, candidate := range blockScanToRaster {
+			if candidate == neighborRaster {
+				if scanIndex >= blockIndex || decodedModes[scanIndex] > 8 {
+					return 0, ErrCABACIntraPredNeighbors
+				}
+				leftMode, leftOK = decodedModes[scanIndex], true
+				break
+			}
+		}
+	} else if leftAvailable {
+		leftMode = leftModes[row]
+		if leftMode > 8 {
+			return 0, ErrCABACIntraPredNeighbors
+		}
+		leftOK = true
+	}
+	if row > 0 {
+		neighborRaster := rasterIndex - 4
+		for scanIndex, candidate := range blockScanToRaster {
+			if candidate == neighborRaster {
+				if scanIndex >= blockIndex || decodedModes[scanIndex] > 8 {
+					return 0, ErrCABACIntraPredNeighbors
+				}
+				topMode, topOK = decodedModes[scanIndex], true
+				break
+			}
+		}
+	} else if topAvailable {
+		topMode = topModes[column]
+		if topMode > 8 {
+			return 0, ErrCABACIntraPredNeighbors
+		}
+		topOK = true
+	}
+	if !leftOK || !topOK {
+		return 2, nil
+	}
+	if leftMode < topMode {
+		return leftMode, nil
+	}
+	return topMode, nil
+}
+
+// DecodeIntra4x4PredModes decodes all luma prediction modes in syntax scan order.
+func (decoder *CABACArithmeticDecoder) DecodeIntra4x4PredModes(contexts *[2]CABACContextModel, topModes, leftModes [4]uint8, topAvailable, leftAvailable bool) ([16]uint8, error) {
+	var modes [16]uint8
+	if contexts == nil {
+		return modes, ErrCABACContextState
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	for blockIndex := range modes {
+		predictedMode, err := DeriveIntra4x4PredictedMode(modes, blockIndex, topModes, leftModes, topAvailable, leftAvailable)
+		if err != nil {
+			return [16]uint8{}, err
+		}
+		mode, err := trial.DecodeIntra4x4PredMode(predictedMode, &trialContexts)
+		if err != nil {
+			return [16]uint8{}, err
+		}
+		modes[blockIndex] = mode
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return modes, nil
 }
 
 // DecodeTransformSize8x8Flag decodes transform_size_8x8_flag using contexts 399-401.
@@ -895,12 +2334,24 @@ func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifference(neighborMagn
 		}
 	}
 
-	contextIndex := 0
+	contextIndex := uint8(0)
 	if neighborMagnitude >= 3 {
 		contextIndex++
 	}
 	if neighborMagnitude >= 33 {
 		contextIndex++
+	}
+	return decoder.decodeMotionVectorDifferenceWithContext(contextIndex, contexts)
+}
+
+func (decoder *CABACArithmeticDecoder) decodeMotionVectorDifferenceWithContext(contextIndex uint8, contexts *[7]CABACContextModel) (int32, error) {
+	if contexts == nil || contextIndex > 2 {
+		return 0, ErrCABACContextState
+	}
+	for index := range contexts {
+		if contexts[index].stateIndex >= 64 {
+			return 0, ErrCABACContextState
+		}
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
@@ -917,9 +2368,9 @@ func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifference(neighborMagn
 	}
 
 	absolute := uint32(1)
-	contextIndex = 3
+	coefficientContextIndex := 3
 	for absolute < 9 {
-		greater, err := trial.DecodeBin(&trialContexts[contextIndex])
+		greater, err := trial.DecodeBin(&trialContexts[coefficientContextIndex])
 		if err != nil {
 			return 0, err
 		}
@@ -927,7 +2378,7 @@ func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifference(neighborMagn
 			break
 		}
 		if absolute < 4 {
-			contextIndex++
+			coefficientContextIndex++
 		}
 		absolute++
 	}
@@ -1054,6 +2505,311 @@ func (decoder *CABACArithmeticDecoder) DecodeLuma4x4ResidualBlock(significantCon
 	*lastContexts = trialLastContexts
 	*coefficientContexts = trialCoefficientContexts
 	return rasterLevels, nil
+}
+
+// DecodeLuma4x4ResidualBlockWithFlag decodes coded_block_flag and, when set, its residual block.
+func (decoder *CABACArithmeticDecoder) DecodeLuma4x4ResidualBlockWithFlag(leftNonzero, topNonzero uint8, codedFlagContexts *[4]CABACContextModel, significantContexts, lastContexts *[15]CABACContextModel, coefficientContexts *[10]CABACContextModel) ([16]int32, bool, error) {
+	var levels [16]int32
+	if codedFlagContexts == nil || significantContexts == nil || lastContexts == nil || coefficientContexts == nil {
+		return levels, false, ErrCABACContextState
+	}
+	for _, bank := range [][]*CABACContextModel{
+		{&codedFlagContexts[0], &codedFlagContexts[1], &codedFlagContexts[2], &codedFlagContexts[3]},
+		{&significantContexts[0], &significantContexts[1], &significantContexts[2], &significantContexts[3], &significantContexts[4], &significantContexts[5], &significantContexts[6], &significantContexts[7], &significantContexts[8], &significantContexts[9], &significantContexts[10], &significantContexts[11], &significantContexts[12], &significantContexts[13], &significantContexts[14]},
+		{&lastContexts[0], &lastContexts[1], &lastContexts[2], &lastContexts[3], &lastContexts[4], &lastContexts[5], &lastContexts[6], &lastContexts[7], &lastContexts[8], &lastContexts[9], &lastContexts[10], &lastContexts[11], &lastContexts[12], &lastContexts[13], &lastContexts[14]},
+		{&coefficientContexts[0], &coefficientContexts[1], &coefficientContexts[2], &coefficientContexts[3], &coefficientContexts[4], &coefficientContexts[5], &coefficientContexts[6], &coefficientContexts[7], &coefficientContexts[8], &coefficientContexts[9]},
+	} {
+		for _, context := range bank {
+			if context.stateIndex >= 64 {
+				return levels, false, ErrCABACContextState
+			}
+		}
+	}
+	if leftNonzero > 16 || topNonzero > 16 {
+		return levels, false, ErrCABACNonzeroCountRange
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialCodedFlagContexts := *codedFlagContexts
+	trialSignificantContexts := *significantContexts
+	trialLastContexts := *lastContexts
+	trialCoefficientContexts := *coefficientContexts
+	coded, err := trial.DecodeLuma4x4CodedBlockFlag(leftNonzero, topNonzero, &trialCodedFlagContexts)
+	if err != nil {
+		return levels, false, err
+	}
+	if coded {
+		levels, err = trial.DecodeLuma4x4ResidualBlock(&trialSignificantContexts, &trialLastContexts, &trialCoefficientContexts)
+		if err != nil {
+			return [16]int32{}, false, err
+		}
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*codedFlagContexts = trialCodedFlagContexts
+	*significantContexts = trialSignificantContexts
+	*lastContexts = trialLastContexts
+	*coefficientContexts = trialCoefficientContexts
+	return levels, coded, nil
+}
+
+// DecodeChroma4x4ACResidualBlock decodes one 4:2:0 chroma AC block (scan positions 1-15).
+// Context models are caller-initialized for ctxBlockCat 4 and updated transactionally.
+func (decoder *CABACArithmeticDecoder) DecodeChroma4x4ACResidualBlock(leftHasNonzero, topHasNonzero bool, codedFlagContexts *[4]CABACContextModel, significantContexts, lastContexts *[15]CABACContextModel, coefficientContexts *[10]CABACContextModel) ([16]int32, bool, error) {
+	var rasterLevels [16]int32
+	if codedFlagContexts == nil || significantContexts == nil || lastContexts == nil || coefficientContexts == nil {
+		return rasterLevels, false, ErrCABACContextState
+	}
+	for _, contexts := range [][]CABACContextModel{codedFlagContexts[:], significantContexts[:], lastContexts[:], coefficientContexts[:]} {
+		for _, context := range contexts {
+			if context.stateIndex >= 64 {
+				return rasterLevels, false, ErrCABACContextState
+			}
+		}
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialCodedFlagContexts := *codedFlagContexts
+	trialSignificantContexts := *significantContexts
+	trialLastContexts := *lastContexts
+	trialCoefficientContexts := *coefficientContexts
+	coded, err := trial.DecodeLuma4x4CodedBlockFlag(boolToUint8(leftHasNonzero), boolToUint8(topHasNonzero), &trialCodedFlagContexts)
+	if err != nil {
+		return rasterLevels, false, err
+	}
+	if coded {
+		var significance [16]bool
+		lastFound := false
+		for scanIndex := 0; scanIndex < 14; scanIndex++ {
+			isSignificant, err := trial.DecodeBin(&trialSignificantContexts[scanIndex])
+			if err != nil {
+				return [16]int32{}, false, err
+			}
+			if !isSignificant {
+				continue
+			}
+			significance[scanIndex+1] = true
+			isLast, err := trial.DecodeBin(&trialLastContexts[scanIndex])
+			if err != nil {
+				return [16]int32{}, false, err
+			}
+			if isLast {
+				lastFound = true
+				break
+			}
+		}
+		if !lastFound {
+			significance[15] = true
+		}
+		scanLevels, err := trial.DecodeLuma4x4ResidualLevels(&significance, &trialCoefficientContexts)
+		if err != nil {
+			return [16]int32{}, false, err
+		}
+		var acScanLevels [15]int32
+		for scanIndex := 1; scanIndex < 16; scanIndex++ {
+			acScanLevels[scanIndex-1] = scanLevels[scanIndex]
+		}
+		rasterLevels = PlaceChroma4x4ScanLevels(0, acScanLevels)
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*codedFlagContexts = trialCodedFlagContexts
+	*significantContexts = trialSignificantContexts
+	*lastContexts = trialLastContexts
+	*coefficientContexts = trialCoefficientContexts
+	return rasterLevels, coded, nil
+}
+
+// DecodeAndReconstructLuma4x4Residual returns sample-domain luma residuals for one 4x4 block.
+func (decoder *CABACArithmeticDecoder) DecodeAndReconstructLuma4x4Residual(leftNonzero, topNonzero uint8, codedFlagContexts *[4]CABACContextModel, significantContexts, lastContexts *[15]CABACContextModel, coefficientContexts *[10]CABACContextModel, scalingList [16]uint8, qpy int) ([16]int64, bool, error) {
+	if _, err := inverseScaleLuma4x4([16]int32{}, scalingList, qpy); err != nil {
+		return [16]int64{}, false, err
+	}
+	levels, coded, err := decoder.DecodeLuma4x4ResidualBlockWithFlag(leftNonzero, topNonzero, codedFlagContexts, significantContexts, lastContexts, coefficientContexts)
+	if err != nil {
+		return [16]int64{}, false, err
+	}
+	if !coded {
+		return [16]int64{}, false, nil
+	}
+	residual, err := reconstructLuma4x4Residual(levels, scalingList, qpy)
+	if err != nil {
+		return [16]int64{}, false, err
+	}
+	return residual, true, nil
+}
+
+// cabacResidualMaxNumCoeff is maxNumCoeff for ctxBlockCat 0-4 with 4:2:0 chroma (4*NumC8x8 = 4 chroma DC).
+var cabacResidualMaxNumCoeff = [5]int{16, 15, 16, 4, 15}
+
+// DeriveCABACCodedBlockFlagCondTerm returns condTermFlagN for coded_block_flag (clause 9.3.3.1.1.9).
+// transBlockAvailable/transBlockCoded describe neighbor block N of the same ctxBlockCat (and iCbCr);
+// the slice-data-partitioning rule is omitted because data partitioning is unsupported.
+func DeriveCABACCodedBlockFlagCondTerm(neighborAvailable, currentIntra, neighborIPCM, transBlockAvailable, transBlockCoded bool) bool {
+	switch {
+	case !neighborAvailable:
+		return currentIntra
+	case neighborIPCM:
+		return true
+	case !transBlockAvailable:
+		return false
+	}
+	return transBlockCoded
+}
+
+// DecodeResidualBlock decodes coded_block_flag and residual_block_cabac for ctxBlockCat 0-4 (4:2:0),
+// selecting contexts from a whole-slice context array and updating it transactionally.
+// Levels are in coefficient-list order: list index i is scan position i for categories 0, 2, and 3,
+// and scan position i+1 for AC categories 1 and 4. Entries past maxNumCoeff are zero.
+func (decoder *CABACArithmeticDecoder) DecodeResidualBlock(ctxBlockCat uint8, condTermFlagA, condTermFlagB bool, contexts *[CABACContextCount]CABACContextModel) ([16]int32, bool, error) {
+	var levels [16]int32
+	if contexts == nil {
+		return levels, false, ErrCABACContextState
+	}
+	if ctxBlockCat > 4 {
+		return levels, false, ErrCABACUnsupportedSyntax
+	}
+	bases, err := CABACResidualContextBasesForCategory(ctxBlockCat)
+	if err != nil {
+		return levels, false, err
+	}
+	maxNumCoeff := cabacResidualMaxNumCoeff[ctxBlockCat]
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	codedInc := int(boolToUint8(condTermFlagA)) + 2*int(boolToUint8(condTermFlagB))
+	coded, err := trial.DecodeBin(&trialContexts[bases.CodedBlockFlag+codedInc])
+	if err != nil {
+		return levels, false, err
+	}
+	if coded {
+		var significant [16]bool
+		lastFound := false
+		for index := 0; index < maxNumCoeff-1; index++ {
+			increment := index
+			if ctxBlockCat == 3 {
+				increment = min(index, 2) // Min(numDecodAbsLevel/NumC8x8, 2) with NumC8x8 = 1.
+			}
+			isSignificant, err := trial.DecodeBin(&trialContexts[bases.Significant+increment])
+			if err != nil {
+				return [16]int32{}, false, err
+			}
+			if !isSignificant {
+				continue
+			}
+			significant[index] = true
+			isLast, err := trial.DecodeBin(&trialContexts[bases.Last+increment])
+			if err != nil {
+				return [16]int32{}, false, err
+			}
+			if isLast {
+				lastFound = true
+				break
+			}
+		}
+		if !lastFound {
+			significant[maxNumCoeff-1] = true
+		}
+		greaterCap := 4
+		if ctxBlockCat == 3 {
+			greaterCap = 3
+		}
+		if err := trial.decodeCoefficientLevels(trialContexts[bases.AbsLevel:bases.AbsLevel+10], greaterCap, significant[:maxNumCoeff], levels[:maxNumCoeff]); err != nil {
+			return [16]int32{}, false, err
+		}
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return levels, coded, nil
+}
+
+// decodeCoefficientLevels decodes signed levels in reverse list order with clause 9.3.3.1.3 contexts.
+func (decoder *CABACArithmeticDecoder) decodeCoefficientLevels(absContexts []CABACContextModel, greaterCap int, significant []bool, levels []int32) error {
+	equalOne, greaterOne := 0, 0
+	for index := len(significant) - 1; index >= 0; index-- {
+		if !significant[index] {
+			continue
+		}
+		firstInc := 0
+		if greaterOne == 0 {
+			firstInc = min(4, 1+equalOne)
+		}
+		greaterInc := 5 + min(greaterCap, greaterOne)
+		levelMinus1, err := decoder.DecodeCoeffAbsLevelMinus1(&absContexts[firstInc], &absContexts[greaterInc])
+		if err != nil {
+			return err
+		}
+		level, err := decoder.DecodeCoeffSign(levelMinus1)
+		if err != nil {
+			return err
+		}
+		levels[index] = level
+		if levelMinus1 == 0 {
+			equalOne++
+		} else {
+			greaterOne++
+		}
+	}
+	return nil
+}
+
+// Table 9-43 ctxIdxInc by levelListIdx for frame-coded significant_coeff_flag and last_significant_coeff_flag.
+var cabacLuma8x8FrameSignificantInc = [63]uint8{
+	0, 1, 2, 3, 4, 5, 5, 4, 4, 3, 3, 4, 4, 4, 5, 5, 4, 4, 4, 4, 3, 3, 6, 7, 7, 7, 8, 9, 10, 9, 8, 7,
+	7, 6, 11, 12, 13, 11, 6, 7, 8, 9, 14, 10, 9, 8, 6, 11, 12, 13, 11, 6, 9, 14, 10, 9, 11, 12, 13, 11, 14, 10, 12,
+}
+var cabacLuma8x8LastInc = [63]uint8{
+	0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+	3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8,
+}
+
+// DecodeLuma8x8ResidualBlock decodes residual_block_cabac for ctxBlockCat 5 in a frame macroblock.
+// coded_block_flag is not parsed because it is inferred to be 1 when ChromaArrayType != 3;
+// callers invoke this only for 8x8 blocks whose coded_block_pattern bit is set.
+// Levels are in 8x8 frame-scan list order and contexts update transactionally.
+func (decoder *CABACArithmeticDecoder) DecodeLuma8x8ResidualBlock(contexts *[CABACContextCount]CABACContextModel) ([64]int32, error) {
+	var levels [64]int32
+	if contexts == nil {
+		return levels, ErrCABACContextState
+	}
+	bases, err := CABACResidualContextBasesForCategory(5)
+	if err != nil {
+		return levels, err
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var significant [64]bool
+	lastFound := false
+	for index := 0; index < 63; index++ {
+		isSignificant, err := trial.DecodeBin(&trialContexts[bases.Significant+int(cabacLuma8x8FrameSignificantInc[index])])
+		if err != nil {
+			return levels, err
+		}
+		if !isSignificant {
+			continue
+		}
+		significant[index] = true
+		isLast, err := trial.DecodeBin(&trialContexts[bases.Last+int(cabacLuma8x8LastInc[index])])
+		if err != nil {
+			return levels, err
+		}
+		if isLast {
+			lastFound = true
+			break
+		}
+	}
+	if !lastFound {
+		significant[63] = true
+	}
+	if err := trial.decodeCoefficientLevels(trialContexts[bases.AbsLevel:bases.AbsLevel+10], 4, significant[:], levels[:]); err != nil {
+		return [64]int32{}, err
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return levels, nil
 }
 
 func anySignificantCoefficient(significance *[16]bool) bool {

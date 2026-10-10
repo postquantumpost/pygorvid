@@ -231,12 +231,20 @@ pub struct Yuv420Frame {
 }
 
 impl Yuv420Frame {
-    fn plane_bytes(&self, plane: &[u8], width: usize, height: usize, stride: usize) -> io::Result<Vec<u8>> {
+    fn plane_bytes(
+        &self,
+        plane: &[u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+    ) -> io::Result<Vec<u8>> {
         if width == 0 || height == 0 {
             return Ok(Vec::new());
         }
         if stride == 0 || stride < width || plane.len() < stride * height {
-            return Err(invalid("reference picture frame layout is invalid or truncated"));
+            return Err(invalid(
+                "reference picture frame layout is invalid or truncated",
+            ));
         }
         let mut out = Vec::with_capacity(width * height);
         for row in 0..height {
@@ -281,11 +289,7 @@ impl Yuv420FrameBuilder {
         let macroblock_count = picture_width_in_mbs
             .checked_mul(picture_height_in_mbs)
             .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
-        if crop_left % 2 != 0
-            || crop_top % 2 != 0
-            || crop_right % 2 != 0
-            || crop_bottom % 2 != 0
-        {
+        if crop_left % 2 != 0 || crop_top % 2 != 0 || crop_right % 2 != 0 || crop_bottom % 2 != 0 {
             return Err(invalid("YUV 4:2:0 macroblock assembly is invalid"));
         }
         let width = coded_width
@@ -2088,6 +2092,102 @@ pub fn inverse_transform_luma4x4(coefficients: &[i64; 16]) -> [i64; 16] {
     residual
 }
 
+/// Applies luma 4x4 inverse scaling and inverse transform to raster-order levels.
+pub fn reconstruct_luma4x4_residual(
+    levels: &[i32; 16],
+    scaling_list: &[u8; 16],
+    qpy: i32,
+) -> io::Result<[i64; 16]> {
+    let coefficients = inverse_scale_luma4x4(levels, scaling_list, qpy)?;
+    Ok(inverse_transform_luma4x4(&coefficients))
+}
+
+/// Applies the Intra_16x16 luma DC Hadamard and clause 8.5.10 scaling.
+pub fn reconstruct_intra16x16_luma_dc(
+    raster_levels: &[i32; 16],
+    scaling_list: &[u8; 16],
+    qpy: i32,
+) -> io::Result<[i64; 16]> {
+    if !(0..=51).contains(&qpy) {
+        return Err(invalid("inverse scaling QPY is outside [0,51]"));
+    }
+    if scaling_list[0] == 0 {
+        return Err(invalid("inverse scaling list contains zero"));
+    }
+    let hadamard = |values: [i64; 4]| {
+        [
+            values[0] + values[1] + values[2] + values[3],
+            values[0] + values[1] - values[2] - values[3],
+            values[0] - values[1] - values[2] + values[3],
+            values[0] - values[1] + values[2] - values[3],
+        ]
+    };
+    let mut horizontal = [0_i64; 16];
+    for row in 0..4 {
+        horizontal[row * 4..row * 4 + 4].copy_from_slice(&hadamard([
+            i64::from(raster_levels[row * 4]),
+            i64::from(raster_levels[row * 4 + 1]),
+            i64::from(raster_levels[row * 4 + 2]),
+            i64::from(raster_levels[row * 4 + 3]),
+        ]));
+    }
+    let mut transformed = [0_i64; 16];
+    for column in 0..4 {
+        let result = hadamard([
+            horizontal[column],
+            horizontal[4 + column],
+            horizontal[8 + column],
+            horizontal[12 + column],
+        ]);
+        for row in 0..4 {
+            transformed[row * 4 + column] = result[row];
+        }
+    }
+    let factor = INVERSE_SCALE_4X4_FACTORS[(qpy % 6) as usize][0] * i64::from(scaling_list[0]);
+    for value in &mut transformed {
+        *value = if qpy >= 36 {
+            *value * factor << (qpy / 6 - 6)
+        } else {
+            let shift = 6 - qpy / 6;
+            let rounding = 1_i64 << (5 - qpy / 6);
+            (*value * factor + rounding) >> shift
+        };
+    }
+    Ok(transformed)
+}
+
+/// Adds an I16x16 luma residual to the selected prediction mode and clips to 8-bit samples.
+pub fn reconstruct_luma_intra16x16_macroblock(
+    mode: u8,
+    top: Option<&[u8; 16]>,
+    left: Option<&[u8; 16]>,
+    top_left: u8,
+    top_left_available: bool,
+    residual: &[i64; 256],
+) -> io::Result<[u8; 256]> {
+    let prediction = match mode {
+        0 => predict_luma_intra16x16_vertical(
+            top.ok_or_else(|| invalid("I16x16 vertical mode requires top references"))?,
+        ),
+        1 => predict_luma_intra16x16_horizontal(
+            left.ok_or_else(|| invalid("I16x16 horizontal mode requires left references"))?,
+        ),
+        2 => predict_luma_intra16x16_dc(top, left),
+        3 if top_left_available => predict_luma_intra16x16_plane(
+            top.ok_or_else(|| invalid("I16x16 plane mode requires top references"))?,
+            left.ok_or_else(|| invalid("I16x16 plane mode requires left references"))?,
+            top_left,
+        ),
+        3 => return Err(invalid("I16x16 plane mode requires top-left reference")),
+        _ => return Err(invalid("I16x16 prediction mode is outside [0,3]")),
+    };
+    let mut samples = [0_u8; 256];
+    for index in 0..256 {
+        samples[index] = (i64::from(prediction[index]) + residual[index]).clamp(0, 255) as u8;
+    }
+    Ok(samples)
+}
+
 /// Applies the 4:2:0 2x2 inverse Hadamard transform to chroma DC levels.
 pub fn inverse_transform_chroma_dc2x2(coefficients: &[i32; 4]) -> [i64; 4] {
     let [c00, c01, c10, c11] = coefficients.map(i64::from);
@@ -2731,6 +2831,165 @@ pub fn predict_luma_intra4x4_horizontal_up(left: &[u8; 8]) -> [u8; 16] {
         }
     }
     prediction
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LumaIntra4x4Block {
+    pub mode: u8,
+    pub top: [u8; 8],
+    pub left: [u8; 8],
+    pub top_left: u8,
+    pub top_available: bool,
+    pub left_available: bool,
+    pub top_left_available: bool,
+    pub residual: [i64; 16],
+}
+
+pub fn reconstruct_luma_intra4x4_macroblock(
+    blocks: &[LumaIntra4x4Block; 16],
+) -> io::Result<[u8; 256]> {
+    let block_x = [0, 4, 0, 4, 8, 12, 8, 12, 0, 4, 0, 4, 8, 12, 8, 12];
+    let block_y = [0, 0, 4, 4, 0, 0, 4, 4, 8, 8, 12, 12, 8, 8, 12, 12];
+    let mut macroblock = [0_u8; 256];
+    for (block_index, block) in blocks.iter().enumerate() {
+        let top4 = [block.top[0], block.top[1], block.top[2], block.top[3]];
+        let left4 = [block.left[0], block.left[1], block.left[2], block.left[3]];
+        let prediction = match block.mode {
+            0 if block.top_available => predict_luma_intra4x4_vertical(&top4),
+            1 if block.left_available => predict_luma_intra4x4_horizontal(&left4),
+            2 => predict_luma_intra4x4_dc(
+                block.top_available.then_some(&top4),
+                block.left_available.then_some(&left4),
+            ),
+            3 if block.top_available => predict_luma_intra4x4_diagonal_down_left(&block.top),
+            4 if block.top_available && block.left_available && block.top_left_available => {
+                predict_luma_intra4x4_diagonal_down_right(&block.top, &left4, block.top_left)
+            }
+            5 if block.top_available && block.left_available && block.top_left_available => {
+                predict_luma_intra4x4_vertical_right(&block.top, &left4, block.top_left)
+            }
+            6 if block.top_available && block.left_available && block.top_left_available => {
+                predict_luma_intra4x4_horizontal_down(&top4, &left4, block.top_left)
+            }
+            7 if block.top_available => predict_luma_intra4x4_vertical_left(&block.top),
+            8 if block.left_available => predict_luma_intra4x4_horizontal_up(&block.left),
+            _ => return Err(invalid("luma Intra_4x4 macroblock input is invalid")),
+        };
+        for row in 0..4 {
+            for column in 0..4 {
+                let sample_index = row * 4 + column;
+                let predicted = i64::from(prediction[sample_index]);
+                let residual = block.residual[sample_index];
+                let sample = if residual < -predicted {
+                    0
+                } else if residual > 255 - predicted {
+                    255
+                } else {
+                    (predicted + residual) as u8
+                };
+                macroblock[(block_y[block_index] + row) * 16 + block_x[block_index] + column] =
+                    sample;
+            }
+        }
+    }
+    Ok(macroblock)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LumaIntra8x8Block {
+    pub mode: u8,
+    pub top: [u8; 16],
+    pub left: [u8; 16],
+    pub top_left: u8,
+    pub top_available: bool,
+    pub left_available: bool,
+    pub top_left_available: bool,
+    pub residual: [i64; 64],
+}
+
+impl Default for LumaIntra8x8Block {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            top: [0; 16],
+            left: [0; 16],
+            top_left: 0,
+            top_available: false,
+            left_available: false,
+            top_left_available: false,
+            residual: [0; 64],
+        }
+    }
+}
+
+pub fn reconstruct_luma_intra8x8_macroblock(
+    blocks: &[LumaIntra8x8Block; 4],
+) -> io::Result<[u8; 256]> {
+    let mut macroblock = [0_u8; 256];
+    for (block_index, block) in blocks.iter().enumerate() {
+        let top8 = [
+            block.top[0],
+            block.top[1],
+            block.top[2],
+            block.top[3],
+            block.top[4],
+            block.top[5],
+            block.top[6],
+            block.top[7],
+        ];
+        let left8 = [
+            block.left[0],
+            block.left[1],
+            block.left[2],
+            block.left[3],
+            block.left[4],
+            block.left[5],
+            block.left[6],
+            block.left[7],
+        ];
+        let prediction = match block.mode {
+            0 if block.top_available => predict_luma_intra8x8_vertical(&top8),
+            1 if block.left_available => predict_luma_intra8x8_horizontal(&left8),
+            2 => predict_luma_intra8x8_dc(
+                block.top_available.then_some(&top8),
+                block.left_available.then_some(&left8),
+            ),
+            3 if block.top_available => predict_luma_intra8x8_diagonal_down_left(&block.top),
+            4 if block.top_available && block.left_available && block.top_left_available => {
+                predict_luma_intra8x8_diagonal_down_right(&block.top, &left8, block.top_left)
+            }
+            5 if block.top_available && block.left_available && block.top_left_available => {
+                predict_luma_intra8x8_vertical_right(&block.top, &left8, block.top_left)
+            }
+            6 if block.top_available && block.left_available && block.top_left_available => {
+                predict_luma_intra8x8_horizontal_down(&top8, &block.left, block.top_left)
+            }
+            7 if block.top_available => predict_luma_intra8x8_vertical_left(&block.top),
+            8 if block.left_available => predict_luma_intra8x8_horizontal_up(&block.left),
+            9 if block.top_available && block.left_available => {
+                predict_luma_intra8x8_plane(&block.top, &block.left)
+            }
+            _ => return Err(invalid("luma Intra_8x8 macroblock input is invalid")),
+        };
+        let origin_x = (block_index % 2) * 8;
+        let origin_y = (block_index / 2) * 8;
+        for row in 0..8 {
+            for column in 0..8 {
+                let index = row * 8 + column;
+                let predicted = i64::from(prediction[index]);
+                let residual = block.residual[index];
+                let sample = if residual < -predicted {
+                    0
+                } else if residual > 255 - predicted {
+                    255
+                } else {
+                    (predicted + residual) as u8
+                };
+                macroblock[(origin_y + row) * 16 + origin_x + column] = sample;
+            }
+        }
+    }
+    Ok(macroblock)
 }
 
 fn inverse_transform_4x4_line(coefficients: [i64; 4]) -> [i64; 4] {
@@ -5405,7 +5664,10 @@ mod tests {
             .is_err());
         let frame = builder.finish().unwrap();
         assert_eq!((frame.width, frame.height), (28, 28));
-        assert_eq!((frame.y_stride, frame.u_stride, frame.v_stride), (28, 14, 14));
+        assert_eq!(
+            (frame.y_stride, frame.u_stride, frame.v_stride),
+            (28, 14, 14)
+        );
         for (plane, stride, x, y, expected) in [
             (&frame.y, frame.y_stride, 0, 0, 1),
             (&frame.y, frame.y_stride, 14, 0, 4),
@@ -5588,6 +5850,22 @@ mod tests {
         assert_eq!(
             inverse_transform_luma4x4(&horizontal_frequency),
             [1, 1, 0, -1, 1, 1, 0, -1, 1, 1, 0, -1, 1, 1, 0, -1]
+        );
+    }
+
+    #[test]
+    fn reconstructs_luma4x4_residual_by_scaling_then_transforming() {
+        let mut levels = [0_i32; 16];
+        levels[0] = 64;
+        assert_eq!(
+            reconstruct_luma4x4_residual(&levels, &[16; 16], 0).unwrap(),
+            [10_i64; 16]
+        );
+        assert_eq!(
+            reconstruct_luma4x4_residual(&levels, &[16; 16], 52)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
         );
     }
 
@@ -6108,5 +6386,39 @@ mod tests {
             predict_luma_intra4x4_horizontal_up(&left),
             [15, 20, 25, 30, 25, 30, 35, 40, 35, 40, 45, 50, 45, 50, 55, 60]
         );
+    }
+
+    #[test]
+    fn reconstructs_luma_intra4x4_macroblock_from_decoded_blocks() {
+        let blocks: [LumaIntra4x4Block; 16] = std::array::from_fn(|index| {
+            let mut block = LumaIntra4x4Block {
+                mode: (index % 9) as u8,
+                top_left: 90,
+                top_available: true,
+                left_available: true,
+                top_left_available: true,
+                ..LumaIntra4x4Block::default()
+            };
+            for sample in 0..8 {
+                block.top[sample] = 10 + sample as u8 * 10;
+                block.left[sample] = 90 + sample as u8 * 10;
+            }
+            block
+        });
+        let mut blocks = blocks;
+        blocks[0].residual[0] = -11;
+        blocks[1].residual[0] = 300;
+
+        let macroblock = reconstruct_luma_intra4x4_macroblock(&blocks).unwrap();
+        assert_eq!((macroblock[0], macroblock[4]), (0, 255));
+        assert_eq!((macroblock[7], macroblock[3 * 16 + 4]), (90, 120));
+        assert_eq!(macroblock[4 * 16], 65);
+        assert_eq!(macroblock[4 * 16 + 4], 20);
+
+        blocks[7].top_available = false;
+        assert!(reconstruct_luma_intra4x4_macroblock(&blocks).is_err());
+        blocks[7].top_available = true;
+        blocks[9].mode = 9;
+        assert!(reconstruct_luma_intra4x4_macroblock(&blocks).is_err());
     }
 }

@@ -21,6 +21,7 @@ from pygorvid import (
     LumaEdgeSamples,
     LumaStrongEdgeSamples,
     LumaPredictionVector,
+    LumaIntra4x4Block,
     ChromaEdgeSamples,
     derive_luma_deblocking_parameters,
     apply_luma_deblocking_edge,
@@ -65,6 +66,7 @@ from pygorvid import (
     reconstruct_chroma4x4_residual,
     assemble_chroma420_residual_macroblock,
     reconstruct_chroma420_macroblock,
+    reconstruct_luma_intra4x4_macroblock,
     interpolate_luma_half_sample_horizontal,
     interpolate_luma_half_sample_diagonal,
     interpolate_luma_half_sample_vertical,
@@ -1646,6 +1648,32 @@ def test_reconstruct_chroma420_macroblock_adds_residual_and_clips():
     assert reconstruct_chroma420_macroblock(prediction, residual) == [0, 255, 75, 125] + [0] * 60
 
 
+def test_reconstruct_luma_intra4x4_macroblock_dispatches_and_places_scan_blocks():
+    top = tuple(10 + sample * 10 for sample in range(8))
+    left = tuple(90 + sample * 10 for sample in range(8))
+    blocks = [
+        LumaIntra4x4Block(index % 9, top=top, left=left, top_left=90)
+        for index in range(16)
+    ]
+    blocks[0] = LumaIntra4x4Block(0, residual=(-11,) + (0,) * 15, top=top)
+    blocks[1] = LumaIntra4x4Block(1, residual=(300,) + (0,) * 15, left=left)
+
+    macroblock = reconstruct_luma_intra4x4_macroblock(blocks)
+    assert (macroblock[0], macroblock[4]) == (0, 255)
+    assert (macroblock[7], macroblock[3 * 16 + 4]) == (90, 120)
+    assert macroblock[4 * 16] == 65
+    assert macroblock[4 * 16 + 4] == 20
+
+    missing_reference = list(blocks)
+    missing_reference[7] = LumaIntra4x4Block(0)
+    with pytest.raises(IntraPredictionError, match="top references"):
+        reconstruct_luma_intra4x4_macroblock(missing_reference)
+    invalid_mode = list(blocks)
+    invalid_mode[9] = LumaIntra4x4Block(9)
+    with pytest.raises(IntraPredictionError, match="syntax is invalid"):
+        reconstruct_luma_intra4x4_macroblock(invalid_mode)
+
+
 def test_yuv420_frame_builder_places_cropped_raster_macroblocks():
     builder = Yuv420FrameBuilder(2, 2, 2, 2, 2, 2)
     with pytest.raises(InterPredictionError, match="incomplete"):
@@ -1813,6 +1841,14 @@ def test_inverse_transform_luma4x4_dc_and_frequency_impulse_vectors():
     horizontal_frequency[1] = 64
     expected = [1, 1, 0, -1] * 4
     assert inverse_transform_luma4x4(horizontal_frequency) == expected
+
+
+def test_reconstruct_luma4x4_residual_scales_then_transforms():
+    from pygorvid.reconstruction import reconstruct_luma4x4_residual
+
+    assert reconstruct_luma4x4_residual([64] + [0] * 15, [16] * 16, 0) == [10] * 16
+    with pytest.raises(InverseScaleError, match="QPY"):
+        reconstruct_luma4x4_residual([64] + [0] * 15, [16] * 16, 52)
 
 
 @pytest.mark.parametrize(("dc_level", "expected"), ((31, 0), (32, 1), (-33, -1)))

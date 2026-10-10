@@ -203,7 +203,16 @@ fn parses_sps_dimensions_and_crop_units() {
     assert_eq!((info.width, info.height), (1920, 1080));
     assert_eq!(info.frame_crop_bottom, 8);
 
-    let progressive_cropped = make_sps_geometry(100, 0, 42, concat!("1", "010", "1", "1"), 0, 1, true, [0, 0, 0, 1]);
+    let progressive_cropped = make_sps_geometry(
+        100,
+        0,
+        42,
+        concat!("1", "010", "1", "1"),
+        0,
+        1,
+        true,
+        [0, 0, 0, 1],
+    );
     let info = parse_sps(&progressive_cropped).unwrap();
     assert_eq!((info.coded_width, info.coded_height), (16, 32));
     assert_eq!((info.width, info.height), (16, 30));
@@ -215,7 +224,16 @@ fn parses_sps_dimensions_and_crop_units() {
 
 #[test]
 fn parses_sps_reference_and_frame_flags() {
-    let nal = make_sps_geometry(100, 0, 42, concat!("1", "010", "1", "1"), 0, 0, true, [0; 4]);
+    let nal = make_sps_geometry(
+        100,
+        0,
+        42,
+        concat!("1", "010", "1", "1"),
+        0,
+        0,
+        true,
+        [0; 4],
+    );
     let info = parse_sps(&nal).unwrap();
     assert_eq!(info.max_num_ref_frames, 0);
     assert!(!info.gaps_in_frame_num_value_allowed);

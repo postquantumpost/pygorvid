@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use pygorvid::{
     DecodeError, H264Decoder, PresentationOrderBuffer, PresentationPicture, ReferencePicture,
-    Yuv420Frame, VideoSampleReader,
+    VideoSampleReader, Yuv420Frame,
 };
 
 #[test]
@@ -28,7 +28,10 @@ fn h264_decoder_tracks_reader_state() {
         long_term_frame_idx: None,
     };
     decoder.store_reference_picture(reference, &frame).unwrap();
-    let stored = decoder.reference_picture_buffer.get(reference.identifier).unwrap();
+    let stored = decoder
+        .reference_picture_buffer
+        .get(reference.identifier)
+        .unwrap();
     assert_eq!(stored.reference.identifier, reference.identifier);
     assert_eq!(stored.frame.y[0], 1);
 
@@ -104,7 +107,10 @@ fn h264_decoder_tracks_p_frame_reference_cache_validation() {
     assert_eq!(decoder.reference_pictures().len(), 1);
     decoded.y[0] = 88;
     assert_eq!(decoder.decode_frame(3).unwrap(), packed);
-    assert_eq!(decoder.reference_picture_buffer.get(3).unwrap().frame, frame);
+    assert_eq!(
+        decoder.reference_picture_buffer.get(3).unwrap().frame,
+        frame
+    );
 }
 
 #[test]
@@ -126,18 +132,28 @@ fn h264_decoder_tracks_b_frame_cache_and_presentation_order() {
         u: vec![5],
         v: vec![6],
     };
-    decoder.store_reference_picture(ReferencePicture {
-        identifier: 1,
-        frame_num: 1,
-        picture_order_cnt: 1,
-        long_term_frame_idx: None,
-    }, &frame).unwrap();
-    decoder.store_reference_picture(ReferencePicture {
-        identifier: 2,
-        frame_num: 2,
-        picture_order_cnt: 2,
-        long_term_frame_idx: None,
-    }, &frame).unwrap();
+    decoder
+        .store_reference_picture(
+            ReferencePicture {
+                identifier: 1,
+                frame_num: 1,
+                picture_order_cnt: 1,
+                long_term_frame_idx: None,
+            },
+            &frame,
+        )
+        .unwrap();
+    decoder
+        .store_reference_picture(
+            ReferencePicture {
+                identifier: 2,
+                frame_num: 2,
+                picture_order_cnt: 2,
+                long_term_frame_idx: None,
+            },
+            &frame,
+        )
+        .unwrap();
     assert_eq!(decoder.decode_frame(1).unwrap(), frame);
     assert_eq!(decoder.decode_frame(2).unwrap(), frame);
 
@@ -174,7 +190,10 @@ fn h264_decoder_tracks_b_frame_cache_and_presentation_order() {
         [4, 6]
     );
     assert_eq!(
-        drained.iter().map(|picture| picture.frame.y[0]).collect::<Vec<_>>(),
+        drained
+            .iter()
+            .map(|picture| picture.frame.y[0])
+            .collect::<Vec<_>>(),
         [4, 6]
     );
     assert_eq!(decoder.decode_frame(1).unwrap(), frame);
@@ -203,15 +222,40 @@ fn h264_decoder_tracks_first_sync_index_and_reference_validation() {
         u: vec![5],
         v: vec![6],
     };
-    decoder.store_reference_picture(ReferencePicture {
-        identifier: 0,
-        frame_num: 0,
-        picture_order_cnt: 0,
-        long_term_frame_idx: None,
-    }, &frame).unwrap();
-    decoder.validate_reference_frame(0, &frame.y, &frame.u, &frame.v).unwrap();
+    decoder
+        .store_reference_picture(
+            ReferencePicture {
+                identifier: 0,
+                frame_num: 0,
+                picture_order_cnt: 0,
+                long_term_frame_idx: None,
+            },
+            &frame,
+        )
+        .unwrap();
+    decoder
+        .validate_reference_frame(0, &frame.y, &frame.u, &frame.v)
+        .unwrap();
     let mismatch = decoder.validate_reference_frame(0, &[9, 2, 3, 4], &frame.u, &frame.v);
     assert_eq!(mismatch, Err(DecodeError::ReferenceMismatch));
+}
+
+#[test]
+fn h264_decoder_reads_dependencies_without_advancing_owned_reader() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("testdata")
+        .join("h264")
+        .join("high42-1080p.mp4");
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder = H264Decoder::new(reader);
+    let dependencies = decoder.decode_order_dependency_samples(3).unwrap();
+    assert!(!dependencies.is_empty());
+    assert!(dependencies
+        .windows(2)
+        .all(|samples| samples[0].index < samples[1].index));
+    assert_eq!(dependencies[0].index, 0);
+    assert!(dependencies[0].is_sync);
 }
 
 #[test]

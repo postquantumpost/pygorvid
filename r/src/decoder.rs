@@ -18,7 +18,10 @@ impl fmt::Display for DecodeError {
             Self::FrameIndexOutOfRange => write!(f, "frame index is out of range"),
             Self::NotImplemented => write!(f, "H.264 decoder is not implemented yet"),
             Self::UnsupportedFeature => {
-                write!(f, "unsupported H.264 profile, chroma format, bit depth, or interlace mode")
+                write!(
+                    f,
+                    "unsupported H.264 profile, chroma format, bit depth, or interlace mode"
+                )
             }
             Self::ReferenceMismatch => {
                 write!(f, "decoded frame does not match the reference frame data")
@@ -29,13 +32,14 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct H264Decoder {
     pub sample_count: Option<usize>,
     pub sequence_parameter_sets: Vec<crate::sps::SpsInfo>,
     pub picture_parameter_sets: Vec<crate::pps::PpsInfo>,
     pub reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer,
     pub presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer,
+    sample_reader: Option<crate::videosamplereader::VideoSampleReader>,
     first_sync_sample_index: Option<u64>,
     unsupported_feature: bool,
 }
@@ -64,6 +68,7 @@ impl H264Decoder {
             picture_parameter_sets,
             reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer::default(),
             presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer::new(0),
+            sample_reader: Some(sample_reader),
             first_sync_sample_index,
             unsupported_feature,
         }
@@ -76,6 +81,7 @@ impl H264Decoder {
             picture_parameter_sets: Vec::new(),
             reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer::default(),
             presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer::new(0),
+            sample_reader: None,
             first_sync_sample_index: None,
             unsupported_feature: false,
         }
@@ -106,6 +112,18 @@ impl H264Decoder {
 
     pub fn first_sync_sample_index(&self) -> Option<u64> {
         self.first_sync_sample_index
+    }
+
+    pub fn decode_order_dependency_samples(
+        &mut self,
+        presentation_index: usize,
+    ) -> io::Result<Vec<crate::videosamplereader::CompressedSample>> {
+        self.sample_reader
+            .as_mut()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "sample reader is unavailable")
+            })?
+            .decode_order_dependency_samples(presentation_index)
     }
 
     pub fn decode_first_sync_frame(&mut self) -> Result<Yuv420Frame, DecodeError> {

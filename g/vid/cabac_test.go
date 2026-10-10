@@ -1,7 +1,9 @@
 package vid
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -156,6 +158,165 @@ func TestCABACIIntraMBTypeContextInitialization(t *testing.T) {
 	for _, qpy := range []int{-1, 52} {
 		if _, err := NewCABACIIntraMBTypeContexts(qpy); !errors.Is(err, ErrCABACContextInitRange) {
 			t.Errorf("SliceQPY %d error = %v; want out-of-range", qpy, err)
+		}
+	}
+}
+
+func TestCABACSliceContextsMatchSyntaxInitializers(t *testing.T) {
+	contexts, err := NewCABACSliceContexts(7, 3, 26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same := func(name string, first int, want []CABACContextModel) {
+		t.Helper()
+		for index, model := range want {
+			if contexts[first+index] != model {
+				t.Errorf("%s ctxIdx %d = %+v; want %+v", name, first+index, contexts[first+index], model)
+			}
+		}
+	}
+	mbType, _ := NewCABACIIntraMBTypeContexts(26)
+	qpDelta, _ := NewCABACIMBQPDeltaContexts(26)
+	chroma, _ := NewCABACIIntraChromaPredModeContexts(26)
+	intra4x4, _ := NewCABACIIntra4x4PredModeContexts(26)
+	lumaCBP, _ := NewCABACILumaCodedBlockPatternContexts(26)
+	chromaCBP, _ := NewCABACIChromaCodedBlockPatternContexts(26)
+	codedFlag, _ := NewCABACILuma4x4CodedBlockFlagContexts(26)
+	transform, _ := NewCABACITransformSize8x8Contexts(26)
+	same("I mb_type", 3, mbType[:])
+	same("mb_qp_delta", 60, qpDelta[:])
+	same("intra_chroma_pred_mode", 64, chroma[:])
+	same("intra4x4 mode", 68, intra4x4[:])
+	same("luma CBP", 73, lumaCBP[:])
+	same("chroma CBP", 77, chromaCBP[:])
+	same("luma4x4 coded_block_flag", 93, codedFlag[:])
+	same("transform_size_8x8_flag", 399, transform[:])
+	for initIDC := uint8(0); initIDC <= 2; initIDC++ {
+		contexts, err = NewCABACSliceContexts(5, initIDC, 30)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pMBType, _ := NewCABACPInterMBTypeContexts(initIDC, 30)
+		mvdX, mvdY, refIdx, _ := NewCABACInterPredictionContexts(initIDC, 30)
+		same("P mb_type", 14, pMBType[:])
+		same("mvd x", 40, mvdX[:])
+		same("mvd y", 47, mvdY[:])
+		same("ref_idx", 54, refIdx[:])
+	}
+}
+
+func TestCABACSliceContextsUseStandardColumns(t *testing.T) {
+	for _, test := range []struct {
+		sliceType, initIDC uint8
+		ctxIdx, m, n       int
+		state              uint8
+		mps                bool
+	}{
+		{sliceType: 2, ctxIdx: 85, m: -17, n: 123, state: 31, mps: true},
+		{sliceType: 2, ctxIdx: 227, m: -3, n: 71, state: 2, mps: true},
+		{sliceType: 2, ctxIdx: 402, m: -17, n: 120, state: 28, mps: true},
+		{sliceType: 0, initIDC: 0, ctxIdx: 105, m: -2, n: 85, state: 17, mps: true},
+		{sliceType: 1, initIDC: 1, ctxIdx: 30, m: -45, n: 127, state: 10, mps: false},
+		{sliceType: 6, initIDC: 2, ctxIdx: 459, m: 20, n: 64, state: 32, mps: true},
+	} {
+		contexts, err := NewCABACSliceContexts(test.sliceType, test.initIDC, 26)
+		if err != nil {
+			t.Fatal(err)
+		}
+		model, _ := NewCABACContextModel(test.m, test.n, 26)
+		got := contexts[test.ctxIdx]
+		if got != *model || got.StateIndex() != test.state || got.MPS() != test.mps {
+			t.Errorf("slice %d idc %d ctxIdx %d = (%d,%t); want (%d,%t)", test.sliceType, test.initIDC, test.ctxIdx, got.StateIndex(), got.MPS(), test.state, test.mps)
+		}
+	}
+	for _, test := range []struct {
+		sliceType, initIDC uint8
+		sliceQPY           int
+		want               error
+	}{
+		{10, 0, 26, ErrCABACUnsupportedSyntax},
+		{0, 3, 26, ErrCABACContextInitRange},
+		{1, 3, 26, ErrCABACContextInitRange},
+		{2, 0, 52, ErrCABACContextInitRange},
+	} {
+		if _, err := NewCABACSliceContexts(test.sliceType, test.initIDC, test.sliceQPY); !errors.Is(err, test.want) {
+			t.Errorf("NewCABACSliceContexts(%d,%d,%d) error = %v; want %v", test.sliceType, test.initIDC, test.sliceQPY, err, test.want)
+		}
+	}
+}
+
+func TestCABACResidualContextBases(t *testing.T) {
+	want := [6]CABACResidualContextBases{
+		{85, 105, 166, 227}, {89, 120, 181, 237}, {93, 134, 195, 247},
+		{97, 149, 210, 257}, {101, 152, 213, 266}, {-1, 402, 417, 426},
+	}
+	for category, expected := range want {
+		got, err := CABACResidualContextBasesForCategory(uint8(category))
+		if err != nil || got != expected {
+			t.Errorf("ctxBlockCat %d bases = %+v, %v; want %+v", category, got, err, expected)
+		}
+	}
+	if _, err := CABACResidualContextBasesForCategory(6); !errors.Is(err, ErrCABACUnsupportedSyntax) {
+		t.Fatalf("ctxBlockCat 6 error = %v; want unsupported syntax", err)
+	}
+}
+
+func TestCABACPInterMBTypeContextInitialization(t *testing.T) {
+	want := [3][4]struct {
+		state uint8
+		mps   bool
+	}{
+		{{54, false}, {14, false}, {54, true}, {6, false}},
+		{{54, false}, {22, false}, {54, true}, {1, true}},
+		{{12, false}, {1, false}, {35, true}, {47, false}},
+	}
+	for initIDC := uint8(0); initIDC <= 2; initIDC++ {
+		contexts, err := NewCABACPInterMBTypeContexts(initIDC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index, context := range contexts {
+			if context.StateIndex() != want[initIDC][index].state || context.MPS() != want[initIDC][index].mps {
+				t.Errorf("cabac_init_idc %d ctxIdx %d = (%d,%t); want (%d,%t)", initIDC, index+14, context.StateIndex(), context.MPS(), want[initIDC][index].state, want[initIDC][index].mps)
+			}
+		}
+	}
+	if _, err := NewCABACPInterMBTypeContexts(3, 26); !errors.Is(err, ErrCABACContextInitRange) {
+		t.Fatalf("invalid cabac_init_idc error = %v; want context-init range error", err)
+	}
+	if _, err := NewCABACPInterMBTypeContexts(0, 52); !errors.Is(err, ErrCABACContextInitRange) {
+		t.Fatalf("invalid SliceQPY error = %v; want context-init range error", err)
+	}
+}
+
+func TestCABACInterPredictionContextInitialization(t *testing.T) {
+	mvdX, mvdY, refIdx, err := NewCABACInterPredictionContexts(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMPSX := [7]bool{true, true, true, false, true, true, true}
+	for index, context := range mvdX {
+		if context.StateIndex() != [7]uint8{5, 17, 32, 8, 3, 22, 24}[index] || context.MPS() != wantMPSX[index] {
+			t.Errorf("MVD X context %d = (%d,%t); want expected Table 9-15 state", index+40, context.StateIndex(), context.MPS())
+		}
+	}
+	for index, context := range mvdY {
+		wantStates := [7]uint8{5, 12, 30, 9, 5, 17, 24}
+		wantMPS := [7]bool{false, true, true, false, true, true, true}
+		if context.StateIndex() != wantStates[index] || context.MPS() != wantMPS[index] {
+			t.Errorf("MVD Y context %d = (%d,%t); want (%d,%t)", index+47, context.StateIndex(), context.MPS(), wantStates[index], wantMPS[index])
+		}
+	}
+	wantRefStates := [6]uint8{3, 10, 10, 16, 8, 5}
+	wantRefMPS := [6]bool{true, true, true, true, true, false}
+	for index, context := range refIdx {
+		if context.StateIndex() != wantRefStates[index] || context.MPS() != wantRefMPS[index] {
+			t.Errorf("ref_idx context %d = (%d,%t); want (%d,%t)", index+54, context.StateIndex(), context.MPS(), wantRefStates[index], wantRefMPS[index])
+		}
+	}
+	for _, input := range [][2]int{{3, 26}, {0, -1}, {0, 52}} {
+		if _, _, _, err := NewCABACInterPredictionContexts(uint8(input[0]), input[1]); !errors.Is(err, ErrCABACContextInitRange) {
+			t.Errorf("inter contexts (%d,%d) error = %v; want context-init range", input[0], input[1], err)
 		}
 	}
 }
@@ -620,6 +781,176 @@ func TestCABACMBSkipFlagContextDerivation(t *testing.T) {
 	}
 }
 
+func TestCABACReferenceIndexTruncatedUnary(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		maximum uint32
+		inc     uint8
+		mps     [6]bool
+		want    uint8
+	}{
+		{name: "inferred zero", maximum: 0, want: 0},
+		{name: "zero", maximum: 3, inc: 2, want: 0},
+		{name: "one", maximum: 3, inc: 1, mps: [6]bool{false, true, false, false, false, false}, want: 1},
+		{name: "two", maximum: 3, inc: 0, mps: [6]bool{true, false, false, false, true, false}, want: 2},
+		{name: "maximum", maximum: 3, inc: 3, mps: [6]bool{false, false, false, true, true, true}, want: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+			var contexts [6]CABACContextModel
+			for index := range contexts {
+				contexts[index] = CABACContextModel{stateIndex: 63, valueMPS: test.mps[index]}
+			}
+			got, err := decoder.DecodeReferenceIndex(test.maximum, test.inc, &contexts)
+			if err != nil || got != test.want {
+				t.Fatalf("ref_idx = %d, %v; want %d", got, err, test.want)
+			}
+		})
+	}
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+	contexts := [6]CABACContextModel{}
+	if _, err := decoder.DecodeReferenceIndex(3, 4, &contexts); !errors.Is(err, ErrCABACContextState) {
+		t.Fatalf("invalid neighbor context increment error = %v; want context-state error", err)
+	}
+	if _, err := decoder.DecodeReferenceIndex(32, 0, &contexts); !errors.Is(err, ErrCABACUnsupportedSyntax) {
+		t.Fatalf("invalid maximum ref_idx error = %v; want unsupported syntax", err)
+	}
+}
+
+func TestCABACInterReferenceIndexContextIncrement(t *testing.T) {
+	neighbor := CABACInterNeighbor{Available: true, PredictionModeMatches: true, ReferenceIndex: 1}
+	if got := DeriveCABACReferenceIndexContextIncrement(neighbor, CABACInterNeighbor{}, false, false); got != 1 {
+		t.Fatalf("left-only ref_idx increment = %d; want 1", got)
+	}
+	if got := DeriveCABACReferenceIndexContextIncrement(CABACInterNeighbor{}, neighbor, false, false); got != 2 {
+		t.Fatalf("top-only ref_idx increment = %d; want 2", got)
+	}
+	if got := DeriveCABACReferenceIndexContextIncrement(neighbor, neighbor, false, false); got != 3 {
+		t.Fatalf("left/top ref_idx increment = %d; want 3", got)
+	}
+	for _, blocked := range []CABACInterNeighbor{
+		{},
+		{Available: true, Skip: true, PredictionModeMatches: true, ReferenceIndex: 1},
+		{Available: true, Intra: true, PredictionModeMatches: true, ReferenceIndex: 1},
+		{Available: true, PredictionModeMatches: false, ReferenceIndex: 1},
+		{Available: true, PredictionModeMatches: true, ReferenceIndex: 0},
+	} {
+		if got := DeriveCABACReferenceIndexContextIncrement(blocked, CABACInterNeighbor{}, false, false); got != 0 {
+			t.Errorf("blocked ref_idx neighbor %+v increment = %d; want 0", blocked, got)
+		}
+	}
+	fieldNeighbor := neighbor
+	fieldNeighbor.IsField = true
+	if got := DeriveCABACReferenceIndexContextIncrement(fieldNeighbor, CABACInterNeighbor{}, true, false); got != 0 {
+		t.Errorf("frame-to-field ref_idx 1 increment = %d; want zero because the field threshold is >1", got)
+	}
+	fieldNeighbor.ReferenceIndex = 2
+	if got := DeriveCABACReferenceIndexContextIncrement(fieldNeighbor, CABACInterNeighbor{}, true, false); got != 1 {
+		t.Errorf("frame-to-field ref_idx 2 increment = %d; want 1", got)
+	}
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 8))
+	var contexts [6]CABACContextModel
+	for index := range contexts {
+		contexts[index].stateIndex = uint8(index)
+	}
+	if _, err := decoder.DecodeReferenceIndexForPartition(1, neighbor, neighbor, false, false, &contexts); err != nil {
+		t.Fatal(err)
+	}
+	for index, model := range contexts {
+		want := uint8(index)
+		if index == 3 {
+			want++
+		}
+		if model.stateIndex != want {
+			t.Errorf("partition ref_idx context %d state = %d; want %d", index, model.stateIndex, want)
+		}
+	}
+}
+
+func TestCABACInterMVDContextIncrement(t *testing.T) {
+	neighbor := func(x, y int32) CABACInterNeighbor {
+		return CABACInterNeighbor{Available: true, PredictionModeMatches: true, MotionVectorDifference: [2]int32{x, y}}
+	}
+	for _, test := range []struct {
+		name         string
+		left, top    CABACInterNeighbor
+		component    uint8
+		mbaff, field bool
+		want         uint8
+	}{
+		{name: "sum at two", left: neighbor(1, 1), top: neighbor(1, 1), component: 0, want: 0},
+		{name: "sum over two", left: neighbor(2, 2), top: neighbor(1, 1), component: 0, want: 1},
+		{name: "sum over 32", left: neighbor(20, 20), top: neighbor(13, 13), component: 0, want: 2},
+		{name: "one exceeds 32", left: neighbor(33, 33), component: 0, want: 2},
+		{name: "unavailable ignored", left: CABACInterNeighbor{MotionVectorDifference: [2]int32{90, 90}}, component: 0, want: 0},
+		{name: "skip ignored", left: CABACInterNeighbor{Available: true, Skip: true, MotionVectorDifference: [2]int32{90, 90}}, component: 0, want: 0},
+		{name: "intra ignored", left: CABACInterNeighbor{Available: true, Intra: true, MotionVectorDifference: [2]int32{90, 90}}, component: 0, want: 0},
+		{name: "other prediction ignored", left: CABACInterNeighbor{Available: true, MotionVectorDifference: [2]int32{90, 90}}, component: 0, want: 0},
+		{name: "frame current field neighbor doubles vertical", left: CABACInterNeighbor{Available: true, PredictionModeMatches: true, IsField: true, MotionVectorDifference: [2]int32{0, 2}}, component: 1, mbaff: true, want: 1},
+		{name: "field current frame neighbor halves vertical", left: neighbor(0, 7), component: 1, mbaff: true, field: true, want: 1},
+		{name: "horizontal is not field scaled", left: CABACInterNeighbor{Available: true, PredictionModeMatches: true, IsField: true, MotionVectorDifference: [2]int32{2, 0}}, component: 0, mbaff: true, want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DeriveCABACMotionVectorDifferenceContextIncrement(test.left, test.top, test.component, test.mbaff, test.field)
+			if err != nil || got != test.want {
+				t.Fatalf("MVD context increment = %d, %v; want %d", got, err, test.want)
+			}
+		})
+	}
+	if _, err := DeriveCABACMotionVectorDifferenceContextIncrement(CABACInterNeighbor{}, CABACInterNeighbor{}, 2, false, false); !errors.Is(err, ErrCABACContextState) {
+		t.Fatalf("invalid MVD component error = %v; want context-state error", err)
+	}
+	minimum := CABACInterNeighbor{Available: true, PredictionModeMatches: true, MotionVectorDifference: [2]int32{-1 << 31, 0}}
+	if got, err := DeriveCABACMotionVectorDifferenceContextIncrement(minimum, CABACInterNeighbor{}, 0, false, false); err != nil || got != 2 {
+		t.Fatalf("minimum int32 MVD increment = %d, %v; want 2", got, err)
+	}
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 8))
+	var contexts [7]CABACContextModel
+	for index := range contexts {
+		contexts[index].stateIndex = uint8(index)
+	}
+	if _, err := decoder.DecodeMotionVectorDifferenceForPartition(0, neighbor(2, 0), neighbor(1, 0), false, false, &contexts); err != nil {
+		t.Fatal(err)
+	}
+	for index, model := range contexts {
+		want := uint8(index)
+		if index == 1 {
+			want++
+		}
+		if model.stateIndex != want {
+			t.Errorf("partition MVD context %d state = %d; want %d", index, model.stateIndex, want)
+		}
+	}
+}
+
+func TestCABACReferenceIndexValuesAndMaximumTruncation(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		maximum uint32
+		inc     uint8
+		mps     [6]bool
+		want    uint8
+	}{
+		{name: "inferred zero", maximum: 0, want: 0},
+		{name: "zero", maximum: 3, inc: 2, want: 0},
+		{name: "one", maximum: 3, inc: 1, mps: [6]bool{false, true, false, false, false, false}, want: 1},
+		{name: "two", maximum: 3, inc: 0, mps: [6]bool{true, false, false, false, true, false}, want: 2},
+		{name: "maximum", maximum: 3, inc: 3, mps: [6]bool{false, false, false, true, true, true}, want: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+			var contexts [6]CABACContextModel
+			for index := range contexts {
+				contexts[index] = CABACContextModel{stateIndex: 63, valueMPS: test.mps[index]}
+			}
+			got, err := decoder.DecodeReferenceIndex(test.maximum, test.inc, &contexts)
+			if err != nil || got != test.want {
+				t.Fatalf("ref_idx = %d, %v; want %d", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestCABACMBSkipFlagRejectsOtherSliceTypes(t *testing.T) {
 	decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510, codeOffset: 0}
 	contexts := [3]CABACContextModel{}
@@ -668,6 +999,601 @@ func TestCABACIIntraMBTypeBranches(t *testing.T) {
 			t.Fatalf("DecodeIIntraMBType() = %d, %v; terminated=%t; want 25, nil, true", got, err, decoder.terminated)
 		}
 	})
+}
+
+func TestCABACDecodeIPCMIntraMacroblockPlacesSamplesAndRestarts(t *testing.T) {
+	data := make([]byte, 1+256+64+64+2)
+	data[0] = 0x80
+	for index := 1; index <= 256; index++ {
+		data[index] = 0x11
+	}
+	for index := 257; index <= 320; index++ {
+		data[index] = 0x22
+	}
+	for index := 321; index <= 384; index++ {
+		data[index] = 0x33
+	}
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(data), codeRange: 510, codeOffset: 509}
+	contexts := [8]CABACContextModel{}
+	builder, err := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.DecodeIPCMIntraMacroblock(2, &contexts, false, false, false, false, builder, 0); err != nil {
+		t.Fatal(err)
+	}
+	if decoder.codeRange != 510 || decoder.codeOffset != 0 || decoder.terminated || decoder.bits.bitOffset != 8+384*8+9 {
+		t.Fatalf("CABAC state after I_PCM = range %d offset %d terminated=%t bit=%d", decoder.codeRange, decoder.codeOffset, decoder.terminated, decoder.bits.bitOffset)
+	}
+	if contexts[0].stateIndex != 0 || !contexts[0].valueMPS {
+		t.Fatalf("I_PCM mb_type context = %+v; expected the decoded first bin update", contexts[0])
+	}
+	frame, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frame.Y) != 256 || len(frame.U) != 64 || len(frame.V) != 64 || frame.Y[0] != 0x11 || frame.Y[255] != 0x11 || frame.U[0] != 0x22 || frame.U[63] != 0x22 || frame.V[0] != 0x33 || frame.V[63] != 0x33 {
+		t.Fatalf("I_PCM assembled planes have unexpected values or lengths")
+	}
+}
+
+func TestCABACDecodeIPCMIntraMacroblockFailuresAreTransactional(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "truncated samples", data: []byte{0x80, 0x11}},
+		{name: "nonzero alignment", data: []byte{0xc0}},
+		{name: "invalid restart offset", data: append(append([]byte{0x80}, bytes.Repeat([]byte{0x11}, 384)...), 0xff, 0x00)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decoder := &CABACArithmeticDecoder{bits: NewBitReader(test.data), codeRange: 510, codeOffset: 509}
+			contexts := [8]CABACContextModel{}
+			originalContexts := contexts
+			originalRange, originalOffset, originalBitOffset := decoder.codeRange, decoder.codeOffset, decoder.bits.bitOffset
+			builder, err := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.DecodeIPCMIntraMacroblock(2, &contexts, false, false, false, false, builder, 0); err == nil {
+				t.Fatal("DecodeIPCMIntraMacroblock() unexpectedly succeeded")
+			}
+			if decoder.codeRange != originalRange || decoder.codeOffset != originalOffset || decoder.bits.bitOffset != originalBitOffset || contexts != originalContexts || builder.written[0] {
+				t.Fatal("failed I_PCM decode mutated decoder, contexts, or builder")
+			}
+		})
+	}
+}
+
+func TestCABACDecodeIntraNxN4x4LumaMacroblockModesAndAssembly(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(make([]byte, 64)), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	blocks := [16]LumaIntra4x4Block{}
+	for index := range blocks {
+		blocks[index].TopAvailable = true
+		blocks[index].LeftAvailable = true
+		blocks[index].TopLeftAvailable = true
+	}
+	var modes [4]uint8
+	for index := range modes {
+		modes[index] = 2
+	}
+	result, err := decoder.DecodeIntraNxN4x4LumaMacroblock(&contexts, 0, 0, [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}, modes, modes, true, true, CABACIntra4x4EdgeState{}, CABACIntra4x4EdgeState{}, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Modes[0] != 0 || result.CodedBlockFlags != [16]bool{} || result.Samples != [256]uint8{} {
+		t.Fatalf("decoded I_NxN luma = modes %v flags %v samples[0]=%d; want vertical/DC-derived modes, no residuals, zero samples", result.Modes, result.CodedBlockFlags, result.Samples[0])
+	}
+}
+
+func TestCABACDecodeIntraNxN4x4LumaMacroblockResidualFlags(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(make([]byte, 128)), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[88].valueMPS = true
+	contexts[105].valueMPS = true
+	contexts[166].valueMPS = true
+	blocks := [16]LumaIntra4x4Block{}
+	for index := range blocks {
+		blocks[index].TopAvailable = true
+		blocks[index].LeftAvailable = true
+		blocks[index].TopLeftAvailable = true
+		blocks[index].TopLeft = 100
+		for sample := range blocks[index].Top {
+			blocks[index].Top[sample] = 100
+			blocks[index].Left[sample] = 100
+		}
+	}
+	var modes [4]uint8
+	for index := range modes {
+		modes[index] = 2
+	}
+	result, err := decoder.DecodeIntraNxN4x4LumaMacroblock(&contexts, 1, 51, [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}, modes, modes, true, true, CABACIntra4x4EdgeState{}, CABACIntra4x4EdgeState{}, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CodedBlockFlags[0] {
+		t.Fatal("first CBP-selected luma block has coded_block_flag=false")
+	}
+	residualNonzero := false
+	for _, sample := range result.Residuals[0] {
+		residualNonzero = residualNonzero || sample != 0
+	}
+	if !residualNonzero {
+		t.Fatal("decoded coded block produced no reconstructed residual")
+	}
+}
+
+func TestReconstructIntra16x16LumaDCHadamardAndScaling(t *testing.T) {
+	var levels [16]int32
+	levels[0] = 1
+	scalingList := [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}
+	scaled, err := reconstructIntra16x16LumaDC(levels, scalingList, 51)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, value := range scaled {
+		if value != 896 {
+			t.Fatalf("scaled I16x16 DC[%d] = %d; want 896", index, value)
+		}
+	}
+	if _, err := reconstructIntra16x16LumaDC(levels, [16]uint8{}, 0); !errors.Is(err, ErrInverseScaleListZero) {
+		t.Fatalf("zero scaling list error = %v; want scaling-list error", err)
+	}
+}
+
+func TestCABACDecodeIntra16x16LumaDCPredictAndReconstruct(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(make([]byte, 64)), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[96].valueMPS = true
+	contexts[134].valueMPS = true
+	contexts[195].valueMPS = true
+	top := [16]uint8{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
+	scalingList := [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}
+	result, err := decoder.DecodeIntra16x16LumaMacroblock(1, &contexts, 51, scalingList, &top, nil, 0, false, CABACIntra16x16EdgeState{}, CABACIntra16x16EdgeState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PredictionMode != 0 || result.CodedBlockPatternLuma != 0 || !result.DCCoded {
+		t.Fatalf("I16x16 mode/CBP/DC = %d/%d/%t", result.PredictionMode, result.CodedBlockPatternLuma, result.DCCoded)
+	}
+	if !anyNonzeroInt64(result.Residual[:]) || result.Samples[0] == 100 {
+		t.Fatalf("I16x16 DC did not affect luma: residual[0]=%d sample[0]=%d", result.Residual[0], result.Samples[0])
+	}
+}
+
+func TestCABACDecodeIntra16x16LumaACResiduals(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(make([]byte, 128)), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	for _, index := range []int{92, 96, 120, 134, 166, 181} {
+		contexts[index].valueMPS = true
+	}
+	top := [16]uint8{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
+	scalingList := [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}
+	result, err := decoder.DecodeIntra16x16LumaMacroblock(13, &contexts, 51, scalingList, &top, nil, 0, false, CABACIntra16x16EdgeState{}, CABACIntra16x16EdgeState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, coded := range result.ACCodedBlockFlags {
+		if !coded {
+			t.Errorf("I16x16 AC block %d coded_block_flag=false", index)
+		}
+	}
+	if !anyNonzeroInt64(result.Residual[:]) {
+		t.Fatal("I16x16 AC residuals did not reconstruct into luma samples")
+	}
+}
+
+func TestCABACDecodeIntraNxN4x4LumaMacroblockFailureIsTransactional(t *testing.T) {
+	data := make([]byte, 64)
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(data), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	originalContexts := contexts
+	blocks := [16]LumaIntra4x4Block{}
+	originalRange, originalOffset, originalBit := decoder.codeRange, decoder.codeOffset, decoder.bits.bitOffset
+	var modes [4]uint8
+	if _, err := decoder.DecodeIntraNxN4x4LumaMacroblock(&contexts, 0, 0, [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}, modes, modes, false, false, CABACIntra4x4EdgeState{}, CABACIntra4x4EdgeState{}, blocks); !errors.Is(err, ErrLumaIntra4x4Macroblock) {
+		t.Fatalf("missing reconstruction references error = %v; want intra macroblock error", err)
+	}
+	if contexts != originalContexts || decoder.codeRange != originalRange || decoder.codeOffset != originalOffset || decoder.bits.bitOffset != originalBit {
+		t.Fatal("failed Intra_NxN macroblock changed decoder or contexts")
+	}
+}
+
+func TestCABACDecodeIntraNxN8x8LumaMacroblockModesAndTransformFlag(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(make([]byte, 128)), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[399].valueMPS = true
+	blocks := [4]LumaIntra8x8Block{}
+	for index := range blocks {
+		blocks[index].TopAvailable = true
+		blocks[index].LeftAvailable = true
+		blocks[index].TopLeftAvailable = true
+	}
+	result, err := decoder.DecodeIntraNxN8x8LumaMacroblock(&contexts, true, false, false, 0, 0, [64]uint8{
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+	}, [2]uint8{2, 2}, [2]uint8{2, 2}, true, true, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TransformSize8x8 || result.Modes[0] != 0 || result.Samples != [256]uint8{} || result.Residuals != [4][64]int64{} {
+		t.Fatalf("I_NxN 8x8 result transform=%t modes=%v samples0=%d", result.TransformSize8x8, result.Modes, result.Samples[0])
+	}
+}
+
+func TestCABACDecodeIntraNxN8x8LumaMacroblockResidualAndRollback(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(make([]byte, 128)), codeRange: 510}
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[399].valueMPS = true
+	contexts[402].valueMPS = true
+	contexts[417].valueMPS = true
+	blocks := [4]LumaIntra8x8Block{}
+	for index := range blocks {
+		blocks[index].TopAvailable = true
+		blocks[index].LeftAvailable = true
+		blocks[index].TopLeftAvailable = true
+		blocks[index].Top = [16]uint8{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
+		blocks[index].Left = [16]uint8{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
+	}
+	result, err := decoder.DecodeIntraNxN8x8LumaMacroblock(&contexts, true, false, false, 1, 51, [64]uint8{
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+	}, [2]uint8{2, 2}, [2]uint8{2, 2}, true, true, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TransformSize8x8 || !anyNonzeroInt64(result.Residuals[0][:]) {
+		t.Fatal("category-5 residual was not reconstructed")
+	}
+
+	truncated := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510, codeOffset: 0}
+	var truncatedContexts [CABACContextCount]CABACContextModel
+	for index := range truncatedContexts {
+		truncatedContexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	truncatedContexts[399].valueMPS = true
+	original := truncatedContexts
+	if _, err := truncated.DecodeIntraNxN8x8LumaMacroblock(&truncatedContexts, true, false, false, 1, 0, [64]uint8{
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+	}, [2]uint8{2, 2}, [2]uint8{2, 2}, true, true, blocks); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated 8x8 residual error = %v; want exhausted bitstream", err)
+	}
+	if truncatedContexts != original || truncated.codeRange != 510 || truncated.codeOffset != 0 || truncated.bits.bitOffset != 0 {
+		t.Fatal("failed 8x8 macroblock decode changed CABAC state")
+	}
+}
+
+func anyNonzeroInt64(values []int64) bool {
+	for _, value := range values {
+		if value != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// cabacTestEncoder is the clause 9.3.4.2 arithmetic encoder, used only to build decoder vectors.
+type cabacTestEncoder struct {
+	low, codeRange uint32
+	outstanding    int
+	firstBit       bool
+	bits           []bool
+	flushed        bool
+}
+
+func newCABACTestEncoder() *cabacTestEncoder {
+	return &cabacTestEncoder{codeRange: 510, firstBit: true}
+}
+
+func (encoder *cabacTestEncoder) putBit(bit bool) {
+	if encoder.firstBit {
+		encoder.firstBit = false
+	} else {
+		encoder.bits = append(encoder.bits, bit)
+	}
+	for ; encoder.outstanding > 0; encoder.outstanding-- {
+		encoder.bits = append(encoder.bits, !bit)
+	}
+}
+
+func (encoder *cabacTestEncoder) renormalize() {
+	for encoder.codeRange < 256 {
+		switch {
+		case encoder.low < 256:
+			encoder.putBit(false)
+		case encoder.low >= 512:
+			encoder.low -= 512
+			encoder.putBit(true)
+		default:
+			encoder.low -= 256
+			encoder.outstanding++
+		}
+		encoder.codeRange <<= 1
+		encoder.low <<= 1
+	}
+}
+
+func (encoder *cabacTestEncoder) decision(model *CABACContextModel, bin bool) {
+	rangeLPS := uint32(cabacRangeLPS[(encoder.codeRange>>6)&3][model.stateIndex])
+	encoder.codeRange -= rangeLPS
+	if bin != model.valueMPS {
+		encoder.low += encoder.codeRange
+		encoder.codeRange = rangeLPS
+	}
+	model.Update(bin)
+	encoder.renormalize()
+}
+
+func (encoder *cabacTestEncoder) terminate(bin bool) {
+	encoder.codeRange -= 2
+	if !bin {
+		encoder.renormalize()
+		return
+	}
+	encoder.low += encoder.codeRange
+	encoder.codeRange = 2
+	encoder.renormalize()
+	encoder.putBit((encoder.low>>9)&1 == 1)
+	encoder.bits = append(encoder.bits, (encoder.low>>8)&1 == 1, true)
+	encoder.flushed = true
+}
+
+func (encoder *cabacTestEncoder) bytes() []byte {
+	if !encoder.flushed {
+		encoder.terminate(true)
+	}
+	data := make([]byte, (len(encoder.bits)+7)/8+4)
+	for index, bit := range encoder.bits {
+		if bit {
+			data[index/8] |= 0x80 >> (index % 8)
+		}
+	}
+	return data
+}
+
+// encodeBinString encodes a Table 9-36/9-37/9-38 bin string; ctxIdx maps (binIdx, prior bins) to ctxIdx, 276 terminating.
+func (encoder *cabacTestEncoder) encodeBinString(contexts *[CABACContextCount]CABACContextModel, bins string, ctxIdx func(binIdx int, prior string) int) {
+	for index := range bins {
+		bin := bins[index] == '1'
+		if context := ctxIdx(index, bins[:index]); context == 276 {
+			encoder.terminate(bin)
+		} else {
+			encoder.decision(&contexts[context], bin)
+		}
+	}
+}
+
+// Table 9-36 bin strings for I mb_type 0-25.
+var cabacTestIMBTypeBins = [26]string{
+	"0", "100000", "100001", "100010", "100011", "1001000", "1001001", "1001010", "1001011",
+	"1001100", "1001101", "1001110", "1001111", "101000", "101001", "101010", "101011",
+	"1011000", "1011001", "1011010", "1011011", "1011100", "1011101", "1011110", "1011111", "11",
+}
+
+// Table 9-37 bin strings for B mb_type 0-22.
+var cabacTestBMBTypeBins = [23]string{
+	"0", "100", "101", "110000", "110001", "110010", "110011", "110100", "110101", "110110", "110111",
+	"111110", "1110000", "1110001", "1110010", "1110011", "1110100", "1110101", "1110110", "1110111",
+	"1111000", "1111001", "111111",
+}
+
+// Table 9-39/9-41 suffix contexts for intra mb_type in P (offset 17) and B (offset 32) slices.
+func cabacTestIntraSuffixContext(offset int) func(int, string) int {
+	return func(binIdx int, prior string) int {
+		switch binIdx {
+		case 0:
+			return offset
+		case 1:
+			return 276
+		case 2:
+			return offset + 1
+		case 3:
+			return offset + 2
+		case 4:
+			if prior[3] != '0' {
+				return offset + 2
+			}
+		}
+		return offset + 3
+	}
+}
+
+type cabacTestSymbol struct {
+	value  uint8
+	encode func(*cabacTestEncoder, *[CABACContextCount]CABACContextModel)
+}
+
+func cabacTestInterMBTypeSymbols(sliceType uint8, increment int) []cabacTestSymbol {
+	type symbol = cabacTestSymbol
+	var symbols []symbol
+	prefixAndSuffix := func(value uint8, prefix string, prefixContext func(int, string) int, suffix string, suffixOffset int) symbol {
+		return symbol{value, func(encoder *cabacTestEncoder, contexts *[CABACContextCount]CABACContextModel) {
+			encoder.encodeBinString(contexts, prefix, prefixContext)
+			if suffix != "" {
+				encoder.encodeBinString(contexts, suffix, cabacTestIntraSuffixContext(suffixOffset))
+			}
+		}}
+	}
+	if sliceType%5 == 0 {
+		pContext := func(binIdx int, prior string) int {
+			if binIdx == 2 && prior[1] == '1' {
+				return 17
+			}
+			return 14 + binIdx
+		}
+		for value, bins := range []string{"000", "011", "010", "001"} {
+			symbols = append(symbols, prefixAndSuffix(uint8(value), bins, pContext, "", 0))
+		}
+		for intra, bins := range cabacTestIMBTypeBins {
+			symbols = append(symbols, prefixAndSuffix(uint8(5+intra), "1", pContext, bins, 17))
+		}
+		return symbols
+	}
+	bContext := func(binIdx int, prior string) int {
+		switch {
+		case binIdx == 0:
+			return 27 + increment
+		case binIdx == 1:
+			return 30
+		case binIdx == 2 && prior[1] != '0':
+			return 31
+		}
+		return 32
+	}
+	for value, bins := range cabacTestBMBTypeBins {
+		symbols = append(symbols, prefixAndSuffix(uint8(value), bins, bContext, "", 0))
+	}
+	for intra, bins := range cabacTestIMBTypeBins {
+		symbols = append(symbols, prefixAndSuffix(uint8(23+intra), "111101", bContext, bins, 32))
+	}
+	return symbols
+}
+
+func TestCABACDecodeInterMBTypeRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		sliceType             uint8
+		leftAvailable         bool
+		topAvailable          bool
+		leftDirect, topDirect bool
+		increment             int
+	}{
+		{sliceType: 0, leftAvailable: true, topAvailable: true},
+		{sliceType: 5},
+		{sliceType: 1},
+		{sliceType: 6, leftAvailable: true, increment: 1},
+		{sliceType: 1, leftAvailable: true, topAvailable: true, increment: 2},
+		{sliceType: 1, leftAvailable: true, topAvailable: true, leftDirect: true, increment: 1},
+	} {
+		all := cabacTestInterMBTypeSymbols(test.sliceType, test.increment)
+		// Every value is coded twice to exercise adaptation; I_PCM terminates the stream, so it is last.
+		body := all[:len(all)-1]
+		symbols := append(append(append([]cabacTestSymbol{}, body...), body...), all[len(all)-1])
+		sliceContexts, err := NewCABACSliceContexts(test.sliceType, 1, 30)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoderContexts := sliceContexts
+		encoder := newCABACTestEncoder()
+		for _, symbol := range symbols {
+			symbol.encode(encoder, &encoderContexts)
+		}
+		decoder, err := NewCABACArithmeticDecoder(encoder.bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoderContexts := sliceContexts
+		for _, symbol := range symbols {
+			got, err := decoder.DecodeInterMBType(test.sliceType, &decoderContexts, test.leftAvailable, test.topAvailable, test.leftDirect, test.topDirect)
+			if err != nil || got != symbol.value {
+				t.Fatalf("slice %d mb_type = %d, %v; want %d", test.sliceType, got, err, symbol.value)
+			}
+		}
+		if decoderContexts != encoderContexts || !decoder.terminated {
+			t.Fatalf("slice %d decoder contexts/termination diverged from encoder", test.sliceType)
+		}
+	}
+}
+
+func TestCABACDecodeSubMBTypeRoundTrip(t *testing.T) {
+	pContext := func(binIdx int, _ string) int { return 21 + binIdx }
+	bContext := func(binIdx int, prior string) int {
+		switch {
+		case binIdx < 2:
+			return 36 + binIdx
+		case binIdx == 2 && prior[1] != '0':
+			return 38
+		}
+		return 39
+	}
+	for _, test := range []struct {
+		sliceType uint8
+		bins      []string
+		context   func(int, string) int
+	}{
+		{0, []string{"1", "00", "011", "010"}, pContext},
+		{1, []string{"0", "100", "101", "11000", "11001", "11010", "11011", "111000", "111001", "111010", "111011", "11110", "11111"}, bContext},
+	} {
+		sliceContexts, _ := NewCABACSliceContexts(test.sliceType, 2, 33)
+		encoderContexts := sliceContexts
+		encoder := newCABACTestEncoder()
+		for round := 0; round < 2; round++ {
+			for _, bins := range test.bins {
+				encoder.encodeBinString(&encoderContexts, bins, test.context)
+			}
+		}
+		decoder, _ := NewCABACArithmeticDecoder(encoder.bytes())
+		decoderContexts := sliceContexts
+		for round := 0; round < 2; round++ {
+			for want := range test.bins {
+				got, err := decoder.DecodeSubMBType(test.sliceType, &decoderContexts)
+				if err != nil || int(got) != want {
+					t.Fatalf("slice %d sub_mb_type = %d, %v; want %d", test.sliceType, got, err, want)
+				}
+			}
+		}
+		if decoderContexts != encoderContexts {
+			t.Fatalf("slice %d sub_mb_type contexts diverged from encoder", test.sliceType)
+		}
+	}
+}
+
+func TestCABACInterMBTypeAndSubMBTypeRejectInvalidInputTransactionally(t *testing.T) {
+	contexts, _ := NewCABACSliceContexts(1, 0, 26)
+	original := contexts
+	decoder, err := NewCABACArithmeticDecoder([]byte{0x5a, 0x3c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sliceType := range []uint8{2, 4, 10} {
+		if _, err := decoder.DecodeInterMBType(sliceType, &contexts, false, false, false, false); !errors.Is(err, ErrCABACUnsupportedSyntax) {
+			t.Errorf("slice %d mb_type error = %v; want unsupported", sliceType, err)
+		}
+		if _, err := decoder.DecodeSubMBType(sliceType, &contexts); !errors.Is(err, ErrCABACUnsupportedSyntax) {
+			t.Errorf("slice %d sub_mb_type error = %v; want unsupported", sliceType, err)
+		}
+	}
+	if _, err := decoder.DecodeInterMBType(1, nil, false, false, false, false); !errors.Is(err, ErrCABACContextState) {
+		t.Fatalf("nil contexts error = %v; want context state", err)
+	}
+	startRange, startOffset := decoder.CodeRange(), decoder.CodeOffset()
+	for {
+		if _, err := decoder.DecodeInterMBType(1, &contexts, false, false, false, false); err != nil {
+			break
+		}
+		startRange, startOffset, original = decoder.CodeRange(), decoder.CodeOffset(), contexts
+	}
+	if contexts != original || decoder.CodeRange() != startRange || decoder.CodeOffset() != startOffset {
+		t.Fatal("failed mb_type decode mutated decoder or contexts")
+	}
 }
 
 func TestCABACIIntraMBTypeContextAndFailureBehavior(t *testing.T) {
@@ -770,6 +1696,64 @@ func TestCABACIntra4x4PredMode(t *testing.T) {
 	mode, err = remainder.DecodeIntra4x4PredMode(7, &remainderContexts)
 	if err != nil || mode != 8 {
 		t.Fatalf("rem_intra4x4_pred_mode result = %d, %v; want 8, nil", mode, err)
+	}
+}
+
+func TestDeriveIntra4x4PredictedModeUsesSyntaxScanNeighbors(t *testing.T) {
+	var decoded [16]uint8
+	decoded[0], decoded[1], decoded[2], decoded[3], decoded[4] = 7, 5, 4, 6, 3
+	top := [4]uint8{3, 2, 1, 0}
+	left := [4]uint8{5, 6, 7, 8}
+	for _, test := range []struct {
+		index                       int
+		topAvailable, leftAvailable bool
+		want                        uint8
+	}{
+		{index: 0, topAvailable: true, leftAvailable: true, want: 3},
+		{index: 1, topAvailable: true, leftAvailable: true, want: 2},
+		{index: 2, topAvailable: true, leftAvailable: true, want: 6},
+		{index: 4, topAvailable: true, leftAvailable: true, want: 1},
+		{index: 0, topAvailable: false, leftAvailable: true, want: 2},
+	} {
+		got, err := DeriveIntra4x4PredictedMode(decoded, test.index, top, left, test.topAvailable, test.leftAvailable)
+		if err != nil || got != test.want {
+			t.Errorf("predicted mode at syntax block %d = %d, %v; want %d", test.index, got, err, test.want)
+		}
+	}
+	if _, err := DeriveIntra4x4PredictedMode(decoded, 16, top, left, true, true); !errors.Is(err, ErrCABACIntraPredNeighbors) {
+		t.Fatalf("invalid block index error = %v; want neighbor-state error", err)
+	}
+}
+
+func TestDecodeIntra4x4PredModesAndRollback(t *testing.T) {
+	decoder, err := NewCABACArithmeticDecoder(make([]byte, 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts := [2]CABACContextModel{
+		{stateIndex: 0, valueMPS: false},
+		{stateIndex: 0, valueMPS: false},
+	}
+	modes, err := decoder.DecodeIntra4x4PredModes(&contexts, [4]uint8{}, [4]uint8{}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, mode := range modes {
+		if mode > 8 {
+			t.Fatalf("decoded mode[%d] = %d; want mode in [0,8]", index, mode)
+		}
+	}
+
+	truncated := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+	truncatedContexts := [2]CABACContextModel{
+		{stateIndex: 0, valueMPS: false},
+		{stateIndex: 0, valueMPS: false},
+	}
+	if _, err := truncated.DecodeIntra4x4PredModes(&truncatedContexts, [4]uint8{}, [4]uint8{}, false, false); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated macroblock mode error = %v; want truncated bitstream", err)
+	}
+	if truncated.CodeRange() != 510 || truncated.CodeOffset() != 0 || truncated.bits.bitOffset != 0 || truncatedContexts[0].StateIndex() != 0 || truncatedContexts[1].StateIndex() != 0 {
+		t.Fatal("truncated Intra_4x4 modes changed decoder or contexts")
 	}
 }
 
@@ -1292,6 +2276,379 @@ func TestCABACPlaceChroma4x4ScanLevels(t *testing.T) {
 	}
 }
 
+func TestCABACLuma4x4ResidualBlockWithFlag(t *testing.T) {
+	newBlockContexts := func() ([4]CABACContextModel, [15]CABACContextModel, [15]CABACContextModel, [10]CABACContextModel) {
+		var coded [4]CABACContextModel
+		var significant, last [15]CABACContextModel
+		var coefficients [10]CABACContextModel
+		for index := range significant {
+			significant[index] = CABACContextModel{stateIndex: 63}
+			last[index] = CABACContextModel{stateIndex: 63}
+		}
+		for index := range coefficients {
+			coefficients[index] = CABACContextModel{stateIndex: 63}
+		}
+		return coded, significant, last, coefficients
+	}
+
+	decoder, err := NewCABACArithmeticDecoder(make([]byte, 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coded, significant, last, coefficients := newBlockContexts()
+	levels, hasResidual, err := decoder.DecodeLuma4x4ResidualBlockWithFlag(0, 0, &coded, &significant, &last, &coefficients)
+	if err != nil || hasResidual || levels != [16]int32{} {
+		t.Fatalf("uncoded residual block = %v, %t, %v; want zero levels and false", levels, hasResidual, err)
+	}
+
+	decoder, err = NewCABACArithmeticDecoder(make([]byte, 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coded, significant, last, coefficients = newBlockContexts()
+	coded[0].valueMPS = true
+	if _, hasResidual, err = decoder.DecodeLuma4x4ResidualBlockWithFlag(0, 0, &coded, &significant, &last, &coefficients); err != nil || !hasResidual {
+		t.Fatalf("coded residual block flag = %t, %v; want true, nil", hasResidual, err)
+	}
+
+	truncated := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+	coded, significant, last, coefficients = newBlockContexts()
+	coded[0].valueMPS = true
+	if _, _, err := truncated.DecodeLuma4x4ResidualBlockWithFlag(0, 0, &coded, &significant, &last, &coefficients); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated residual block error = %v; want truncated bitstream", err)
+	}
+	if truncated.CodeRange() != 510 || truncated.CodeOffset() != 0 || truncated.bits.bitOffset != 0 || coded[0].StateIndex() != 0 || !coded[0].MPS() || significant[0].StateIndex() != 63 {
+		t.Fatal("truncated coded residual block changed decoder or contexts")
+	}
+}
+
+func TestCABACDecodeAndReconstructLuma4x4Residual(t *testing.T) {
+	decoder, err := NewCABACArithmeticDecoder(make([]byte, 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var coded [4]CABACContextModel
+	var significant, last [15]CABACContextModel
+	var coefficients [10]CABACContextModel
+	for index := range significant {
+		significant[index] = CABACContextModel{stateIndex: 63}
+		last[index] = CABACContextModel{stateIndex: 63}
+	}
+	for index := range coefficients {
+		coefficients[index] = CABACContextModel{stateIndex: 63}
+	}
+	var scalingList [16]uint8
+	for index := range scalingList {
+		scalingList[index] = 16
+	}
+	residual, codedBlock, err := decoder.DecodeAndReconstructLuma4x4Residual(0, 0, &coded, &significant, &last, &coefficients, scalingList, 0)
+	if err != nil || codedBlock || residual != [16]int64{} {
+		t.Fatalf("uncoded residual samples = %v, %t, %v; want zero residual and false", residual, codedBlock, err)
+	}
+	beforeOffset := decoder.bits.bitOffset
+	if _, _, err := decoder.DecodeAndReconstructLuma4x4Residual(0, 0, &coded, &significant, &last, &coefficients, scalingList, 52); !errors.Is(err, ErrInverseScaleQPYOutOfRange) {
+		t.Fatalf("invalid QPY error = %v; want QPY range error", err)
+	}
+	if decoder.bits.bitOffset != beforeOffset {
+		t.Fatal("invalid QPY consumed CABAC input")
+	}
+}
+
+func forcedResidualContexts(mpsTrue ...int) [CABACContextCount]CABACContextModel {
+	var contexts [CABACContextCount]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 61}
+	}
+	for _, index := range mpsTrue {
+		contexts[index].valueMPS = true
+	}
+	return contexts
+}
+
+func TestCABACCodedBlockFlagCondTerm(t *testing.T) {
+	for _, test := range []struct {
+		available, intra, ipcm, transAvailable, transCoded, want bool
+	}{
+		{false, true, false, false, false, true},
+		{false, false, false, false, false, false},
+		{true, false, true, false, false, true},
+		{true, true, false, false, true, false},
+		{true, false, false, true, false, false},
+		{true, false, false, true, true, true},
+	} {
+		if got := DeriveCABACCodedBlockFlagCondTerm(test.available, test.intra, test.ipcm, test.transAvailable, test.transCoded); got != test.want {
+			t.Errorf("condTerm(%+v) = %t; want %t", test, got, test.want)
+		}
+	}
+}
+
+// With a zero offset every regular bin decodes as its context's MPS and every bypass bin as 0.
+func TestCABACDecodeResidualBlockChromaDCForcedBins(t *testing.T) {
+	contexts := forcedResidualContexts(98, 149, 151, 212, 259)
+	decoder, err := NewCABACArithmeticDecoder(make([]byte, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	levels, coded, err := decoder.DecodeResidualBlock(3, true, false, &contexts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !coded || levels != [16]int32{2, 0, 1} {
+		t.Fatalf("chroma DC = %v coded=%t; want [2 0 1 0] coded", levels[:4], coded)
+	}
+	used := map[int]bool{98: true, 149: true, 210: true, 150: true, 151: true, 212: true, 258: true, 259: true, 262: true}
+	for index, model := range contexts {
+		wantState := uint8(61)
+		if used[index] {
+			wantState = 62
+		}
+		if model.stateIndex != wantState {
+			t.Errorf("ctxIdx %d state = %d; want %d", index, model.stateIndex, wantState)
+		}
+	}
+
+	contexts = forcedResidualContexts(97, 149, 150, 151, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266)
+	decoder, _ = NewCABACArithmeticDecoder(make([]byte, 64))
+	levels, coded, err = decoder.DecodeResidualBlock(3, false, false, &contexts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !coded || levels != [16]int32{15, 15, 15, 15} {
+		t.Fatalf("escaped chroma DC = %v coded=%t; want four 15s", levels[:4], coded)
+	}
+	// Category 3 caps the greater-than-one context at ctxIdxInc 8 (ctxIdx 265), leaving 266 to category 4.
+	if contexts[265].stateIndex != 62 || contexts[266].stateIndex != 61 || contexts[257].stateIndex != 62 {
+		t.Fatalf("abs-level states 257/265/266 = %d/%d/%d; want 62/62/61", contexts[257].stateIndex, contexts[265].stateIndex, contexts[266].stateIndex)
+	}
+}
+
+func TestCABACDecodeResidualBlockUncodedAndCategoryRange(t *testing.T) {
+	contexts := forcedResidualContexts()
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 4))
+	levels, coded, err := decoder.DecodeResidualBlock(0, true, true, &contexts)
+	if err != nil || coded || levels != [16]int32{} || contexts[88].stateIndex != 62 {
+		t.Fatalf("uncoded Intra16x16 DC = %v coded=%t err=%v ctx88=%d", levels, coded, err, contexts[88].stateIndex)
+	}
+	if _, _, err := decoder.DecodeResidualBlock(5, false, false, &contexts); !errors.Is(err, ErrCABACUnsupportedSyntax) {
+		t.Fatalf("ctxBlockCat 5 error = %v; want unsupported", err)
+	}
+}
+
+func TestCABACDecodeResidualBlockTruncationIsTransactional(t *testing.T) {
+	mpsTrue := []int{85}
+	for index := 105; index < 120; index++ {
+		mpsTrue = append(mpsTrue, index)
+	}
+	for index := 227; index < 237; index++ {
+		mpsTrue = append(mpsTrue, index)
+	}
+	contexts := forcedResidualContexts(mpsTrue...)
+	original := contexts
+	decoder, _ := NewCABACArithmeticDecoder([]byte{0, 0})
+	if _, _, err := decoder.DecodeResidualBlock(0, false, false, &contexts); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated residual error = %v; want exhausted bitstream", err)
+	}
+	if contexts != original || decoder.CodeRange() != 510 || decoder.CodeOffset() != 0 || decoder.bits.bitOffset != 9 {
+		t.Fatalf("failed residual mutated state: range=%d offset=%d bit=%d", decoder.CodeRange(), decoder.CodeOffset(), decoder.bits.bitOffset)
+	}
+}
+
+func TestCABACDecodeResidualBlockMatchesBankDecoders(t *testing.T) {
+	sliceContexts, err := NewCABACSliceContexts(2, 0, 28)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patterns := [][]byte{
+		{0x5a, 0x3c, 0x91, 0x07, 0xe2, 0x48, 0xb3, 0x6f, 0x12, 0xc5, 0x7e, 0x29, 0x84, 0xd1, 0x3b, 0xf6, 0x55, 0xaa, 0x0f, 0xf0},
+		{0x00, 0x7f, 0x10, 0x20, 0x40, 0x80, 0xff, 0x01, 0x33, 0xcc, 0x99, 0x66, 0x11, 0xee, 0x22, 0xdd, 0x44, 0xbb, 0x88, 0x77},
+		{0x1f, 0xe0, 0x3e, 0xc1, 0x7c, 0x83, 0xf8, 0x07, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x9a, 0xbc, 0xde, 0xf0},
+	}
+	for _, category := range []uint8{0, 1, 2, 4} {
+		bases, _ := CABACResidualContextBasesForCategory(category)
+		codedCases := 0
+		for patternIndex, data := range patterns {
+			for condTerms := 0; condTerms < 4; condTerms++ {
+				condA, condB := condTerms&1 != 0, condTerms&2 != 0
+				contexts := sliceContexts
+				generic, _ := NewCABACArithmeticDecoder(data)
+				levels, coded, genericErr := generic.DecodeResidualBlock(category, condA, condB, &contexts)
+
+				var codedFlag [4]CABACContextModel
+				var significant, last [15]CABACContextModel
+				var coefficients [10]CABACContextModel
+				copy(codedFlag[:], sliceContexts[bases.CodedBlockFlag:])
+				copy(significant[:], sliceContexts[bases.Significant:])
+				copy(last[:], sliceContexts[bases.Last:])
+				copy(coefficients[:], sliceContexts[bases.AbsLevel:])
+				bank, _ := NewCABACArithmeticDecoder(data)
+				var wantRaster, gotRaster [16]int32
+				var wantCoded bool
+				var bankErr error
+				if category == 0 || category == 2 {
+					wantRaster, wantCoded, bankErr = bank.DecodeLuma4x4ResidualBlockWithFlag(boolToUint8(condA), boolToUint8(condB), &codedFlag, &significant, &last, &coefficients)
+					gotRaster = PlaceLuma4x4ScanLevels(levels)
+				} else {
+					wantRaster, wantCoded, bankErr = bank.DecodeChroma4x4ACResidualBlock(condA, condB, &codedFlag, &significant, &last, &coefficients)
+					var ac [15]int32
+					copy(ac[:], levels[:15])
+					gotRaster = PlaceChroma4x4ScanLevels(0, ac)
+				}
+				name := fmt.Sprintf("cat %d pattern %d cond %d", category, patternIndex, condTerms)
+				if (genericErr == nil) != (bankErr == nil) {
+					t.Fatalf("%s errors differ: %v vs %v", name, genericErr, bankErr)
+				}
+				if genericErr != nil {
+					continue
+				}
+				if coded {
+					codedCases++
+				}
+				if gotRaster != wantRaster || coded != wantCoded || generic.CodeRange() != bank.CodeRange() || generic.CodeOffset() != bank.CodeOffset() || generic.bits.bitOffset != bank.bits.bitOffset {
+					t.Fatalf("%s: generic %v/%t differs from bank decoder %v/%t", name, gotRaster, coded, wantRaster, wantCoded)
+				}
+				for _, check := range []struct {
+					base  int
+					banks []CABACContextModel
+				}{{bases.CodedBlockFlag, codedFlag[:]}, {bases.Significant, significant[:]}, {bases.Last, last[:]}, {bases.AbsLevel, coefficients[:]}} {
+					for offset, model := range check.banks {
+						if contexts[check.base+offset] != model {
+							t.Fatalf("%s: ctxIdx %d = %+v; want %+v", name, check.base+offset, contexts[check.base+offset], model)
+						}
+					}
+				}
+			}
+		}
+		if codedCases == 0 {
+			t.Errorf("ctxBlockCat %d equivalence vectors decoded no coded blocks", category)
+		}
+	}
+}
+
+func TestCABACDecodeLuma8x8ResidualBlockTable943(t *testing.T) {
+	// Only significance ctxIdxInc 7 (ctxIdx 409) has MPS 1, so significant positions reveal Table 9-43.
+	contexts := forcedResidualContexts(409)
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 64))
+	levels, err := decoder.DecodeLuma8x8ResidualBlock(&contexts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want [64]int32
+	for _, index := range []int{23, 24, 25, 31, 32, 39, 63} {
+		want[index] = 1
+	}
+	if levels != want {
+		t.Fatalf("8x8 levels = %v; want ones at 23,24,25,31,32,39,63", levels)
+	}
+	used := map[int]bool{419: true, 420: true, 427: true, 428: true, 429: true, 430: true}
+	for index := 402; index < 417; index++ {
+		used[index] = true
+	}
+	for index, model := range contexts {
+		wantState := uint8(61)
+		if used[index] {
+			wantState = 62
+		}
+		if model.stateIndex != wantState {
+			t.Errorf("ctxIdx %d state = %d; want %d", index, model.stateIndex, wantState)
+		}
+	}
+
+	contexts = forcedResidualContexts(409, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435)
+	decoder, _ = NewCABACArithmeticDecoder(make([]byte, 256))
+	levels, err = decoder.DecodeLuma8x8ResidualBlock(&contexts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{23, 24, 25, 31, 32, 39, 63} {
+		want[index] = 15
+	}
+	if levels != want {
+		t.Fatalf("escaped 8x8 levels = %v; want 15 at 23,24,25,31,32,39,63", levels)
+	}
+	for index := 426; index < 436; index++ {
+		wantState := uint8(62)
+		if index == 428 || index == 429 || index == 430 {
+			wantState = 61
+		}
+		if contexts[index].stateIndex != wantState {
+			t.Errorf("abs-level ctxIdx %d state = %d; want %d", index, contexts[index].stateIndex, wantState)
+		}
+	}
+}
+
+func TestCABACDecodeLuma8x8ResidualBlockLastAndTruncation(t *testing.T) {
+	contexts := forcedResidualContexts(402, 417)
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 8))
+	levels, err := decoder.DecodeLuma8x8ResidualBlock(&contexts)
+	if err != nil || levels != [64]int32{1} {
+		t.Fatalf("first-coefficient 8x8 block = %v err=%v; want [1 0...]", levels[:4], err)
+	}
+
+	mpsTrue := []int{}
+	for index := 402; index < 417; index++ {
+		mpsTrue = append(mpsTrue, index)
+	}
+	for index := 426; index < 436; index++ {
+		mpsTrue = append(mpsTrue, index)
+	}
+	contexts = forcedResidualContexts(mpsTrue...)
+	original := contexts
+	decoder, _ = NewCABACArithmeticDecoder([]byte{0, 0})
+	if _, err := decoder.DecodeLuma8x8ResidualBlock(&contexts); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated 8x8 error = %v; want exhausted bitstream", err)
+	}
+	if contexts != original || decoder.CodeRange() != 510 || decoder.CodeOffset() != 0 || decoder.bits.bitOffset != 9 {
+		t.Fatalf("failed 8x8 residual mutated state")
+	}
+	if _, err := decoder.DecodeLuma8x8ResidualBlock(nil); !errors.Is(err, ErrCABACContextState) {
+		t.Fatalf("nil contexts error = %v; want context state", err)
+	}
+}
+
+func TestCABACDecodeChroma4x4ACResidualBlock(t *testing.T) {
+	makeContexts := func() ([4]CABACContextModel, [15]CABACContextModel, [15]CABACContextModel, [10]CABACContextModel) {
+		var coded [4]CABACContextModel
+		var significant, last [15]CABACContextModel
+		var coefficients [10]CABACContextModel
+		for index := range coded {
+			coded[index] = CABACContextModel{stateIndex: 63, valueMPS: false}
+		}
+		for index := range significant {
+			significant[index] = CABACContextModel{stateIndex: 63, valueMPS: false}
+			last[index] = CABACContextModel{stateIndex: 63, valueMPS: false}
+		}
+		for index := range coefficients {
+			coefficients[index] = CABACContextModel{stateIndex: 63, valueMPS: false}
+		}
+		return coded, significant, last, coefficients
+	}
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+	coded, significant, last, coefficients := makeContexts()
+	levels, hasResidual, err := decoder.DecodeChroma4x4ACResidualBlock(false, false, &coded, &significant, &last, &coefficients)
+	if err != nil || hasResidual || levels != [16]int32{} {
+		t.Fatalf("uncoded chroma AC block = %v, %t, %v; want zero levels and false", levels, hasResidual, err)
+	}
+
+	decoder = &CABACArithmeticDecoder{bits: NewBitReader([]byte{0}), codeRange: 510}
+	coded, significant, last, coefficients = makeContexts()
+	coded[0].valueMPS = true
+	levels, hasResidual, err = decoder.DecodeChroma4x4ACResidualBlock(false, false, &coded, &significant, &last, &coefficients)
+	want := [16]int32{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	if err != nil || !hasResidual || levels != want {
+		t.Fatalf("coded chroma AC block = %v, %t, %v; want %v, true, nil", levels, hasResidual, err, want)
+	}
+
+	decoder = &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+	coded, significant, last, coefficients = makeContexts()
+	coded[0].valueMPS = true
+	if _, _, err := decoder.DecodeChroma4x4ACResidualBlock(false, false, &coded, &significant, &last, &coefficients); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated chroma AC block error = %v; want truncated bitstream", err)
+	}
+	if decoder.CodeRange() != 510 || decoder.CodeOffset() != 0 || decoder.bits.bitOffset != 0 || !coded[0].MPS() || coded[0].StateIndex() != 63 {
+		t.Fatal("truncated chroma AC block changed decoder or coded-block context")
+	}
+}
+
 func TestCABACLuma4x4ResidualBlockAndRollback(t *testing.T) {
 	makeSignificanceContexts := func() [15]CABACContextModel {
 		contexts := [15]CABACContextModel{}
@@ -1373,5 +2730,309 @@ func TestCABACLuma4x4ResidualLevelsRejectsEmptyMap(t *testing.T) {
 	var contexts [10]CABACContextModel
 	if _, err := decoder.DecodeLuma4x4ResidualLevels(&significance, &contexts); !errors.Is(err, ErrCABACEmptyResidualBlock) {
 		t.Fatalf("empty significance map error = %v; want empty residual block", err)
+	}
+}
+
+func TestCABACDecodeIntraChroma420Macroblock(t *testing.T) {
+	for _, cbp := range []uint8{1, 2} {
+		contexts := [CABACContextCount]CABACContextModel{}
+		for index := range contexts {
+			contexts[index] = CABACContextModel{stateIndex: 63}
+		}
+		decoder, err := NewCABACArithmeticDecoder(make([]byte, 128))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var scalingLists [2][16]uint8
+		for component := range scalingLists {
+			for index := range scalingLists[component] {
+				scalingLists[component][index] = 16
+			}
+		}
+		result, err := decoder.DecodeIntraChroma420Macroblock(
+			&contexts, 0, false, 0, false, false, false, cbp, 26, [2]int{}, scalingLists,
+			[2]CABACChroma420References{}, [2]CABACChroma420EdgeState{}, [2]CABACChroma420EdgeState{},
+		)
+		if err != nil {
+			t.Fatalf("CBPChroma %d: %v", cbp, err)
+		}
+		if result.PredictionMode != 0 || result.QPC != [2]int{26, 26} {
+			t.Fatalf("CBPChroma %d metadata = mode %d QPC %v", cbp, result.PredictionMode, result.QPC)
+		}
+		for _, sample := range result.Cb {
+			if sample != 128 {
+				t.Fatalf("CBPChroma %d Cb sample = %d; want 128", cbp, sample)
+			}
+		}
+		if result.Cr != result.Cb || result.CbResidual != [64]int64{} || result.CrResidual != [64]int64{} {
+			t.Fatalf("CBPChroma %d reconstructed unexpected chroma samples/residual", cbp)
+		}
+	}
+
+	dcacContexts := forcedResidualContexts(100, 104)
+	dcacDecoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	var dcacScalingLists [2][16]uint8
+	for component := range dcacScalingLists {
+		for index := range dcacScalingLists[component] {
+			dcacScalingLists[component][index] = 16
+		}
+	}
+	dcacResult, err := dcacDecoder.DecodeIntraChroma420Macroblock(
+		&dcacContexts, 0, false, 0, false, false, false, 2, 26, [2]int{}, dcacScalingLists,
+		[2]CABACChroma420References{}, [2]CABACChroma420EdgeState{}, [2]CABACChroma420EdgeState{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dcacResult.CbResidual == [64]int64{} || dcacResult.CrResidual == [64]int64{} {
+		t.Fatalf("coded chroma DC/AC produced zero residuals: Cb=%v Cr=%v", dcacResult.CbResidual, dcacResult.CrResidual)
+	}
+	if !dcacResult.DCCoded[0] || !dcacResult.DCCoded[1] || !dcacResult.ACCodedBlockFlags[0][0] || !dcacResult.ACCodedBlockFlags[1][0] {
+		t.Fatalf("coded-block flags were not returned: DC=%v AC=%v", dcacResult.DCCoded, dcacResult.ACCodedBlockFlags)
+	}
+
+	contexts := [CABACContextCount]CABACContextModel{}
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 16))
+	var references [2]CABACChroma420References
+	references[0].LeftAvailable = true
+	references[0].Left = [8]uint8{20, 30, 40, 50, 60, 70, 80, 90}
+	references[1].LeftAvailable = true
+	references[1].Left = [8]uint8{100, 110, 120, 130, 140, 150, 160, 170}
+	var modeScalingLists [2][16]uint8
+	for component := range modeScalingLists {
+		for index := range modeScalingLists[component] {
+			modeScalingLists[component][index] = 16
+		}
+	}
+	result, err := decoder.DecodeIntraChroma420Macroblock(
+		&contexts, 1, true, 2, true, false, false, 0, 26, [2]int{}, modeScalingLists,
+		references, [2]CABACChroma420EdgeState{}, [2]CABACChroma420EdgeState{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Cb[0] != 20 || result.Cb[56] != 90 || result.Cr[0] != 100 || result.Cr[56] != 170 {
+		t.Fatalf("I16x16 horizontal chroma predictions = Cb %v Cr %v", result.Cb[:8], result.Cr[:8])
+	}
+
+	mbTypeContexts := forcedResidualContexts(100, 104)
+	mbTypeDecoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	mbTypeResult, err := mbTypeDecoder.DecodeIntraChroma420Macroblock(
+		&mbTypeContexts, 0, true, 9, true, false, false, 0, 26, [2]int{}, modeScalingLists,
+		[2]CABACChroma420References{}, [2]CABACChroma420EdgeState{}, [2]CABACChroma420EdgeState{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mbTypeResult.PredictionMode != 0 || mbTypeResult.CbResidual == [64]int64{} || mbTypeResult.CrResidual == [64]int64{} {
+		t.Fatal("I16x16 mb_type did not supply chroma coded-block-pattern 2")
+	}
+}
+
+func TestCABACDecodeIntraChroma420MacroblockFailureRollsBack(t *testing.T) {
+	contexts := forcedResidualContexts(64, 67)
+	originalContexts := contexts
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	originalRange, originalOffset, originalBitOffset := decoder.CodeRange(), decoder.CodeOffset(), decoder.bits.bitOffset
+	var scalingLists [2][16]uint8
+	for component := range scalingLists {
+		for index := range scalingLists[component] {
+			scalingLists[component][index] = 16
+		}
+	}
+	if _, err := decoder.DecodeIntraChroma420Macroblock(
+		&contexts, 0, false, 0, false, false, false, 0, 26, [2]int{}, scalingLists,
+		[2]CABACChroma420References{}, [2]CABACChroma420EdgeState{}, [2]CABACChroma420EdgeState{},
+	); err == nil {
+		t.Fatal("mode-3 chroma prediction without edges unexpectedly succeeded")
+	}
+	if contexts != originalContexts || decoder.CodeRange() != originalRange || decoder.CodeOffset() != originalOffset || decoder.bits.bitOffset != originalBitOffset {
+		t.Fatal("failed chroma macroblock changed decoder or slice-context state")
+	}
+}
+
+func TestCABACDecodeIIntraMacroblockDispatchesAndPlacesPlanes(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	decoder, err := NewCABACArithmeticDecoder(make([]byte, 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder, err := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := CABACIIntraMacroblockInput{SliceType: 2, PreviousQPY: 26}
+	for index := range input.Luma4x4ScalingList {
+		input.Luma4x4ScalingList[index] = 16
+	}
+	for component := range input.ChromaScalingLists {
+		for index := range input.ChromaScalingLists[component] {
+			input.ChromaScalingLists[component][index] = 16
+		}
+	}
+	for index := range input.Luma4x4Blocks {
+		input.Luma4x4Blocks[index] = LumaIntra4x4Block{
+			Top:              [8]uint8{90, 90, 90, 90, 90, 90, 90, 90},
+			Left:             [8]uint8{90, 90, 90, 90, 90, 90, 90, 90},
+			TopLeft:          90,
+			TopAvailable:     true,
+			LeftAvailable:    true,
+			TopLeftAvailable: true,
+		}
+	}
+	result, err := decoder.DecodeIIntraMacroblock(input, &contexts, builder, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MacroblockType != 0 || result.CodedBlockPatternLuma != 0 || result.CodedBlockPatternChroma != 0 || result.QPY != 26 {
+		t.Fatalf("dispatched macroblock metadata = %+v", result)
+	}
+	frame, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(frame.Y, result.Luma[:]) || !bytes.Equal(frame.U, result.Cb[:]) || !bytes.Equal(frame.V, result.Cr[:]) {
+		t.Fatal("frame builder planes differ from the reconstructed macroblock")
+	}
+}
+
+func TestCABACDecodeIIntraMacroblockI16x16AndIPCMBranches(t *testing.T) {
+	t.Run("I16x16 derives CBP but decodes chroma mode", func(t *testing.T) {
+		contexts := [CABACContextCount]CABACContextModel{}
+		for index := range contexts {
+			contexts[index] = CABACContextModel{stateIndex: 63}
+		}
+		contexts[3].valueMPS = true
+		contexts[7].valueMPS = true
+		contexts[8].valueMPS = true
+		decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+		builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+		input := CABACIIntraMacroblockInput{SliceType: 2, PreviousQPY: 26, Intra16x16TopAvailable: true}
+		for index := range input.Luma4x4ScalingList {
+			input.Luma4x4ScalingList[index] = 16
+		}
+		for component := range input.ChromaScalingLists {
+			for index := range input.ChromaScalingLists[component] {
+				input.ChromaScalingLists[component][index] = 16
+			}
+		}
+		for index := range input.Intra16x16Top {
+			input.Intra16x16Top[index] = 90
+		}
+		result, err := decoder.DecodeIIntraMacroblock(input, &contexts, builder, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.MacroblockType != 9 || result.CodedBlockPatternChroma != 2 || result.QPY != 26 {
+			t.Fatalf("I16x16 dispatch metadata = %+v", result)
+		}
+		for _, sample := range result.Luma {
+			if sample != 90 {
+				t.Fatalf("I16x16 luma prediction sample = %d; want 90", sample)
+			}
+		}
+	})
+
+	t.Run("I_PCM places samples and restarts CABAC", func(t *testing.T) {
+		data := make([]byte, 1+256+64+64+2)
+		data[0] = 0x80
+		for index := 1; index <= 256; index++ {
+			data[index] = 0x11
+		}
+		for index := 257; index <= 320; index++ {
+			data[index] = 0x22
+		}
+		for index := 321; index <= 384; index++ {
+			data[index] = 0x33
+		}
+		decoder := &CABACArithmeticDecoder{bits: NewBitReader(data), codeRange: 510, codeOffset: 509}
+		contexts := [CABACContextCount]CABACContextModel{}
+		builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+		result, err := decoder.DecodeIIntraMacroblock(CABACIIntraMacroblockInput{SliceType: 2}, &contexts, builder, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.MacroblockType != 25 || decoder.CodeRange() != 510 || decoder.CodeOffset() != 0 || decoder.terminated {
+			t.Fatalf("I_PCM dispatch/restart state = type %d range %d offset %d terminated=%t", result.MacroblockType, decoder.CodeRange(), decoder.CodeOffset(), decoder.terminated)
+		}
+		frame, err := builder.Finish()
+		if err != nil || frame.Y[0] != 0x11 || frame.U[0] != 0x22 || frame.V[0] != 0x33 {
+			t.Fatalf("I_PCM frame sample = %x/%x/%x, %v", frame.Y[0], frame.U[0], frame.V[0], err)
+		}
+	})
+}
+
+func TestCABACDecodeIIntraMacroblockDispatches8x8Transform(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[399].valueMPS = true
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	input := CABACIIntraMacroblockInput{SliceType: 2, PreviousQPY: 26, Transform8x8ModeEnabled: true}
+	for index := range input.Luma8x8ScalingList {
+		input.Luma8x8ScalingList[index] = 16
+	}
+	for component := range input.ChromaScalingLists {
+		for index := range input.ChromaScalingLists[component] {
+			input.ChromaScalingLists[component][index] = 16
+		}
+	}
+	for index := range input.Luma8x8Blocks {
+		input.Luma8x8Blocks[index] = LumaIntra8x8Block{
+			Top:     [16]uint8{90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90},
+			Left:    [16]uint8{90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90},
+			TopLeft: 90, TopAvailable: true, LeftAvailable: true, TopLeftAvailable: true,
+		}
+	}
+	result, err := decoder.DecodeIIntraMacroblock(input, &contexts, builder, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TransformSize8x8 || result.MacroblockType != 0 {
+		t.Fatalf("I_NxN dispatcher selected transform=%t mb_type=%d", result.TransformSize8x8, result.MacroblockType)
+	}
+	for _, sample := range result.Luma {
+		if sample != 90 {
+			t.Fatalf("8x8 intra prediction sample = %d; want 90", sample)
+		}
+	}
+}
+
+func TestCABACDecodeIIntraMacroblockBuilderFailureRollsBack(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	originalContexts := contexts
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	originalRange, originalOffset, originalBitOffset := decoder.CodeRange(), decoder.CodeOffset(), decoder.bits.bitOffset
+	builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	if err := builder.PlaceMacroblock(0, [256]uint8{}, [64]uint8{}, [64]uint8{}); err != nil {
+		t.Fatal(err)
+	}
+	input := CABACIIntraMacroblockInput{SliceType: 2, PreviousQPY: 26}
+	for index := range input.Luma4x4ScalingList {
+		input.Luma4x4ScalingList[index] = 16
+	}
+	for component := range input.ChromaScalingLists {
+		for index := range input.ChromaScalingLists[component] {
+			input.ChromaScalingLists[component][index] = 16
+		}
+	}
+	for index := range input.Luma4x4Blocks {
+		input.Luma4x4Blocks[index].TopAvailable = true
+		input.Luma4x4Blocks[index].LeftAvailable = true
+		input.Luma4x4Blocks[index].TopLeftAvailable = true
+	}
+	if _, err := decoder.DecodeIIntraMacroblock(input, &contexts, builder, 0); !errors.Is(err, ErrYuv420MacroblockAssembly) {
+		t.Fatalf("duplicate builder placement error = %v; want assembly error", err)
+	}
+	if contexts != originalContexts || decoder.CodeRange() != originalRange || decoder.CodeOffset() != originalOffset || decoder.bits.bitOffset != originalBitOffset {
+		t.Fatal("builder rejection committed CABAC decoder or context state")
 	}
 }
