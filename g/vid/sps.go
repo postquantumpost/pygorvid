@@ -238,7 +238,32 @@ func ParseSPS(nal []byte) (SPSInfo, error) {
 	if err := setSPSDimensions(&info, widthMbsMinus1, heightMapUnitsMinus1, info.FrameMbsOnly, cropLeft, cropRight, cropTop, cropBottom); err != nil {
 		return SPSInfo{}, err
 	}
+	if err := validateSupportedSPS(info); err != nil {
+		return SPSInfo{}, err
+	}
 	return info, nil
+}
+
+func validateSupportedSPS(info SPSInfo) error {
+	supportedProfiles := map[uint8]struct{}{
+		66: {}, 77: {}, 88: {}, 100: {}, 110: {}, 122: {}, 244: {},
+	}
+	if _, ok := supportedProfiles[info.ProfileIDC]; !ok {
+		return fmt.Errorf("unsupported SPS profile_idc %d: only progressive 8-bit 4:2:0 profiles are supported", info.ProfileIDC)
+	}
+	if info.ChromaFormatIDC != 1 {
+		return fmt.Errorf("unsupported SPS chroma_format_idc %d: only 4:2:0 is supported", info.ChromaFormatIDC)
+	}
+	if info.SeparateColourPlane {
+		return fmt.Errorf("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported")
+	}
+	if info.BitDepthLuma != 8 || info.BitDepthChroma != 8 {
+		return fmt.Errorf("unsupported SPS bit depth %d/%d: only 8-bit 4:2:0 is supported", info.BitDepthLuma, info.BitDepthChroma)
+	}
+	if !info.FrameMbsOnly || info.MbAdaptiveFrameField {
+		return fmt.Errorf("unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported")
+	}
+	return nil
 }
 
 func readSPSUE(reader *BitReader, field string) (uint32, error) {

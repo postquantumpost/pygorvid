@@ -42,6 +42,7 @@ pub struct SliceHeader {
     pub disable_deblocking_filter_idc: Option<u8>,
     pub slice_alpha_c0_offset_div2: i64,
     pub slice_beta_offset_div2: i64,
+    pub slice_data_bit_offset: usize,
     pub pic_order_cnt_type: u8,
 }
 
@@ -265,6 +266,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
         disable_deblocking_filter_idc: None,
         slice_alpha_c0_offset_div2: 0,
         slice_beta_offset_div2: 0,
+        slice_data_bit_offset: 0,
         pic_order_cnt_type: sps.pic_order_cnt_type,
     };
     match sps.pic_order_cnt_type {
@@ -406,6 +408,17 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
             }
         }
     }
+    if pps.entropy_coding_mode {
+        while reader.bit_offset() % 8 != 0 {
+            let alignment_bit = reader
+                .read_bit()
+                .map_err(|error| context("cabac_alignment_one_bit", error))?;
+            if !alignment_bit {
+                return Err(invalid("cabac_alignment_one_bit is not 1"));
+            }
+        }
+    }
+    header.slice_data_bit_offset = reader.bit_offset();
     Ok(header)
 }
 

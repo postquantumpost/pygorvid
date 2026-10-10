@@ -10,6 +10,34 @@ const COEFF_ABS_LEVEL1_CONTEXT: [usize; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
 const COEFF_ABS_LEVEL_GREATER1_CONTEXT: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
 const COEFF_LEVEL1_TRANSITION: [usize; 8] = [1, 2, 3, 3, 4, 5, 6, 7];
 const COEFF_LEVEL_GREATER1_TRANSITION: [usize; 8] = [4, 4, 4, 4, 5, 6, 7, 7];
+const I_INTRA_MB_TYPE_INIT: [(i32, i32); 8] = [
+    (20, -15),
+    (2, 54),
+    (3, 74),
+    (-28, 127),
+    (-23, 104),
+    (-6, 53),
+    (-1, 54),
+    (7, 51),
+];
+const I_MB_QP_DELTA_INIT: [(i32, i32); 4] = [(0, 41), (0, 63), (0, 63), (0, 63)];
+const I_INTRA_CHROMA_PRED_MODE_INIT: [(i32, i32); 4] = [(-9, 83), (4, 86), (0, 97), (-7, 72)];
+const I_INTRA4X4_PRED_MODE_INIT: [(i32, i32); 2] = [(13, 41), (3, 62)];
+const I_TRANSFORM_SIZE_8X8_INIT: [(i32, i32); 3] = [(31, 21), (31, 31), (25, 50)];
+const I_LUMA_CODED_BLOCK_PATTERN_INIT: [(i32, i32); 4] =
+    [(-17, 127), (-13, 102), (0, 82), (-7, 74)];
+const I_CHROMA_CODED_BLOCK_PATTERN_INIT: [(i32, i32); 8] = [
+    (-21, 107),
+    (-27, 127),
+    (-31, 127),
+    (-24, 127),
+    (-18, 95),
+    (-27, 127),
+    (-21, 114),
+    (-30, 127),
+];
+const I_LUMA4X4_CODED_BLOCK_FLAG_INIT: [(i32, i32); 4] =
+    [(-3, 70), (-8, 93), (-10, 90), (-30, 127)];
 const RANGE_LPS: [[u8; 64]; 4] = [
     [
         128, 128, 128, 123, 116, 111, 105, 100, 95, 90, 85, 81, 77, 73, 69, 66, 62, 59, 56, 53, 51,
@@ -89,6 +117,126 @@ impl CabacContextModel {
         }
         self.state_index = TRANSITION_LPS[self.state_index as usize];
     }
+}
+
+/// Initializes CABAC context indices 3 through 10 from H.264 Table 9-12.
+pub fn new_cabac_i_intra_mb_type_contexts(slice_qpy: i32) -> io::Result<[CabacContextModel; 8]> {
+    let mut contexts = [CabacContextModel::new(0, 0, slice_qpy)?; 8];
+    for (context, (m, n)) in contexts.iter_mut().zip(I_INTRA_MB_TYPE_INIT) {
+        *context = CabacContextModel::new(m, n, slice_qpy)?;
+    }
+    Ok(contexts)
+}
+
+/// Initializes I-slice mb_qp_delta contexts 60-63 from H.264 Table 9-17.
+pub fn new_cabac_i_mb_qp_delta_contexts(slice_qpy: i32) -> io::Result<[CabacContextModel; 4]> {
+    let mut contexts = [CabacContextModel::new(0, 0, slice_qpy)?; 4];
+    for (context, (m, n)) in contexts.iter_mut().zip(I_MB_QP_DELTA_INIT) {
+        *context = CabacContextModel::new(m, n, slice_qpy)?;
+    }
+    Ok(contexts)
+}
+
+/// Initializes I-slice chroma prediction contexts 64 through 67 from H.264 Table 9-17.
+pub fn new_cabac_i_intra_chroma_pred_mode_contexts(
+    slice_qpy: i32,
+) -> io::Result<[CabacContextModel; 4]> {
+    Ok([
+        CabacContextModel::new(
+            I_INTRA_CHROMA_PRED_MODE_INIT[0].0,
+            I_INTRA_CHROMA_PRED_MODE_INIT[0].1,
+            slice_qpy,
+        )?,
+        CabacContextModel::new(
+            I_INTRA_CHROMA_PRED_MODE_INIT[1].0,
+            I_INTRA_CHROMA_PRED_MODE_INIT[1].1,
+            slice_qpy,
+        )?,
+        CabacContextModel::new(
+            I_INTRA_CHROMA_PRED_MODE_INIT[2].0,
+            I_INTRA_CHROMA_PRED_MODE_INIT[2].1,
+            slice_qpy,
+        )?,
+        CabacContextModel::new(
+            I_INTRA_CHROMA_PRED_MODE_INIT[3].0,
+            I_INTRA_CHROMA_PRED_MODE_INIT[3].1,
+            slice_qpy,
+        )?,
+    ])
+}
+
+/// Initializes I-slice Intra_NxN mode contexts 68-69 from H.264 Table 9-17.
+pub fn new_cabac_i_intra4x4_pred_mode_contexts(
+    slice_qpy: i32,
+) -> io::Result<[CabacContextModel; 2]> {
+    Ok([
+        CabacContextModel::new(
+            I_INTRA4X4_PRED_MODE_INIT[0].0,
+            I_INTRA4X4_PRED_MODE_INIT[0].1,
+            slice_qpy,
+        )?,
+        CabacContextModel::new(
+            I_INTRA4X4_PRED_MODE_INIT[1].0,
+            I_INTRA4X4_PRED_MODE_INIT[1].1,
+            slice_qpy,
+        )?,
+    ])
+}
+
+/// Initializes I-slice transform-size contexts 399-401 from H.264 Table 9-16.
+pub fn new_cabac_i_transform_size_8x8_contexts(
+    slice_qpy: i32,
+) -> io::Result<[CabacContextModel; 3]> {
+    Ok([
+        CabacContextModel::new(
+            I_TRANSFORM_SIZE_8X8_INIT[0].0,
+            I_TRANSFORM_SIZE_8X8_INIT[0].1,
+            slice_qpy,
+        )?,
+        CabacContextModel::new(
+            I_TRANSFORM_SIZE_8X8_INIT[1].0,
+            I_TRANSFORM_SIZE_8X8_INIT[1].1,
+            slice_qpy,
+        )?,
+        CabacContextModel::new(
+            I_TRANSFORM_SIZE_8X8_INIT[2].0,
+            I_TRANSFORM_SIZE_8X8_INIT[2].1,
+            slice_qpy,
+        )?,
+    ])
+}
+
+/// Initializes I-slice luma coded-block-pattern contexts 73-76 from H.264 Table 9-18.
+pub fn new_cabac_i_luma_coded_block_pattern_contexts(
+    slice_qpy: i32,
+) -> io::Result<[CabacContextModel; 4]> {
+    let mut contexts = [CabacContextModel::new(0, 0, slice_qpy)?; 4];
+    for (context, (m, n)) in contexts.iter_mut().zip(I_LUMA_CODED_BLOCK_PATTERN_INIT) {
+        *context = CabacContextModel::new(m, n, slice_qpy)?;
+    }
+    Ok(contexts)
+}
+
+/// Initializes I-slice chroma coded-block-pattern contexts 77-84 from H.264 Table 9-18.
+pub fn new_cabac_i_chroma_coded_block_pattern_contexts(
+    slice_qpy: i32,
+) -> io::Result<[CabacContextModel; 8]> {
+    let mut contexts = [CabacContextModel::new(0, 0, slice_qpy)?; 8];
+    for (context, (m, n)) in contexts.iter_mut().zip(I_CHROMA_CODED_BLOCK_PATTERN_INIT) {
+        *context = CabacContextModel::new(m, n, slice_qpy)?;
+    }
+    Ok(contexts)
+}
+
+/// Initializes I-slice luma 4x4 coded-block-flag contexts 93-96 from H.264 Table 9-18.
+pub fn new_cabac_i_luma4x4_coded_block_flag_contexts(
+    slice_qpy: i32,
+) -> io::Result<[CabacContextModel; 4]> {
+    let mut contexts = [CabacContextModel::new(0, 0, slice_qpy)?; 4];
+    for (context, (m, n)) in contexts.iter_mut().zip(I_LUMA4X4_CODED_BLOCK_FLAG_INIT) {
+        *context = CabacContextModel::new(m, n, slice_qpy)?;
+    }
+    Ok(contexts)
 }
 
 pub struct CabacArithmeticDecoder<'a> {

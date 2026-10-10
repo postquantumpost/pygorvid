@@ -96,10 +96,6 @@ func TestParseSPSProfileChromaAndBitDepth(t *testing.T) {
 			name: "high 420 8-bit", nal: makeCompleteSPS(100, 0, 42, "1"+"010"+"1"+"1", 0, 0, true, [4]uint32{}),
 			profile: 100, level: 42, chroma: 1, lumaDepth: 8, chromaDepth: 8,
 		},
-		{
-			name: "high 444 separate 10-bit", nal: makeCompleteSPS(100, 0, 50, "1"+"00100"+"1"+"011"+"010", 0, 0, true, [4]uint32{}),
-			profile: 100, level: 50, chroma: 3, separateColourPlane: true, lumaDepth: 10, chromaDepth: 9,
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -126,28 +122,19 @@ func TestParseSPSDimensionsAndCropping(t *testing.T) {
 		info.FrameCropBottom != 8 {
 		t.Fatalf("progressive cropped dimensions = %+v", info)
 	}
-
-	fieldCoded := makeCompleteSPS(66, 0, 30, "1", 0, 0, false, [4]uint32{0, 0, 0, 1})
-	info, err = ParseSPS(fieldCoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.CodedWidth != 16 || info.CodedHeight != 32 || info.Width != 16 || info.Height != 28 || info.FrameCropBottom != 4 {
-		t.Fatalf("field-coded cropped dimensions = %+v", info)
-	}
-	if info.FrameMbsOnly || info.MbAdaptiveFrameField || !info.Direct8x8Inference {
-		t.Fatalf("field-coding flags = %+v", info)
+	if !info.FrameMbsOnly || info.MbAdaptiveFrameField || !info.Direct8x8Inference {
+		t.Fatalf("progressive flags = %+v", info)
 	}
 }
 
 func TestParseSPSReferenceAndFrameFlags(t *testing.T) {
-	nal := makeCompleteSPSWithFlags(66, 0, 30, "1", 0, 0, 4, true, false, true, false, [4]uint32{})
+	nal := makeCompleteSPSWithFlags(100, 0, 42, "1"+"010"+"1"+"1", 0, 0, 4, true, true, false, true, [4]uint32{})
 	info, err := ParseSPS(nal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.MaxNumRefFrames != 4 || !info.GapsInFrameNumValueAllowed || info.FrameMbsOnly ||
-		!info.MbAdaptiveFrameField || info.Direct8x8Inference {
+	if info.MaxNumRefFrames != 4 || !info.GapsInFrameNumValueAllowed || !info.FrameMbsOnly ||
+		info.MbAdaptiveFrameField || !info.Direct8x8Inference {
 		t.Fatalf("unexpected reference/frame flags: %+v", info)
 	}
 }
@@ -184,6 +171,26 @@ func TestParseSPSFrameNumberAndPOCModes(t *testing.T) {
 				info.DeltaPicOrderAlwaysZero != test.deltaAlwaysZero || info.OffsetForNonRefPic != test.offsetNonRef ||
 				info.OffsetForTopToBottomField != test.offsetTopBottom || !reflect.DeepEqual(info.OffsetForRefFrame, test.offsetForRefFrame) {
 				t.Fatalf("unexpected frame/POC fields: %+v", info)
+			}
+		})
+	}
+}
+
+func TestParseSPSRejectsUnsupportedFeatureSet(t *testing.T) {
+	tests := []struct {
+		name string
+		nal  []byte
+	}{
+		{name: "unsupported profile", nal: makeCompleteSPS(118, 0, 42, "1"+"010"+"1"+"1", 0, 0, true, [4]uint32{})},
+		{name: "unsupported chroma format", nal: makeCompleteSPS(100, 0, 42, "1"+"00100"+"1"+"011"+"010", 0, 0, true, [4]uint32{})},
+		{name: "unsupported bit depth", nal: makeCompleteSPS(100, 0, 42, "1"+"010"+"011"+"011", 0, 0, true, [4]uint32{})},
+		{name: "unsupported progressiveness", nal: makeCompleteSPS(100, 0, 42, "1"+"010"+"1"+"1", 0, 0, false, [4]uint32{})},
+		{name: "unsupported separate colour plane", nal: makeCompleteSPS(100, 0, 42, "1"+"00100"+"1"+"1"+"1", 0, 0, true, [4]uint32{})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ParseSPS(test.nal); err == nil {
+				t.Fatal("expected unsupported-feature SPS parse error")
 			}
 		})
 	}

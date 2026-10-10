@@ -60,3 +60,32 @@ func TestConvertFullRangeYUVToRGBPreservesGray(t *testing.T) {
 		t.Fatalf("gray pixel = (%d,%d,%d); want (128,128,128)", buf.Data[3], buf.Data[4], buf.Data[5])
 	}
 }
+
+func TestYuv420FrameToRGBMatchesPixelBufferContract(t *testing.T) {
+	frame := Yuv420Frame{
+		Width:   2,
+		Height:  1,
+		YStride: 2,
+		UStride: 1,
+		VStride: 1,
+		Y:       []byte{16, 235},
+		U:       []byte{128},
+		V:       []byte{128},
+	}
+	buf, err := frame.ConvertToRGB(ColorRangeLimited)
+	if err != nil {
+		t.Fatalf("ConvertToRGB() error = %v", err)
+	}
+	if buf.Width != 2 || buf.Height != 1 || buf.Stride != 6 || buf.Channels != 3 {
+		t.Fatalf("pixel buffer = %+v; want 2x1 RGB buffer with stride 6", buf)
+	}
+	if buf.ColorRange != ColorRangeLimited {
+		t.Fatalf("pixel buffer color range = %v; want %v", buf.ColorRange, ColorRangeLimited)
+	}
+	if buf.Data[0] != 0 || buf.Data[1] != 0 || buf.Data[2] != 0 {
+		t.Fatalf("first pixel = (%d,%d,%d); want black", buf.Data[0], buf.Data[1], buf.Data[2])
+	}
+	if buf.Data[3] != 255 || buf.Data[4] != 255 || buf.Data[5] != 255 {
+		t.Fatalf("second pixel = (%d,%d,%d); want white", buf.Data[3], buf.Data[4], buf.Data[5])
+	}
+}

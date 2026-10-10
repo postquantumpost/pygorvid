@@ -240,12 +240,22 @@ class VideoSampleReader:
     def sample_count(self) -> int:
         return len(self._samples)
 
-    def next_sample(self) -> Optional[CompressedSample]:
+    def first_sync_sample_index(self) -> Optional[int]:
+        for index, location in enumerate(self._samples):
+            if location.is_sync:
+                return index
+        return None
+
+    def sample_at(self, index: int) -> CompressedSample:
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < len(self._samples)
+        ):
+            raise IndexError("sample index is out of range")
         if self._closed or self._file is None:
             raise ValueError("sample reader is closed")
-        if self._next_index == len(self._samples):
-            return None
-        location = self._samples[self._next_index]
+        location = self._samples[index]
         self._file.seek(location.offset)
         data = self._file.read(location.size)
         if len(data) != location.size:
@@ -253,15 +263,58 @@ class VideoSampleReader:
         try:
             _validate_length_prefixed_nals(data)
         except Mp4FormatError as error:
-            raise Mp4FormatError(f"sample {self._next_index}: {error}") from error
-        sample = CompressedSample(
-            index=self._next_index,
+            raise Mp4FormatError(f"sample {index}: {error}") from error
+        return CompressedSample(
+            index=index,
             data=data,
             dts_ticks=location.dts_ticks,
             pts_ticks=location.pts_ticks,
             duration_ticks=location.duration_ticks,
             is_sync=location.is_sync,
         )
+
+    def decode_order_dependency_samples(
+        self, presentation_index: int
+    ) -> tuple[CompressedSample, ...]:
+        if (
+            not isinstance(presentation_index, int)
+            or isinstance(presentation_index, bool)
+            or not 0 <= presentation_index < len(self._samples)
+        ):
+            raise IndexError("presentation frame index is out of range")
+        display_order = sorted(
+            range(len(self._samples)),
+            key=lambda index: (self._samples[index].pts_ticks, index),
+        )
+        target_index = display_order[presentation_index]
+        sync_index = next(
+            (index for index in range(target_index, -1, -1) if self._samples[index].is_sync),
+            None,
+        )
+        if sync_index is None:
+            raise Mp4FormatError("presentation frame has no preceding sync sample")
+        gop_end = next(
+            (
+                index
+                for index in range(sync_index + 1, len(self._samples))
+                if self._samples[index].is_sync
+            ),
+            len(self._samples),
+        )
+        target_pts = self._samples[target_index].pts_ticks
+        dependency_end = max(
+            index
+            for index in range(sync_index, gop_end)
+            if self._samples[index].pts_ticks <= target_pts
+        )
+        return tuple(self.sample_at(index) for index in range(sync_index, dependency_end + 1))
+
+    def next_sample(self) -> Optional[CompressedSample]:
+        if self._closed or self._file is None:
+            raise ValueError("sample reader is closed")
+        if self._next_index == len(self._samples):
+            return None
+        sample = self.sample_at(self._next_index)
         self._next_index += 1
         return sample
 

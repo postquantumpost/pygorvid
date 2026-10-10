@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 )
 
 // AVCConfiguration describes the selected video track's AVC sample entry.
@@ -412,6 +413,75 @@ func (r *VideoSampleReader) Configuration() AVCConfiguration {
 
 func (r *VideoSampleReader) SampleCount() int { return len(r.samples) }
 
+// FirstSyncSampleIndex returns the first sync sample in decode order, if one exists.
+func (r *VideoSampleReader) FirstSyncSampleIndex() (int, bool) {
+	for index, sample := range r.samples {
+		if sample.isSync {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+// SampleAt reads one sample by decode-order index without advancing NextSample.
+func (r *VideoSampleReader) SampleAt(index uint64) (CompressedSample, error) {
+	if index >= uint64(len(r.samples)) {
+		return CompressedSample{}, errors.New("sample index is out of range")
+	}
+	return r.sampleAtIndex(int(index))
+}
+
+// DecodeOrderDependencySamples returns the coded-order GOP prefix needed to cover a display-order frame.
+func (r *VideoSampleReader) DecodeOrderDependencySamples(presentationIndex uint64) ([]CompressedSample, error) {
+	if presentationIndex >= uint64(len(r.samples)) {
+		return nil, errors.New("presentation frame index is out of range")
+	}
+	displayOrder := make([]int, len(r.samples))
+	for index := range displayOrder {
+		displayOrder[index] = index
+	}
+	sort.SliceStable(displayOrder, func(left, right int) bool {
+		return r.samples[displayOrder[left]].ptsTicks < r.samples[displayOrder[right]].ptsTicks
+	})
+	targetIndex := displayOrder[presentationIndex]
+	syncIndex := -1
+	for index := targetIndex; index >= 0; index-- {
+		if r.samples[index].isSync {
+			syncIndex = index
+			break
+		}
+	}
+	if syncIndex < 0 {
+		return nil, errors.New("presentation frame has no preceding sync sample")
+	}
+	gopEnd := len(r.samples)
+	for index := syncIndex + 1; index < len(r.samples); index++ {
+		if r.samples[index].isSync {
+			gopEnd = index
+			break
+		}
+	}
+	targetPTS := r.samples[targetIndex].ptsTicks
+	dependencyEnd := -1
+	for index := syncIndex; index < gopEnd; index++ {
+		if r.samples[index].ptsTicks <= targetPTS {
+			dependencyEnd = index
+		}
+	}
+	if dependencyEnd < syncIndex {
+		return nil, errors.New("presentation frame has no decode-order dependency window")
+	}
+	dependencies := make([]CompressedSample, 0, dependencyEnd-syncIndex+1)
+	for index := syncIndex; index <= dependencyEnd; index++ {
+		sample, err := r.sampleAtIndex(index)
+		if err != nil {
+			return nil, err
+		}
+		dependencies = append(dependencies, sample)
+	}
+	return dependencies, nil
+}
+
 // NextSample returns the next sample in decode order. ok is false at end of stream.
 func (r *VideoSampleReader) NextSample() (sample CompressedSample, ok bool, err error) {
 	if r == nil || r.file == nil {
@@ -420,31 +490,44 @@ func (r *VideoSampleReader) NextSample() (sample CompressedSample, ok bool, err 
 	if r.nextIndex >= len(r.samples) {
 		return CompressedSample{}, false, nil
 	}
-	location := r.samples[r.nextIndex]
+	sample, err = r.sampleAtIndex(r.nextIndex)
+	if err != nil {
+		return CompressedSample{}, false, err
+	}
+	r.nextIndex++
+	return sample, true, nil
+}
+
+func (r *VideoSampleReader) sampleAtIndex(index int) (CompressedSample, error) {
+	if r == nil || r.file == nil {
+		return CompressedSample{}, errors.New("sample reader is closed")
+	}
+	if index < 0 || index >= len(r.samples) {
+		return CompressedSample{}, errors.New("sample index is out of range")
+	}
+	location := r.samples[index]
 	if location.offset > math.MaxInt64 {
-		return CompressedSample{}, false, errors.New("sample offset exceeds seek range")
+		return CompressedSample{}, errors.New("sample offset exceeds seek range")
 	}
 	data := make([]byte, location.size)
 	n, err := r.file.ReadAt(data, int64(location.offset))
 	if err != nil && !(err == io.EOF && n == len(data)) {
-		return CompressedSample{}, false, fmt.Errorf("read sample %d: %w", r.nextIndex, err)
+		return CompressedSample{}, fmt.Errorf("read sample %d: %w", index, err)
 	}
 	if n != len(data) {
-		return CompressedSample{}, false, io.ErrUnexpectedEOF
+		return CompressedSample{}, io.ErrUnexpectedEOF
 	}
 	if err := validateLengthPrefixedNALs(data); err != nil {
-		return CompressedSample{}, false, fmt.Errorf("sample %d: %w", r.nextIndex, err)
+		return CompressedSample{}, fmt.Errorf("sample %d: %w", index, err)
 	}
-	sample = CompressedSample{
-		Index:         uint64(r.nextIndex),
+	return CompressedSample{
+		Index:         uint64(index),
 		Data:          data,
 		DTSTicks:      location.dtsTicks,
 		PTSTicks:      location.ptsTicks,
 		DurationTicks: location.durationTicks,
 		IsSync:        location.isSync,
-	}
-	r.nextIndex++
-	return sample, true, nil
+	}, nil
 }
 
 // Close releases the owned MP4 file. It is safe to call more than once.

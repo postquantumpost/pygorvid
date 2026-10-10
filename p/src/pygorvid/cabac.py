@@ -23,6 +23,20 @@ _COEFF_ABS_LEVEL1_CONTEXT = (1, 2, 3, 4, 0, 0, 0, 0)
 _COEFF_ABS_LEVEL_GREATER1_CONTEXT = (5, 5, 5, 5, 6, 7, 8, 9)
 _COEFF_LEVEL1_TRANSITION = (1, 2, 3, 3, 4, 5, 6, 7)
 _COEFF_LEVEL_GREATER1_TRANSITION = (4, 4, 4, 4, 5, 6, 7, 7)
+_I_INTRA_MB_TYPE_INIT = (
+    (20, -15), (2, 54), (3, 74), (-28, 127),
+    (-23, 104), (-6, 53), (-1, 54), (7, 51),
+)
+_I_MB_QP_DELTA_INIT = ((0, 41), (0, 63), (0, 63), (0, 63))
+_I_INTRA_CHROMA_PRED_MODE_INIT = ((-9, 83), (4, 86), (0, 97), (-7, 72))
+_I_INTRA4X4_PRED_MODE_INIT = ((13, 41), (3, 62))
+_I_TRANSFORM_SIZE_8X8_INIT = ((31, 21), (31, 31), (25, 50))
+_I_LUMA_CODED_BLOCK_PATTERN_INIT = ((-17, 127), (-13, 102), (0, 82), (-7, 74))
+_I_CHROMA_CODED_BLOCK_PATTERN_INIT = (
+    (-21, 107), (-27, 127), (-31, 127), (-24, 127),
+    (-18, 95), (-27, 127), (-21, 114), (-30, 127),
+)
+_I_LUMA4X4_CODED_BLOCK_FLAG_INIT = ((-3, 70), (-8, 93), (-10, 90), (-30, 127))
 _RANGE_LPS = (
     (128, 128, 128, 123, 116, 111, 105, 100, 95, 90, 85, 81, 77, 73, 69, 66, 62, 59, 56, 53, 51, 48, 46, 43, 41, 39, 37, 35, 33, 32, 30, 29, 27, 26, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 14, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 2),
     (176, 167, 158, 150, 142, 135, 128, 122, 116, 110, 104, 99, 94, 89, 85, 80, 76, 72, 69, 65, 62, 59, 56, 53, 50, 48, 45, 43, 41, 39, 37, 35, 33, 31, 30, 28, 27, 26, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 14, 13, 12, 12, 11, 11, 10, 9, 9, 9, 8, 8, 7, 7, 2),
@@ -63,6 +77,54 @@ class CABACContextModel:
         if self._state_index == 0:
             self._value_mps = not self._value_mps
         self._state_index = _TRANSITION_LPS[self._state_index]
+
+
+def initialize_i_intra_mb_type_contexts(slice_qpy: int) -> list[CABACContextModel]:
+    """Initialize CABAC context indices 3-10 from H.264 Table 9-12."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_INTRA_MB_TYPE_INIT]
+
+
+def initialize_i_mb_qp_delta_contexts(slice_qpy: int) -> list[CABACContextModel]:
+    """Initialize I-slice mb_qp_delta contexts 60-63 from Table 9-17."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_MB_QP_DELTA_INIT]
+
+
+def initialize_i_intra_chroma_pred_mode_contexts(
+    slice_qpy: int,
+) -> list[CABACContextModel]:
+    """Initialize I-slice chroma prediction contexts 64-67 from Table 9-17."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_INTRA_CHROMA_PRED_MODE_INIT]
+
+
+def initialize_i_intra4x4_pred_mode_contexts(slice_qpy: int) -> list[CABACContextModel]:
+    """Initialize I-slice Intra_NxN mode contexts 68-69 from Table 9-17."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_INTRA4X4_PRED_MODE_INIT]
+
+
+def initialize_i_transform_size_8x8_contexts(slice_qpy: int) -> list[CABACContextModel]:
+    """Initialize I-slice transform-size contexts 399-401 from Table 9-16."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_TRANSFORM_SIZE_8X8_INIT]
+
+
+def initialize_i_luma_coded_block_pattern_contexts(
+    slice_qpy: int,
+) -> list[CABACContextModel]:
+    """Initialize I-slice luma CBP contexts 73-76 from Table 9-18."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_LUMA_CODED_BLOCK_PATTERN_INIT]
+
+
+def initialize_i_chroma_coded_block_pattern_contexts(
+    slice_qpy: int,
+) -> list[CABACContextModel]:
+    """Initialize I-slice chroma CBP contexts 77-84 from Table 9-18."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_CHROMA_CODED_BLOCK_PATTERN_INIT]
+
+
+def initialize_i_luma4x4_coded_block_flag_contexts(
+    slice_qpy: int,
+) -> list[CABACContextModel]:
+    """Initialize I-slice luma 4x4 coded-block-flag contexts 93-96 from Table 9-18."""
+    return [CABACContextModel(m, n, slice_qpy) for m, n in _I_LUMA4X4_CODED_BLOCK_FLAG_INIT]
 
 
 class CABACArithmeticDecoder:

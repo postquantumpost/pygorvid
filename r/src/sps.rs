@@ -34,6 +34,40 @@ pub struct SpsInfo {
     pub direct_8x8_inference: bool,
 }
 
+const SUPPORTED_PROFILE_IDS: [u8; 7] = [66, 77, 88, 100, 110, 122, 244];
+
+fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
+    if !SUPPORTED_PROFILE_IDS.contains(&info.profile_idc) {
+        return Err(invalid(format!(
+            "unsupported SPS profile_idc {}: only progressive 8-bit 4:2:0 profiles are supported",
+            info.profile_idc
+        )));
+    }
+    if info.chroma_format_idc != 1 {
+        return Err(invalid(format!(
+            "unsupported SPS chroma_format_idc {}: only 4:2:0 is supported",
+            info.chroma_format_idc
+        )));
+    }
+    if info.separate_colour_plane {
+        return Err(invalid(
+            "unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported",
+        ));
+    }
+    if info.bit_depth_luma != 8 || info.bit_depth_chroma != 8 {
+        return Err(invalid(format!(
+            "unsupported SPS bit depth {}/{}: only 8-bit 4:2:0 is supported",
+            info.bit_depth_luma, info.bit_depth_chroma
+        )));
+    }
+    if !info.frame_mbs_only || info.mb_adaptive_frame_field {
+        return Err(invalid(
+            "unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported",
+        ));
+    }
+    Ok(())
+}
+
 pub fn parse_sps(nal: &[u8]) -> io::Result<SpsInfo> {
     let header = parse_nal_header(nal)?;
     if header.unit_type != 7 {
@@ -197,6 +231,7 @@ pub fn parse_sps(nal: &[u8]) -> io::Result<SpsInfo> {
         frame_mbs_only,
         crop,
     )?;
+    validate_supported_sps(&info)?;
     Ok(info)
 }
 

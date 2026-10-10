@@ -230,6 +230,169 @@ pub struct Yuv420Frame {
     pub v: Vec<u8>,
 }
 
+impl Yuv420Frame {
+    fn plane_bytes(&self, plane: &[u8], width: usize, height: usize, stride: usize) -> io::Result<Vec<u8>> {
+        if width == 0 || height == 0 {
+            return Ok(Vec::new());
+        }
+        if stride == 0 || stride < width || plane.len() < stride * height {
+            return Err(invalid("reference picture frame layout is invalid or truncated"));
+        }
+        let mut out = Vec::with_capacity(width * height);
+        for row in 0..height {
+            let start = row * stride;
+            let end = start + width;
+            out.extend_from_slice(&plane[start..end]);
+        }
+        Ok(out)
+    }
+
+    pub fn luma_plane_bytes(&self) -> io::Result<Vec<u8>> {
+        self.plane_bytes(&self.y, self.width, self.height, self.y_stride)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Yuv420FrameBuilder {
+    picture_width_in_mbs: usize,
+    crop_left: usize,
+    crop_top: usize,
+    frame: Yuv420Frame,
+    written: Vec<bool>,
+}
+
+impl Yuv420FrameBuilder {
+    pub fn new(
+        picture_width_in_mbs: usize,
+        picture_height_in_mbs: usize,
+        crop_left: usize,
+        crop_top: usize,
+        crop_right: usize,
+        crop_bottom: usize,
+    ) -> io::Result<Self> {
+        let coded_width = picture_width_in_mbs
+            .checked_mul(16)
+            .filter(|_| picture_width_in_mbs > 0)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        let coded_height = picture_height_in_mbs
+            .checked_mul(16)
+            .filter(|_| picture_height_in_mbs > 0)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        let macroblock_count = picture_width_in_mbs
+            .checked_mul(picture_height_in_mbs)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        if crop_left % 2 != 0
+            || crop_top % 2 != 0
+            || crop_right % 2 != 0
+            || crop_bottom % 2 != 0
+        {
+            return Err(invalid("YUV 4:2:0 macroblock assembly is invalid"));
+        }
+        let width = coded_width
+            .checked_sub(crop_left)
+            .and_then(|value| value.checked_sub(crop_right))
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        let height = coded_height
+            .checked_sub(crop_top)
+            .and_then(|value| value.checked_sub(crop_bottom))
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        let y_size = width
+            .checked_mul(height)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        let chroma_width = width / 2;
+        let chroma_height = height / 2;
+        let chroma_size = chroma_width
+            .checked_mul(chroma_height)
+            .ok_or_else(|| invalid("YUV 4:2:0 macroblock assembly is invalid"))?;
+        Ok(Self {
+            picture_width_in_mbs,
+            crop_left,
+            crop_top,
+            frame: Yuv420Frame {
+                width,
+                height,
+                y_stride: width,
+                u_stride: chroma_width,
+                v_stride: chroma_width,
+                y: vec![0; y_size],
+                u: vec![0; chroma_size],
+                v: vec![0; chroma_size],
+            },
+            written: vec![false; macroblock_count],
+        })
+    }
+
+    pub fn place_macroblock(
+        &mut self,
+        address: usize,
+        y_block: &[u8; 256],
+        u_block: &[u8; 64],
+        v_block: &[u8; 64],
+    ) -> io::Result<()> {
+        if address >= self.written.len() || self.written[address] {
+            return Err(invalid("YUV 4:2:0 macroblock assembly is invalid"));
+        }
+        let mb_x = address % self.picture_width_in_mbs;
+        let mb_y = address / self.picture_width_in_mbs;
+        for row in 0..16 {
+            let dst_y = mb_y * 16 + row;
+            if dst_y < self.crop_top || dst_y - self.crop_top >= self.frame.height {
+                continue;
+            }
+            let output_y = dst_y - self.crop_top;
+            for column in 0..16 {
+                let dst_x = mb_x * 16 + column;
+                if dst_x >= self.crop_left && dst_x - self.crop_left < self.frame.width {
+                    self.frame.y[output_y * self.frame.y_stride + dst_x - self.crop_left] =
+                        y_block[row * 16 + column];
+                }
+            }
+        }
+        for row in 0..8 {
+            let dst_y = mb_y * 8 + row;
+            if dst_y < self.crop_top / 2 || dst_y - self.crop_top / 2 >= self.frame.height / 2 {
+                continue;
+            }
+            let output_y = dst_y - self.crop_top / 2;
+            for column in 0..8 {
+                let dst_x = mb_x * 8 + column;
+                if dst_x >= self.crop_left / 2 && dst_x - self.crop_left / 2 < self.frame.width / 2
+                {
+                    let output_x = dst_x - self.crop_left / 2;
+                    let block_index = row * 8 + column;
+                    self.frame.u[output_y * self.frame.u_stride + output_x] = u_block[block_index];
+                    self.frame.v[output_y * self.frame.v_stride + output_x] = v_block[block_index];
+                }
+            }
+        }
+        self.written[address] = true;
+        Ok(())
+    }
+
+    pub fn finish(&self) -> io::Result<Yuv420Frame> {
+        if self.written.iter().any(|written| !written) {
+            return Err(invalid("YUV 4:2:0 macroblock assembly is incomplete"));
+        }
+        Ok(self.frame.clone())
+    }
+}
+
+impl Yuv420Frame {
+    pub fn u_plane_bytes(&self) -> io::Result<Vec<u8>> {
+        let chroma_width = self.width / 2 + self.width % 2;
+        let chroma_height = self.height / 2 + self.height % 2;
+        self.plane_bytes(&self.u, chroma_width, chroma_height, self.u_stride)
+    }
+
+    pub fn v_plane_bytes(&self) -> io::Result<Vec<u8>> {
+        let chroma_width = self.width / 2 + self.width % 2;
+        let chroma_height = self.height / 2 + self.height % 2;
+        self.plane_bytes(&self.v, chroma_width, chroma_height, self.v_stride)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationPicture {
     pub picture_order_cnt: i64,
@@ -5215,6 +5378,47 @@ mod tests {
             reconstruct_chroma420_macroblock(&prediction, &residual),
             expected
         );
+    }
+
+    #[test]
+    fn assembles_cropped_yuv420_frame_from_raster_macroblocks() {
+        let mut builder = Yuv420FrameBuilder::new(2, 2, 2, 2, 2, 2).unwrap();
+        assert!(builder.finish().is_err());
+        assert!(builder
+            .place_macroblock(4, &[0; 256], &[0; 64], &[0; 64])
+            .is_err());
+        for (address, values) in [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
+            .into_iter()
+            .enumerate()
+        {
+            builder
+                .place_macroblock(
+                    address,
+                    &[values[0]; 256],
+                    &[values[1]; 64],
+                    &[values[2]; 64],
+                )
+                .unwrap();
+        }
+        assert!(builder
+            .place_macroblock(0, &[0; 256], &[0; 64], &[0; 64])
+            .is_err());
+        let frame = builder.finish().unwrap();
+        assert_eq!((frame.width, frame.height), (28, 28));
+        assert_eq!((frame.y_stride, frame.u_stride, frame.v_stride), (28, 14, 14));
+        for (plane, stride, x, y, expected) in [
+            (&frame.y, frame.y_stride, 0, 0, 1),
+            (&frame.y, frame.y_stride, 14, 0, 4),
+            (&frame.y, frame.y_stride, 0, 14, 7),
+            (&frame.y, frame.y_stride, 27, 27, 10),
+            (&frame.u, frame.u_stride, 0, 0, 2),
+            (&frame.u, frame.u_stride, 7, 0, 5),
+            (&frame.v, frame.v_stride, 0, 7, 9),
+            (&frame.v, frame.v_stride, 13, 13, 12),
+        ] {
+            assert_eq!(plane[y * stride + x], expected);
+        }
+        assert!(Yuv420FrameBuilder::new(1, 1, 1, 0, 0, 0).is_err());
     }
 
     #[test]

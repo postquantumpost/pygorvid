@@ -985,6 +985,162 @@ type Yuv420Frame struct {
 	V       []uint8
 }
 
+var ErrYuv420MacroblockAssembly = errors.New("YUV 4:2:0 macroblock assembly is invalid or incomplete")
+
+type Yuv420FrameBuilder struct {
+	pictureWidthInMbs  int
+	pictureHeightInMbs int
+	cropLeft           int
+	cropTop            int
+	frame              Yuv420Frame
+	written            []bool
+}
+
+func NewYuv420FrameBuilder(pictureWidthInMbs, pictureHeightInMbs, cropLeft, cropTop, cropRight, cropBottom int) (*Yuv420FrameBuilder, error) {
+	maxInt := int(^uint(0) >> 1)
+	if pictureWidthInMbs <= 0 || pictureHeightInMbs <= 0 ||
+		pictureWidthInMbs > maxInt/16 || pictureHeightInMbs > maxInt/16 ||
+		cropLeft < 0 || cropTop < 0 || cropRight < 0 || cropBottom < 0 ||
+		cropLeft%2 != 0 || cropTop%2 != 0 || cropRight%2 != 0 || cropBottom%2 != 0 {
+		return nil, ErrYuv420MacroblockAssembly
+	}
+	codedWidth, codedHeight := pictureWidthInMbs*16, pictureHeightInMbs*16
+	if cropLeft >= codedWidth || cropRight >= codedWidth-cropLeft ||
+		cropTop >= codedHeight || cropBottom >= codedHeight-cropTop {
+		return nil, ErrYuv420MacroblockAssembly
+	}
+	width, height := codedWidth-cropLeft-cropRight, codedHeight-cropTop-cropBottom
+	if width > maxInt/height || pictureWidthInMbs > maxInt/pictureHeightInMbs {
+		return nil, ErrYuv420MacroblockAssembly
+	}
+	chromaWidth, chromaHeight := width/2, height/2
+	return &Yuv420FrameBuilder{
+		pictureWidthInMbs:  pictureWidthInMbs,
+		pictureHeightInMbs: pictureHeightInMbs,
+		cropLeft:           cropLeft,
+		cropTop:            cropTop,
+		frame: Yuv420Frame{
+			Width: width, Height: height,
+			YStride: width, UStride: chromaWidth, VStride: chromaWidth,
+			Y: make([]uint8, width*height),
+			U: make([]uint8, chromaWidth*chromaHeight),
+			V: make([]uint8, chromaWidth*chromaHeight),
+		},
+		written: make([]bool, pictureWidthInMbs*pictureHeightInMbs),
+	}, nil
+}
+
+func (builder *Yuv420FrameBuilder) PlaceMacroblock(address int, yBlock [256]uint8, uBlock, vBlock [64]uint8) error {
+	if builder == nil || address < 0 || address >= len(builder.written) || builder.written[address] {
+		return ErrYuv420MacroblockAssembly
+	}
+	mbX, mbY := address%builder.pictureWidthInMbs, address/builder.pictureWidthInMbs
+	for row := 0; row < 16; row++ {
+		dstY := mbY*16 + row - builder.cropTop
+		if dstY < 0 || dstY >= builder.frame.Height {
+			continue
+		}
+		for column := 0; column < 16; column++ {
+			dstX := mbX*16 + column - builder.cropLeft
+			if dstX >= 0 && dstX < builder.frame.Width {
+				builder.frame.Y[dstY*builder.frame.YStride+dstX] = yBlock[row*16+column]
+			}
+		}
+	}
+	cropLeftC, cropTopC := builder.cropLeft/2, builder.cropTop/2
+	chromaWidth := builder.frame.Width / 2
+	chromaHeight := builder.frame.Height / 2
+	for row := 0; row < 8; row++ {
+		dstY := mbY*8 + row - cropTopC
+		if dstY < 0 || dstY >= chromaHeight {
+			continue
+		}
+		for column := 0; column < 8; column++ {
+			dstX := mbX*8 + column - cropLeftC
+			if dstX >= 0 && dstX < chromaWidth {
+				builder.frame.U[dstY*builder.frame.UStride+dstX] = uBlock[row*8+column]
+				builder.frame.V[dstY*builder.frame.VStride+dstX] = vBlock[row*8+column]
+			}
+		}
+	}
+	builder.written[address] = true
+	return nil
+}
+
+func (builder *Yuv420FrameBuilder) Finish() (Yuv420Frame, error) {
+	if builder == nil {
+		return Yuv420Frame{}, ErrYuv420MacroblockAssembly
+	}
+	for _, written := range builder.written {
+		if !written {
+			return Yuv420Frame{}, ErrYuv420MacroblockAssembly
+		}
+	}
+	frame := builder.frame
+	frame.Y = append([]uint8(nil), frame.Y...)
+	frame.U = append([]uint8(nil), frame.U...)
+	frame.V = append([]uint8(nil), frame.V...)
+	return frame, nil
+}
+
+func (frame Yuv420Frame) planeBytes(plane []byte, width, height, stride int) ([]byte, error) {
+	if width <= 0 || height <= 0 || len(plane) == 0 {
+		return nil, ErrReferencePictureFrameLayout
+	}
+	if stride <= 0 {
+		stride = width
+	}
+	if stride < width {
+		return nil, ErrReferencePictureFrameLayout
+	}
+	out := make([]byte, 0, width*height)
+	for row := 0; row < height; row++ {
+		start := row * stride
+		end := start + width
+		if end > len(plane) {
+			return nil, ErrReferencePictureFrameLayout
+		}
+		out = append(out, plane[start:end]...)
+	}
+	return out, nil
+}
+
+func (frame Yuv420Frame) LumaPlaneBytes() ([]byte, error) {
+	return frame.planeBytes(frame.Y, frame.Width, frame.Height, frame.YStride)
+}
+
+func (frame Yuv420Frame) UPlaneBytes() ([]byte, error) {
+	chromaWidth := frame.Width/2 + frame.Width%2
+	chromaHeight := frame.Height/2 + frame.Height%2
+	return frame.planeBytes(frame.U, chromaWidth, chromaHeight, frame.UStride)
+}
+
+func (frame Yuv420Frame) VPlaneBytes() ([]byte, error) {
+	chromaWidth := frame.Width/2 + frame.Width%2
+	chromaHeight := frame.Height/2 + frame.Height%2
+	return frame.planeBytes(frame.V, chromaWidth, chromaHeight, frame.VStride)
+}
+
+func (frame Yuv420Frame) LumaPlaneMatches(reference []byte) (bool, error) {
+	plane, err := frame.LumaPlaneBytes()
+	if err != nil {
+		return false, err
+	}
+	return equalPlane(plane, reference), nil
+}
+
+func equalPlane(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index, value := range left {
+		if value != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 type PresentationPicture struct {
 	PictureOrderCnt int64
 	Frame           Yuv420Frame

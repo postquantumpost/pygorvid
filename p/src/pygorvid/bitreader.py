@@ -28,6 +28,10 @@ class BitReader:
     def read_bit(self) -> bool:
         return bool(self.read_bits(1))
 
+    @property
+    def bit_offset(self) -> int:
+        return self._bit_offset
+
     def align_to_byte(self) -> None:
         remainder = self._bit_offset % 8
         if remainder:

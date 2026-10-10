@@ -64,6 +64,7 @@ class SliceHeader:
     disable_deblocking_filter_idc: int | None
     slice_alpha_c0_offset_div2: int
     slice_beta_offset_div2: int
+    slice_data_bit_offset: int
     pic_order_cnt_type: int
 
     def picture_identity(self) -> "PictureIdentity":
@@ -204,6 +205,7 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
         "disable_deblocking_filter_idc": None,
         "slice_alpha_c0_offset_div2": 0,
         "slice_beta_offset_div2": 0,
+        "slice_data_bit_offset": 0,
         "pic_order_cnt_type": sps.pic_order_cnt_type,
     }
     if sps.pic_order_cnt_type == 0:
@@ -306,6 +308,15 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
                 raise SliceHeaderError("slice deblocking offset exceeds [-6,6]")
             result["slice_alpha_c0_offset_div2"] = alpha
             result["slice_beta_offset_div2"] = beta
+    if pps.entropy_coding_mode:
+        while reader.bit_offset % 8:
+            try:
+                alignment_bit = reader.read_bit()
+            except BitstreamError as error:
+                raise SliceHeaderError(f"slice cabac_alignment_one_bit: {error}") from error
+            if not alignment_bit:
+                raise SliceHeaderError("slice cabac_alignment_one_bit is not 1")
+    result["slice_data_bit_offset"] = reader.bit_offset
     return SliceHeader(**result)
 
 

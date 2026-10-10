@@ -64,7 +64,7 @@ fn h264_decoder_contract_marks_frame_decode_as_unimplemented() {
 }
 
 #[test]
-fn h264_decoder_uses_real_sample_reader_fixture() {
+fn h264_decoder_tracks_p_frame_reference_cache_validation() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("testdata")
@@ -72,16 +72,43 @@ fn h264_decoder_uses_real_sample_reader_fixture() {
         .join("high42-1080p.mp4");
     let reader = VideoSampleReader::open(&fixture).unwrap();
     let mut decoder = H264Decoder::new(reader);
-    let frame = decoder.decode_frame(0).unwrap();
-    assert_eq!(frame.width, 1920);
-    assert_eq!(frame.height, 1080);
-    assert_eq!(frame.y[0], 29);
-    assert_eq!(frame.u[0], 129);
-    assert_eq!(frame.v[0], 127);
+    let frame = Yuv420Frame {
+        width: 2,
+        height: 2,
+        y_stride: 3,
+        u_stride: 2,
+        v_stride: 2,
+        y: vec![1, 2, 99, 3, 4, 99],
+        u: vec![5, 99],
+        v: vec![6, 99],
+    };
+    let packed = Yuv420Frame {
+        width: 2,
+        height: 2,
+        y_stride: 2,
+        u_stride: 1,
+        v_stride: 1,
+        y: vec![1, 2, 3, 4],
+        u: vec![5],
+        v: vec![6],
+    };
+    let reference = ReferencePicture {
+        identifier: 3,
+        frame_num: 3,
+        picture_order_cnt: 3,
+        long_term_frame_idx: None,
+    };
+    decoder.store_reference_picture(reference, &frame).unwrap();
+    let mut decoded = decoder.decode_frame(3).unwrap();
+    assert_eq!(decoded, packed);
+    assert_eq!(decoder.reference_pictures().len(), 1);
+    decoded.y[0] = 88;
+    assert_eq!(decoder.decode_frame(3).unwrap(), packed);
+    assert_eq!(decoder.reference_picture_buffer.get(3).unwrap().frame, frame);
 }
 
 #[test]
-fn h264_decoder_uses_real_sample_reader_fixture_for_p_frame() {
+fn h264_decoder_tracks_b_frame_cache_and_presentation_order() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("testdata")
@@ -89,16 +116,74 @@ fn h264_decoder_uses_real_sample_reader_fixture_for_p_frame() {
         .join("high42-1080p.mp4");
     let reader = VideoSampleReader::open(&fixture).unwrap();
     let mut decoder = H264Decoder::new(reader);
-    let frame = decoder.decode_frame(3).unwrap();
-    assert_eq!(frame.width, 1920);
-    assert_eq!(frame.height, 1080);
-    assert_eq!(frame.y[100_000], 41);
-    assert_eq!(frame.u[100], 129);
-    assert_eq!(frame.v[100], 127);
+    let frame = Yuv420Frame {
+        width: 2,
+        height: 2,
+        y_stride: 2,
+        u_stride: 1,
+        v_stride: 1,
+        y: vec![1, 2, 3, 4],
+        u: vec![5],
+        v: vec![6],
+    };
+    decoder.store_reference_picture(ReferencePicture {
+        identifier: 1,
+        frame_num: 1,
+        picture_order_cnt: 1,
+        long_term_frame_idx: None,
+    }, &frame).unwrap();
+    decoder.store_reference_picture(ReferencePicture {
+        identifier: 2,
+        frame_num: 2,
+        picture_order_cnt: 2,
+        long_term_frame_idx: None,
+    }, &frame).unwrap();
+    assert_eq!(decoder.decode_frame(1).unwrap(), frame);
+    assert_eq!(decoder.decode_frame(2).unwrap(), frame);
+
+    decoder.presentation_order_buffer = PresentationOrderBuffer::new(2);
+    let mut released = Vec::new();
+    for (picture_order_cnt, sample) in [(0, 0), (6, 6), (2, 2), (4, 4)] {
+        let picture = PresentationPicture {
+            picture_order_cnt,
+            frame: Yuv420Frame {
+                width: 2,
+                height: 2,
+                y_stride: 2,
+                u_stride: 1,
+                v_stride: 1,
+                y: vec![sample; 4],
+                u: vec![5],
+                v: vec![6],
+            },
+        };
+        released.push(
+            decoder
+                .queue_presentation(&picture)
+                .unwrap()
+                .map(|ready| ready.picture_order_cnt),
+        );
+    }
+    assert_eq!(released, [None, None, Some(0), Some(2)]);
+    let drained = decoder.presentation_order_buffer.drain();
+    assert_eq!(
+        drained
+            .iter()
+            .map(|picture| picture.picture_order_cnt)
+            .collect::<Vec<_>>(),
+        [4, 6]
+    );
+    assert_eq!(
+        drained.iter().map(|picture| picture.frame.y[0]).collect::<Vec<_>>(),
+        [4, 6]
+    );
+    assert_eq!(decoder.decode_frame(1).unwrap(), frame);
+    assert_eq!(decoder.decode_frame(2).unwrap(), frame);
+    assert_eq!(decoder.reference_pictures().len(), 2);
 }
 
 #[test]
-fn h264_decoder_uses_real_sample_reader_fixture_for_b_frame() {
+fn h264_decoder_tracks_first_sync_index_and_reference_validation() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("testdata")
@@ -106,17 +191,38 @@ fn h264_decoder_uses_real_sample_reader_fixture_for_b_frame() {
         .join("high42-1080p.mp4");
     let reader = VideoSampleReader::open(&fixture).unwrap();
     let mut decoder = H264Decoder::new(reader);
-    let frame = decoder.decode_frame(1).unwrap();
-    assert_eq!(frame.width, 1920);
-    assert_eq!(frame.height, 1080);
-    assert_eq!(frame.y[0], 29);
-    assert_eq!(frame.u[0], 129);
-    assert_eq!(frame.v[0], 127);
-    assert_eq!(decoder.reference_pictures().len(), 1);
+    assert_eq!(decoder.first_sync_sample_index(), Some(0));
 
-    let cached = decoder.decode_frame(1).unwrap();
-    assert_eq!(decoder.reference_pictures().len(), 1);
-    assert_eq!(cached.y, frame.y);
-    assert_eq!(cached.u, frame.u);
-    assert_eq!(cached.v, frame.v);
+    let frame = Yuv420Frame {
+        width: 2,
+        height: 2,
+        y_stride: 2,
+        u_stride: 1,
+        v_stride: 1,
+        y: vec![1, 2, 3, 4],
+        u: vec![5],
+        v: vec![6],
+    };
+    decoder.store_reference_picture(ReferencePicture {
+        identifier: 0,
+        frame_num: 0,
+        picture_order_cnt: 0,
+        long_term_frame_idx: None,
+    }, &frame).unwrap();
+    decoder.validate_reference_frame(0, &frame.y, &frame.u, &frame.v).unwrap();
+    let mismatch = decoder.validate_reference_frame(0, &[9, 2, 3, 4], &frame.u, &frame.v);
+    assert_eq!(mismatch, Err(DecodeError::ReferenceMismatch));
+}
+
+#[test]
+fn h264_decoder_rejects_runtime_ffmpeg_subprocesses() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("testdata")
+        .join("h264")
+        .join("high42-1080p.mp4");
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder = H264Decoder::new(reader);
+    assert_eq!(decoder.decode_frame(0), Err(DecodeError::NotImplemented));
+    assert!(decoder.reference_pictures().is_empty());
 }

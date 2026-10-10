@@ -214,6 +214,38 @@ fn reads_compact_project_fixtures() {
     }
 }
 
+#[test]
+fn resolves_decode_order_dependencies_for_presentation_index() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("testdata")
+        .join("h264")
+        .join("high42-1080p.mp4");
+    let mut reader = VideoSampleReader::open(fixture).unwrap();
+
+    let dependencies = reader.decode_order_dependency_samples(1).unwrap();
+    assert_eq!(
+        dependencies
+            .iter()
+            .map(|sample| (sample.index, sample.dts_ticks, sample.pts_ticks))
+            .collect::<Vec<_>>(),
+        [(0, 0, 256), (1, 256, 1024), (2, 512, 512)]
+    );
+    assert_eq!(reader.next_sample().unwrap().unwrap().index, 0);
+    assert_eq!(
+        reader
+            .decode_order_dependency_samples(3)
+            .unwrap()
+            .iter()
+            .map(|sample| sample.index)
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert!(reader
+        .decode_order_dependency_samples(reader.sample_count())
+        .is_err());
+}
+
 fn assert_reader_case(use_co64: bool, constant_sample_size: bool) {
     let (bytes, expected_samples) = make_mp4(use_co64, constant_sample_size, &avcc());
     let (dir, path) = write_fixture("samples", &bytes);

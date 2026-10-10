@@ -166,22 +166,23 @@ fn expected(
 }
 
 #[test]
-fn parses_sps_profile_chroma_and_bit_depth() {
-    for (nal, expected_info) in [
-        (
-            make_sps(66, 0, 30, "1"),
-            expected(66, 0, 30, 0, 1, false, 8, 8),
+fn rejects_unsupported_sps_feature_set() {
+    for nal in [
+        make_sps(118, 0, 42, concat!("1", "010", "1", "1")),
+        make_sps(100, 0, 42, concat!("1", "00100", "1", "011", "010")),
+        make_sps_geometry(
+            100,
+            0,
+            42,
+            concat!("1", "010", "1", "1"),
+            0,
+            0,
+            false,
+            [0; 4],
         ),
-        (
-            make_sps(100, 0, 42, concat!("1", "010", "1", "1")),
-            expected(100, 0, 42, 0, 1, false, 8, 8),
-        ),
-        (
-            make_sps(100, 0, 50, concat!("1", "00100", "1", "011", "010")),
-            expected(100, 0, 50, 0, 3, true, 10, 9),
-        ),
+        make_sps(100, 0, 42, concat!("1", "00100", "1", "1", "1")),
     ] {
-        assert_eq!(parse_sps(&nal).unwrap(), expected_info);
+        assert!(parse_sps(&nal).is_err(), "accepted unsupported SPS {nal:?}");
     }
 }
 
@@ -202,25 +203,25 @@ fn parses_sps_dimensions_and_crop_units() {
     assert_eq!((info.width, info.height), (1920, 1080));
     assert_eq!(info.frame_crop_bottom, 8);
 
-    let field_coded = make_sps_geometry(66, 0, 30, "1", 0, 0, false, [0, 0, 0, 1]);
-    let info = parse_sps(&field_coded).unwrap();
+    let progressive_cropped = make_sps_geometry(100, 0, 42, concat!("1", "010", "1", "1"), 0, 1, true, [0, 0, 0, 1]);
+    let info = parse_sps(&progressive_cropped).unwrap();
     assert_eq!((info.coded_width, info.coded_height), (16, 32));
-    assert_eq!((info.width, info.height), (16, 28));
-    assert_eq!(info.frame_crop_bottom, 4);
-    assert!(!info.frame_mbs_only);
+    assert_eq!((info.width, info.height), (16, 30));
+    assert_eq!(info.frame_crop_bottom, 2);
+    assert!(info.frame_mbs_only);
     assert!(!info.mb_adaptive_frame_field);
     assert!(info.direct_8x8_inference);
 }
 
 #[test]
 fn parses_sps_reference_and_frame_flags() {
-    let nal = make_sps_with_frame_flags(4, true, false, true, false);
+    let nal = make_sps_geometry(100, 0, 42, concat!("1", "010", "1", "1"), 0, 0, true, [0; 4]);
     let info = parse_sps(&nal).unwrap();
-    assert_eq!(info.max_num_ref_frames, 4);
-    assert!(info.gaps_in_frame_num_value_allowed);
-    assert!(!info.frame_mbs_only);
-    assert!(info.mb_adaptive_frame_field);
-    assert!(!info.direct_8x8_inference);
+    assert_eq!(info.max_num_ref_frames, 0);
+    assert!(!info.gaps_in_frame_num_value_allowed);
+    assert!(info.frame_mbs_only);
+    assert!(!info.mb_adaptive_frame_field);
+    assert!(info.direct_8x8_inference);
 }
 
 #[test]

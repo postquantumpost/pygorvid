@@ -47,6 +47,7 @@ from pygorvid import (
     ReferencePicture,
     ReferencePictureBuffer,
     Yuv420Frame,
+    Yuv420FrameBuilder,
     apply_motion_vector_difference,
     apply_reference_list_modifications,
     build_b_reference_lists,
@@ -1643,6 +1644,41 @@ def test_reconstruct_chroma420_macroblock_adds_residual_and_clips():
     prediction = [10, 250, 100, 100] + [0] * 60
     residual = [-20, 20, -25, 25] + [0] * 60
     assert reconstruct_chroma420_macroblock(prediction, residual) == [0, 255, 75, 125] + [0] * 60
+
+
+def test_yuv420_frame_builder_places_cropped_raster_macroblocks():
+    builder = Yuv420FrameBuilder(2, 2, 2, 2, 2, 2)
+    with pytest.raises(InterPredictionError, match="incomplete"):
+        builder.finish()
+    with pytest.raises(InterPredictionError, match="address"):
+        builder.place_macroblock(4, [0] * 256, [0] * 64, [0] * 64)
+
+    for address, values in enumerate(((1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12))):
+        builder.place_macroblock(
+            address,
+            [values[0]] * 256,
+            [values[1]] * 64,
+            [values[2]] * 64,
+        )
+    with pytest.raises(InterPredictionError, match="duplicated"):
+        builder.place_macroblock(0, [0] * 256, [0] * 64, [0] * 64)
+
+    frame = builder.finish()
+    assert (frame.width, frame.height) == (28, 28)
+    assert (frame.y_stride, frame.u_stride, frame.v_stride) == (28, 14, 14)
+    assert frame.y[0] == 1
+    assert frame.y[14] == 4
+    assert frame.y[14 * frame.y_stride] == 7
+    assert frame.y[-1] == 10
+    assert frame.u[0] == 2
+    assert frame.u[7] == 5
+    assert frame.v[7 * frame.v_stride] == 9
+    assert frame.v[-1] == 12
+
+    with pytest.raises(InterPredictionError, match="invalid"):
+        Yuv420FrameBuilder(1, 1, 1, 0, 0, 0)
+    with pytest.raises(InterPredictionError, match="length"):
+        Yuv420FrameBuilder(1, 1).place_macroblock(0, [0] * 255, [0] * 64, [0] * 64)
 
 
 @pytest.mark.parametrize("prediction", ([0] * 63, [0] * 63 + [256], [0] * 63 + [True]))

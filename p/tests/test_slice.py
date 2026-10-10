@@ -4,11 +4,21 @@ from dataclasses import replace
 import pytest
 
 from pygorvid import (
+    CABACArithmeticDecoder,
     PPSInfo,
     SPSInfo,
     SliceHeaderError,
     VideoSampleReader,
+    initialize_i_intra_chroma_pred_mode_contexts,
+    initialize_i_intra4x4_pred_mode_contexts,
+    initialize_i_intra_mb_type_contexts,
+    initialize_i_mb_qp_delta_contexts,
+    initialize_i_transform_size_8x8_contexts,
+    initialize_i_luma_coded_block_pattern_contexts,
+    initialize_i_luma4x4_coded_block_flag_contexts,
+    initialize_i_chroma_coded_block_pattern_contexts,
     parse_nal_header,
+    ebsp_to_rbsp,
     parse_pps,
     parse_slice_header,
     parse_sps,
@@ -86,6 +96,8 @@ def make_slice(
     if normalized_type != 2:
         bits += ue_bits(0)
     bits += se_bits(0) + ue_bits(0) + se_bits(0) + se_bits(0)
+    while len(bits) % 8:
+        bits += "1"
     return bytes((header,)) + pack_bits(bits)
 
 
@@ -248,6 +260,88 @@ def test_parse_slice_headers_in_compact_fixtures():
                     header = parse_nal_header(nal)
                     if header.unit_type in (1, 5):
                         slice_header = parse_slice_header(nal, sps, pps)
+                        if slice_header.idr and pps.entropy_coding_mode:
+                            assert slice_header.slice_data_bit_offset % 8 == 0
+                            rbsp = ebsp_to_rbsp(nal[1:])
+                            byte_offset = slice_header.slice_data_bit_offset // 8
+                            assert byte_offset < len(rbsp)
+                            cabac = CABACArithmeticDecoder(rbsp[byte_offset:])
+                            if slice_header.first_macroblock_in_slice == 0 and slice_header.slice_type % 5 == 2:
+                                slice_qpy = 26 + pps.pic_init_qp_minus26 + slice_header.slice_qp_delta
+                                contexts = initialize_i_intra_mb_type_contexts(slice_qpy)
+                                assert len(contexts) == 8
+                                mb_type = cabac.decode_i_intra_mb_type(
+                                    slice_header.slice_type, contexts, False, False, False, False
+                                )
+                                assert mb_type == 0
+                                if pps.transform_8x8_mode:
+                                    transform_contexts = initialize_i_transform_size_8x8_contexts(
+                                        slice_qpy
+                                    )
+                                    transform_size_8x8 = cabac.decode_transform_size_8x8_flag(
+                                        transform_contexts, False, False
+                                    )
+                                    assert transform_size_8x8 is False
+                                mode_contexts = initialize_i_intra4x4_pred_mode_contexts(slice_qpy)
+                                block_positions = (
+                                    (0, 0), (1, 0), (0, 1), (1, 1),
+                                    (2, 0), (3, 0), (2, 1), (3, 1),
+                                    (0, 2), (1, 2), (0, 3), (1, 3),
+                                    (2, 2), (3, 2), (2, 3), (3, 3),
+                                )
+                                modes_by_position = [[2] * 4 for _ in range(4)]
+                                decoded_modes = []
+                                for x, y in block_positions:
+                                    left_mode = modes_by_position[y][x - 1] if x else 2
+                                    top_mode = modes_by_position[y - 1][x] if y else 2
+                                    predicted_mode = min(left_mode, top_mode)
+                                    mode = cabac.decode_intra4x4_pred_mode(
+                                        predicted_mode, mode_contexts
+                                    )
+                                    modes_by_position[y][x] = mode
+                                    decoded_modes.append(mode)
+                                assert decoded_modes == [2] * 16
+                                chroma_contexts = initialize_i_intra_chroma_pred_mode_contexts(
+                                    slice_qpy
+                                )
+                                chroma_mode = cabac.decode_intra_chroma_pred_mode(
+                                    chroma_contexts, False, False
+                                )
+                                assert chroma_mode == 0
+                                luma_cbp_contexts = (
+                                    initialize_i_luma_coded_block_pattern_contexts(slice_qpy)
+                                )
+                                assert (
+                                    cabac.decode_luma_coded_block_pattern(
+                                        0, 0, luma_cbp_contexts
+                                    )
+                                    == 13
+                                )
+                                chroma_cbp_contexts = (
+                                    initialize_i_chroma_coded_block_pattern_contexts(slice_qpy)
+                                )
+                                assert (
+                                    cabac.decode_chroma_coded_block_pattern(
+                                        0, 0, chroma_cbp_contexts
+                                    )
+                                    == 2
+                                )
+                                qp_delta_contexts = initialize_i_mb_qp_delta_contexts(
+                                    slice_qpy
+                                )
+                                qp_delta = cabac.decode_mb_qp_delta(qp_delta_contexts, 0)
+                                assert qp_delta == {
+                                    "high42-1080p.mp4": -1,
+                                    "high52-2160p.mp4": 0,
+                                }[name]
+                                coded_block_flag_contexts = (
+                                    initialize_i_luma4x4_coded_block_flag_contexts(
+                                        slice_qpy + qp_delta
+                                    )
+                                )
+                                assert cabac.decode_luma4x4_coded_block_flag(
+                                    0, 0, coded_block_flag_contexts
+                                ) is {"high42-1080p.mp4": True, "high52-2160p.mp4": False}[name]
                         picture_types.add(slice_header.slice_type % 5)
                     offset += size
             assert {0, 1, 2} <= picture_types

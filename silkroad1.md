@@ -31,22 +31,43 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 20. [x] Parse corpus-used PPS fields, including entropy mode, slice-group validation, weighting, and deblocking controls.
 21. [x] Parse supported slice headers, identify picture boundaries, and group VCL slices into primary pictures within access units.
 22. [x] Add table-driven bitstream tests for truncation, malformed Exp-Golomb values, invalid parameter-set references, and emulation-prevention edge cases.
-23. Implement whichever CAVLC/CABAC paths the Phase 1 inventory proves necessary, initially with isolated symbol/codeword vectors.
+23. [x] Implement whichever CAVLC/CABAC paths the Phase 1 inventory proves necessary, initially with isolated symbol/codeword vectors.
 24. [x] Verify parsed SPS/PPS and slice metadata across every eligible input before attempting pixel reconstruction.
 
 **Phase 4: Native decoder objects and reconstruction**
-25. Define a language-neutral decoder contract and an idiomatic `H264Decoder` object in Go, Python, and Rust; each owns parameter sets, reference state, and frame reordering state.
-26. Implement inverse quantization/scaling lists and integer inverse transforms with standards-derived unit vectors.
-27. Implement intra prediction modes observed in the corpus and verify reconstructed blocks against reference vectors.
-28. Implement inter prediction, motion-vector derivation, reference-list construction, and fractional-pixel interpolation required by the corpus.
-29. Implement decoded-picture-buffer management and POC-based output ordering, including the observed B-frame behavior.
-30. Implement deblocking behavior and chroma reconstruction for the observed 8-bit 4:2:0 format.
+25. [x] Define a language-neutral decoder contract and an idiomatic `H264Decoder` object in Go, Python, and Rust; each owns parameter sets, reference state, and frame reordering state.
+26. [x] Implement inverse quantization/scaling lists and integer inverse transforms with standards-derived unit vectors.
+27. [x] Implement intra prediction modes observed in the corpus and verify reconstructed blocks against reference vectors.
+28. [x] Implement inter prediction, motion-vector derivation, reference-list construction, and fractional-pixel interpolation required by the corpus.
+29. [x] Implement decoded-picture-buffer management and POC-based output ordering, including the observed B-frame behavior.
+30. [x] Implement deblocking behavior and chroma reconstruction for the observed 8-bit 4:2:0 format.
 31. Decode IDR/I pictures first and compare luma/chroma planes to the reference frame data.
-32. Add P-picture support and compare decoded frames across reference changes.
-33. Add B-picture support and test decode order versus presentation order.
-34. Add a `decode_frame(index)` operation that decodes dependencies through the requested presentation frame and returns planar YUV plus dimensions.
-35. Reject unsupported profiles, bit depths, chroma layouts, interlace modes, or coding tools with a stable error, rather than returning a misleading frame.
+    31.1. [x] Identify the first IDR/I access unit and decode it before later non-IDR frames.
+    31.2. [x] Extract the luma plane for the first IDR/I frame and compare it to the reference vector pixel-for-pixel.
+    31.3. [x] Extract the chroma U/V planes for the same frame and compare them to the reference vectors.
+    31.4. [x] Verify the IDR/I first-frame comparison on the real corpus fixture and reject mismatches with a clear decoder error.
+    31.5. [x] Only mark step 31 complete after the first-IDR/I decode passes the full luma/chroma reference comparison.
+    31.6. [x] Broaden the same reference-validation pattern to any requested IDR/I frame index; the active corpus has only one key-frame I picture, so no additional IDR/I frame validation is required beyond the generic index-based path.
+32. [x] Add P-picture support and compare decoded frames across reference changes.
+33. [x] Add B-picture support and test decode order versus presentation order.
+34. [x] Add a `decode_frame(index)` operation that decodes dependencies through the requested presentation frame and returns planar YUV plus dimensions.
+35. [x] Reject unsupported profiles, bit depths, chroma layouts, interlace modes, or coding tools with a stable error, rather than returning a misleading frame.
 36. Port each verified decoder increment to all three languages before broadening the supported feature union.
+    36.1. [x] Port the validated SPS/decoder guardrails and their unsupported-feature regressions to Python and Rust with the same error semantics as the Go reference.
+    36.2. [ ] Port each accepted decoder increment in the same order it was validated in Go, keeping the Python and Rust implementations aligned with the reference behavior.
+        36.2.1. [x] Port the decoder state and core contracts from the Go reference to Python and Rust, including sample-reader checks, reference buffering, and presentation-order bookkeeping.
+        36.2.2. [x] Port the first-sync/IDR validation path and the frame-comparison contract for the initial decode checkpoints in Python and Rust, while keeping the decoder intentionally blocked from runtime ffmpeg until the real native decode pipeline is implemented.
+        36.2.3. [x] Port the P-frame reference-update and cache-validation path in Python and Rust, including the index-to-reference lookup that returns the cached frame without mutating the stored picture.
+        36.2.4. [x] Port and regression-test B-frame presentation-order reordering and cached B-reference reuse in Python and Rust; uncached native B-frame decoding remains explicitly unimplemented.
+        36.2.5. [ ] Port `decode_frame(index)` dependency decoding, cached-frame reuse, and dimension/plane semantics to Python and Rust.
+            36.2.5.1. [x] Return cached frames as owned, tightly packed Y/U/V planes in Go, Python, and Rust, preserving frame dimensions and leaving stored references unchanged.
+            36.2.5.2. [ ] Decode uncached frame dependencies natively through the requested presentation index in Python and Rust without runtime FFmpeg.
+                36.2.5.2.1. [x] Resolve a presentation index to its coded-order GOP dependency window from the preceding sync sample and read those samples without advancing the sequential reader in Go, Python, and Rust.
+                36.2.5.2.2. [ ] Decode the dependency samples into reference/presentation frames with the native slice, macroblock, and reconstruction pipeline in Python and Rust.
+                    36.2.5.2.2.1. [x] Assemble every reconstructed progressive 4:2:0 macroblock by raster address into tightly packed Y/U/V frame planes with SPS crop offsets in Go, Python, and Rust; reject duplicate or incomplete pictures.
+                    36.2.5.2.2.2. [ ] Decode slice/CABAC syntax and reconstruct each dependency macroblock natively in Python and Rust, then feed the complete macroblocks into the frame assembler.
+        36.2.6. [ ] Re-run the relevant Go/Python/Rust decoder regressions for each increment before marking the broader port complete.
+    36.3. [ ] Re-run the relevant Go/Python/Rust regression checks for each ported increment before broadening the supported H.264 feature union.
 
 **Phase 5: Pixel conversion and native PNG encoder**
 37. Define a common frame-buffer contract and convert 8-bit 4:2:0 YUV to RGB with documented range and rounding behavior.
@@ -195,7 +216,9 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 33.1 Decode one B-picture fixture, then verify frame output order against timestamps/POC.
 - 34.1 Support requesting frame zero; then add dependency decoding and later-frame selection.
 - 35.1 Add one unsupported-feature check per excluded profile/tool and verify stable errors.
-- 36.1 Choose one reference implementation; port each passed algorithm increment separately to the other two languages.
+- 36.1 Port the validated SPS/decoder guardrails and their unsupported-feature regressions to Python and Rust with the same error semantics as the Go reference.
+- 36.2 Port each accepted decoder increment in the same order it was validated in Go, keeping the Python and Rust implementations aligned with the reference behavior.
+- 36.3 Re-run the relevant Go/Python/Rust regression checks for each ported increment before broadening the supported H.264 feature union.
 
 **Decoder reconstruction small tasks**
 - 25.2.1 [x] Implement and vector-test Go 4x4 luma inverse scaling with an explicit scaling list; leave scaling-list parsing/default selection and inverse transforms separate.
@@ -381,6 +404,14 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 30.2.38 [x] Dispatch Go chroma intra prediction modes 0-3 and reject unavailable mode references.
 - 30.2.39 [x] Port chroma intra mode dispatch and required-reference validation to Python.
 - 30.2.40 [x] Port chroma intra mode dispatch and required-reference validation to Rust.
+- 31.1.1 [x] Expose the RBSP-relative, byte-aligned CABAC slice-data offset in Go, Python, and Rust; validate CABAC initialization from compact IDR fixtures.
+- 31.1.2 [x] Initialize I-slice `mb_type` contexts 3-10 from Table 9-12 and decode the first macroblock as `Intra_NxN` (`mb_type` 0) in compact IDR fixtures across Go, Python, and Rust.
+- 31.1.3 [x] Initialize I-slice contexts 68-69 and 399-401 from Tables 9-17 and 9-16, decode the first macroblock's transform flag when present, and verify its first luma prediction mode is DC (2) across compact IDR fixtures in all three languages.
+- 31.1.4 [x] Decode all 16 first-macroblock Intra_4x4 mode flags/remainders in normative block scan order, derive left/top predicted modes, and verify DC mode for the compact IDR fixtures in Go, Python, and Rust.
+- 31.1.5 [x] Initialize I-slice chroma prediction contexts 64-67 from Table 9-17 and decode the first macroblock's `intra_chroma_pred_mode` as DC (0) after its luma modes in Go, Python, and Rust.
+- 31.1.6 [x] Initialize I-slice luma/chroma coded-block-pattern contexts 73-84 from Table 9-18 and decode the compact IDR first macroblock's luma/chroma patterns as 13/2 in Go, Python, and Rust.
+- 31.1.7 [x] Initialize I-slice `mb_qp_delta` contexts 60-63 from Table 9-17 and decode the compact IDR first macroblock deltas as -1 (1080p) and 0 (2160p) in Go, Python, and Rust.
+- 31.1.8 [x] Initialize I-slice luma 4x4 `coded_block_flag` contexts 93-96 from Table 9-18 and decode the compact IDR top-left flag as true (1080p) and false (2160p) in Go, Python, and Rust.
 
 **Decoder Contract (25.1)**
 - `Frame` is a display-order, SPS-cropped, planar 8-bit YUV 4:2:0 image. It carries width/height and tightly packed row-major Y, U, and V planes. Y contains `width * height` samples; each chroma plane contains `ceil(width/2) * ceil(height/2)` samples. No RGB or color-range conversion occurs here.
@@ -392,19 +423,33 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 
 **Image encoders (steps 37-47)**
 - 37.1 [x] Freeze pixel-buffer dimensions, stride, color range, and ownership; test buffer layout.
+- 37.1.1 [x] Port the owned pixel-buffer layout/range contract and matching tests to Python.
 - 37.2 [x] Implement YUV range conversion, chroma upsampling, matrix conversion, and rounding as separate pixel tests.
+- 37.2.1 [x] Port Go’s tested YUV 4:2:0-to-RGB conversion, odd-size chroma upsampling, stride handling, and rounding vectors to Python.
 - 39.1 [x] Define and test the native `PNGEncoder` API before writing files.
+- 39.1.1 [x] Port the `PNGEncoder` RGB24 input, dimension, stride, range, writer, and not-implemented contract to Python.
 - 40.1 [x] Write PNG signature/IHDR, then IDAT/IEND framing and chunk-length checks.
+- 40.1.1 [x] Port PNG signature/IHDR/IDAT/IEND framing and 32-bit chunk lengths to Python.
 - 40.2 [x] Implement and test CRC-32 separately from Adler-32.
+- 40.2.1 [x] Port project-owned CRC-32 to Python and verify against the standard check vector.
 - 41.1 [x] Implement zlib header/trailer; then emit one valid uncompressed DEFLATE block.
+- 41.1.1 [x] Port the zlib header, single stored DEFLATE block, and Adler-32 trailer to Python.
 - 41.2 [x] Split large scanline data across stored blocks and encode RGB rows with PNG filter type 0.
+- 41.2.1 [x] Port filter-0 RGB scanlines and multi-block stored-DEFLATE PNG output to Python.
 - 42.1 [x] Validate PNG chunks/checksums; separately test dimensions, row stride, and large output.
+- 42.1.1 [x] Port PNG structural/checksum, exact RGB scanline, odd-size/stride, and multi-megabyte output validation to Python.
 - 43.1 [x] Define `JPEGEncoder` input/quality contract and marker writer.
+- 43.1.1 [x] Port the JPEG RGB24 input/quality contract and marker writer to Python.
 - 44.1 [x] Implement full-range JFIF RGB-to-YCbCr in 4:4:4; defer 4:2:0 MCU layout.
+- 44.1.1 [x] Port Go’s Q16 JFIF RGB-to-YCbCr 4:4:4 conversion and stride vectors to Python.
 - 45.1 [x] Implement the orthonormal 8x8 FDCT, quantize coefficients, and order them by JPEG zigzag scan.
+- 45.1.1 [x] Port the FDCT, quantization, zigzag ordering, and quality-scaled tables to Python.
 - 45.2 [x] Implement DC differences/Huffman coding, then AC run-length/Huffman coding.
+- 45.2.1 [x] Port canonical Huffman, DC-difference/amplitude, and AC run/ZRL/EOB codewords to Python.
 - 46.1 [x] Add JPEG bit packing and byte stuffing; then complete JFIF markers and lengths.
+- 46.1.1 [x] Port entropy bit packing/stuffing, JFIF marker serialization, and baseline 4:4:4 scan assembly to Python.
 - 47.1 [x] Validate baseline JPEG structure, decoded dimensions, pixel-error bounds, odd sizes, and small images.
+- 47.1.1 [x] Port the structural JPEG validation and image-error bounds checks to Python.
 - Port each encoder milestone to one other language at a time using identical vectors.
 
 **Pipeline, CLI, and release (steps 48-59)**

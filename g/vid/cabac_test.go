@@ -90,6 +90,7 @@ func TestCABACContextInitialization(t *testing.T) {
 		stateIndex uint8
 		mps        bool
 	}{
+
 		{n: 63, stateIndex: 0, mps: false},
 		{n: 64, stateIndex: 0, mps: true},
 		{n: 0, stateIndex: 62, mps: false},
@@ -131,6 +132,93 @@ func TestCABACContextInitialization(t *testing.T) {
 	} {
 		if _, err := NewCABACContextModel(test.m, test.n, test.sliceQPY); !errors.Is(err, ErrCABACContextInitRange) {
 			t.Errorf("context parameters (%d,%d,%d) error = %v; want context initialization range", test.m, test.n, test.sliceQPY, err)
+		}
+	}
+}
+
+func TestCABACIIntraMBTypeContextInitialization(t *testing.T) {
+	contexts, err := NewCABACIIntraMBTypeContexts(26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [8]struct {
+		state uint8
+		mps   bool
+	}{
+		{46, false}, {6, false}, {14, true}, {17, true},
+		{2, true}, {20, false}, {11, false}, {1, false},
+	}
+	for index, context := range contexts {
+		if context.StateIndex() != want[index].state || context.MPS() != want[index].mps {
+			t.Errorf("ctxIdx %d initialized to (%d,%t); want (%d,%t)", index+3, context.StateIndex(), context.MPS(), want[index].state, want[index].mps)
+		}
+	}
+	for _, qpy := range []int{-1, 52} {
+		if _, err := NewCABACIIntraMBTypeContexts(qpy); !errors.Is(err, ErrCABACContextInitRange) {
+			t.Errorf("SliceQPY %d error = %v; want out-of-range", qpy, err)
+		}
+	}
+}
+
+func TestCABACIIntraChromaPredModeContextInitialization(t *testing.T) {
+	contexts, err := NewCABACIIntraChromaPredModeContexts(26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [4]struct {
+		state uint8
+		mps   bool
+	}{{4, true}, {28, true}, {33, true}, {3, false}}
+	for index, context := range contexts {
+		if context.StateIndex() != want[index].state || context.MPS() != want[index].mps {
+			t.Errorf("ctxIdx %d initialized to (%d,%t); want (%d,%t)", index+64, context.StateIndex(), context.MPS(), want[index].state, want[index].mps)
+		}
+	}
+	for _, qpy := range []int{-1, 52} {
+		if _, err := NewCABACIIntraChromaPredModeContexts(qpy); !errors.Is(err, ErrCABACContextInitRange) {
+			t.Errorf("SliceQPY %d error = %v; want out-of-range", qpy, err)
+		}
+	}
+}
+
+func TestCABACIIntra4x4PredModeContextInitialization(t *testing.T) {
+	contexts, err := NewCABACIIntra4x4PredModeContexts(26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [2]struct {
+		state uint8
+		mps   bool
+	}{{1, false}, {2, true}}
+	for index, context := range contexts {
+		if context.StateIndex() != want[index].state || context.MPS() != want[index].mps {
+			t.Errorf("ctxIdx %d initialized to (%d,%t); want (%d,%t)", index+68, context.StateIndex(), context.MPS(), want[index].state, want[index].mps)
+		}
+	}
+	for _, qpy := range []int{-1, 52} {
+		if _, err := NewCABACIIntra4x4PredModeContexts(qpy); !errors.Is(err, ErrCABACContextInitRange) {
+			t.Errorf("SliceQPY %d error = %v; want out-of-range", qpy, err)
+		}
+	}
+}
+
+func TestCABACITransformSize8x8ContextInitialization(t *testing.T) {
+	contexts, err := NewCABACITransformSize8x8Contexts(26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [3]struct {
+		state uint8
+		mps   bool
+	}{{7, true}, {17, true}, {26, true}}
+	for index, context := range contexts {
+		if context.StateIndex() != want[index].state || context.MPS() != want[index].mps {
+			t.Errorf("ctxIdx %d initialized to (%d,%t); want (%d,%t)", index+399, context.StateIndex(), context.MPS(), want[index].state, want[index].mps)
+		}
+	}
+	for _, qpy := range []int{-1, 52} {
+		if _, err := NewCABACITransformSize8x8Contexts(qpy); !errors.Is(err, ErrCABACContextInitRange) {
+			t.Errorf("SliceQPY %d error = %v; want out-of-range", qpy, err)
 		}
 	}
 }

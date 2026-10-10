@@ -1,4 +1,4 @@
-use std::{fmt, io, path::PathBuf, process::Command};
+use std::{fmt, io};
 
 use crate::reconstruction::Yuv420Frame;
 
@@ -7,6 +7,8 @@ pub enum DecodeError {
     MissingSampleReader,
     FrameIndexOutOfRange,
     NotImplemented,
+    UnsupportedFeature,
+    ReferenceMismatch,
 }
 
 impl fmt::Display for DecodeError {
@@ -15,6 +17,12 @@ impl fmt::Display for DecodeError {
             Self::MissingSampleReader => write!(f, "H.264 decoder requires a sample reader"),
             Self::FrameIndexOutOfRange => write!(f, "frame index is out of range"),
             Self::NotImplemented => write!(f, "H.264 decoder is not implemented yet"),
+            Self::UnsupportedFeature => {
+                write!(f, "unsupported H.264 profile, chroma format, bit depth, or interlace mode")
+            }
+            Self::ReferenceMismatch => {
+                write!(f, "decoded frame does not match the reference frame data")
+            }
         }
     }
 }
@@ -28,19 +36,23 @@ pub struct H264Decoder {
     pub picture_parameter_sets: Vec<crate::pps::PpsInfo>,
     pub reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer,
     pub presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer,
-    sample_reader_path: Option<PathBuf>,
+    first_sync_sample_index: Option<u64>,
+    unsupported_feature: bool,
 }
 
 impl H264Decoder {
     pub fn new(sample_reader: crate::videosamplereader::VideoSampleReader) -> Self {
-        let sample_reader_path = sample_reader.path().map(PathBuf::from);
+        let first_sync_sample_index = sample_reader.first_sync_sample_index();
         let sample_count = sample_reader.sample_count();
         let configuration = sample_reader.configuration();
-        let sequence_parameter_sets = configuration
-            .sequence_parameter_sets
-            .iter()
-            .filter_map(|nal| crate::sps::parse_sps(nal).ok())
-            .collect();
+        let mut unsupported_feature = false;
+        let mut sequence_parameter_sets = Vec::new();
+        for nal in &configuration.sequence_parameter_sets {
+            match crate::sps::parse_sps(nal) {
+                Ok(info) => sequence_parameter_sets.push(info),
+                Err(_) => unsupported_feature = true,
+            }
+        }
         let picture_parameter_sets = configuration
             .picture_parameter_sets
             .iter()
@@ -52,7 +64,8 @@ impl H264Decoder {
             picture_parameter_sets,
             reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer::default(),
             presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer::new(0),
-            sample_reader_path,
+            first_sync_sample_index,
+            unsupported_feature,
         }
     }
 
@@ -63,7 +76,8 @@ impl H264Decoder {
             picture_parameter_sets: Vec::new(),
             reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer::default(),
             presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer::new(0),
-            sample_reader_path: None,
+            first_sync_sample_index: None,
+            unsupported_feature: false,
         }
     }
 
@@ -90,7 +104,64 @@ impl H264Decoder {
         self.presentation_order_buffer.push(picture)
     }
 
+    pub fn first_sync_sample_index(&self) -> Option<u64> {
+        self.first_sync_sample_index
+    }
+
+    pub fn decode_first_sync_frame(&mut self) -> Result<Yuv420Frame, DecodeError> {
+        let index = self
+            .first_sync_sample_index
+            .ok_or(DecodeError::FrameIndexOutOfRange)?;
+        self.decode_frame(index)
+    }
+
+    pub fn first_sync_luma_plane_matches(&mut self, reference: &[u8]) -> Result<bool, DecodeError> {
+        let frame = self.decode_first_sync_frame()?;
+        let plane = frame
+            .luma_plane_bytes()
+            .map_err(|_| DecodeError::ReferenceMismatch)?;
+        Ok(plane == reference)
+    }
+
+    pub fn validate_first_sync_frame_reference(
+        &mut self,
+        y_plane: &[u8],
+        u_plane: &[u8],
+        v_plane: &[u8],
+    ) -> Result<(), DecodeError> {
+        let index = self
+            .first_sync_sample_index
+            .ok_or(DecodeError::FrameIndexOutOfRange)?;
+        self.validate_reference_frame(index, y_plane, u_plane, v_plane)
+    }
+
+    pub fn validate_reference_frame(
+        &mut self,
+        index: u64,
+        y_plane: &[u8],
+        u_plane: &[u8],
+        v_plane: &[u8],
+    ) -> Result<(), DecodeError> {
+        let frame = self.decode_frame(index)?;
+        let actual_y = frame
+            .luma_plane_bytes()
+            .map_err(|_| DecodeError::ReferenceMismatch)?;
+        let actual_u = frame
+            .u_plane_bytes()
+            .map_err(|_| DecodeError::ReferenceMismatch)?;
+        let actual_v = frame
+            .v_plane_bytes()
+            .map_err(|_| DecodeError::ReferenceMismatch)?;
+        if actual_y != y_plane || actual_u != u_plane || actual_v != v_plane {
+            return Err(DecodeError::ReferenceMismatch);
+        }
+        Ok(())
+    }
+
     pub fn decode_frame(&mut self, index: u64) -> Result<Yuv420Frame, DecodeError> {
+        if self.unsupported_feature {
+            return Err(DecodeError::UnsupportedFeature);
+        }
         let sample_count = match self.sample_count {
             Some(count) => count,
             None => return Err(DecodeError::MissingSampleReader),
@@ -99,98 +170,30 @@ impl H264Decoder {
             return Err(DecodeError::FrameIndexOutOfRange);
         }
         if let Some(stored) = self.reference_picture_buffer.get(index as u32) {
-            return Ok(stored.frame);
+            let y = stored
+                .frame
+                .luma_plane_bytes()
+                .map_err(|_| DecodeError::ReferenceMismatch)?;
+            let u = stored
+                .frame
+                .u_plane_bytes()
+                .map_err(|_| DecodeError::ReferenceMismatch)?;
+            let v = stored
+                .frame
+                .v_plane_bytes()
+                .map_err(|_| DecodeError::ReferenceMismatch)?;
+            let chroma_width = stored.frame.width / 2 + stored.frame.width % 2;
+            return Ok(Yuv420Frame {
+                width: stored.frame.width,
+                height: stored.frame.height,
+                y_stride: stored.frame.width,
+                u_stride: chroma_width,
+                v_stride: chroma_width,
+                y,
+                u,
+                v,
+            });
         }
-        let Some(path) = self.sample_reader_path.as_ref() else {
-            return Err(DecodeError::NotImplemented);
-        };
-
-        let probe = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=width,height",
-                "-of",
-                "json",
-            ])
-            .arg(path)
-            .output()
-            .map_err(|_| DecodeError::NotImplemented)?;
-        if !probe.status.success() {
-            return Err(DecodeError::NotImplemented);
-        }
-        let out = String::from_utf8_lossy(&probe.stdout);
-        let parse_json_u32 = |key: &str| {
-            let label = format!("\"{key}\":");
-            let start = out.find(&label)? + label.len();
-            let tail = &out[start..];
-            let tail = tail.trim_start();
-            let end = tail
-                .find(|ch: char| !ch.is_ascii_digit())
-                .unwrap_or(tail.len());
-            tail[..end].trim().parse::<usize>().ok()
-        };
-        let width = parse_json_u32("width").ok_or(DecodeError::NotImplemented)?;
-        let height = parse_json_u32("height").ok_or(DecodeError::NotImplemented)?;
-
-        let raw = Command::new("ffmpeg")
-            .args([
-                "-nostdin",
-                "-v",
-                "error",
-                "-i",
-                path.to_string_lossy().as_ref(),
-                "-vf",
-                &format!("select=eq(n\\,{index})"),
-                "-frames:v",
-                "1",
-                "-pix_fmt",
-                "yuv420p",
-                "-f",
-                "rawvideo",
-                "pipe:1",
-            ])
-            .output()
-            .map_err(|_| DecodeError::NotImplemented)?;
-        if !raw.status.success() {
-            return Err(DecodeError::NotImplemented);
-        }
-        let bytes = raw.stdout;
-        let expected = width * height * 3 / 2;
-        if bytes.len() != expected {
-            return Err(DecodeError::NotImplemented);
-        }
-        let y_size = width * height;
-        let chroma_size = y_size / 4;
-        let frame = Yuv420Frame {
-            width,
-            height,
-            y_stride: width,
-            u_stride: width / 2,
-            v_stride: width / 2,
-            y: bytes[..y_size].to_vec(),
-            u: bytes[y_size..y_size + chroma_size].to_vec(),
-            v: bytes[y_size + chroma_size..].to_vec(),
-        };
-
-        self.reference_picture_buffer.store(
-            crate::reconstruction::ReferencePicture {
-                identifier: index as u32,
-                frame_num: index as u32,
-                picture_order_cnt: index as i64,
-                long_term_frame_idx: None,
-            },
-            &frame,
-        )
-        .map_err(|_| DecodeError::NotImplemented)?;
-        self.presentation_order_buffer.push(&crate::reconstruction::PresentationPicture {
-            picture_order_cnt: index as i64,
-            frame: frame.clone(),
-        })
-        .map_err(|_| DecodeError::NotImplemented)?;
-        Ok(frame)
+        Err(DecodeError::NotImplemented)
     }
 }

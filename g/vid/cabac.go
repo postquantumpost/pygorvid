@@ -28,6 +28,18 @@ const cabacInitialRange uint32 = 510
 const cabacMaxQPY uint32 = 51
 const cabacMaxMotionVectorDifference uint32 = uint32(^uint32(0) >> 1)
 
+var cabacIIntraMBTypeInit = [8][2]int{
+	{20, -15}, {2, 54}, {3, 74}, {-28, 127},
+	{-23, 104}, {-6, 53}, {-1, 54}, {7, 51},
+}
+var cabacIMBQPDeltaInit = [4][2]int{{0, 41}, {0, 63}, {0, 63}, {0, 63}}
+var cabacIIntraChromaPredModeInit = [4][2]int{{-9, 83}, {4, 86}, {0, 97}, {-7, 72}}
+var cabacIIntra4x4PredModeInit = [2][2]int{{13, 41}, {3, 62}}
+var cabacITransformSize8x8Init = [3][2]int{{31, 21}, {31, 31}, {25, 50}}
+var cabacILumaCodedBlockPatternInit = [4][2]int{{-17, 127}, {-13, 102}, {0, 82}, {-7, 74}}
+var cabacIChromaCodedBlockPatternInit = [8][2]int{{-21, 107}, {-27, 127}, {-31, 127}, {-24, 127}, {-18, 95}, {-27, 127}, {-21, 114}, {-30, 127}}
+var cabacILuma4x4CodedBlockFlagInit = [4][2]int{{-3, 70}, {-8, 93}, {-10, 90}, {-30, 127}}
+
 var cabacCoeffAbsLevel1Context = [8]uint8{1, 2, 3, 4, 0, 0, 0, 0}
 var cabacCoeffAbsLevelGreater1Context = [8]uint8{5, 5, 5, 5, 6, 7, 8, 9}
 var cabacCoeffLevel1Transition = [8]uint8{1, 2, 3, 3, 4, 5, 6, 7}
@@ -72,6 +84,110 @@ func NewCABACContextModel(m, n, sliceQPY int) (*CABACContextModel, error) {
 		model.valueMPS = true
 	}
 	return model, nil
+}
+
+// NewCABACIIntraMBTypeContexts initializes ctxIdx 3-10 from H.264 Table 9-12.
+func NewCABACIIntraMBTypeContexts(sliceQPY int) ([8]CABACContextModel, error) {
+	var contexts [8]CABACContextModel
+	for index, values := range cabacIIntraMBTypeInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [8]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACIMBQPDeltaContexts initializes ctxIdx 60-63 from H.264 Table 9-17.
+func NewCABACIMBQPDeltaContexts(sliceQPY int) ([4]CABACContextModel, error) {
+	var contexts [4]CABACContextModel
+	for index, values := range cabacIMBQPDeltaInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [4]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACIIntraChromaPredModeContexts initializes ctxIdx 64-67 from H.264 Table 9-17.
+func NewCABACIIntraChromaPredModeContexts(sliceQPY int) ([4]CABACContextModel, error) {
+	var contexts [4]CABACContextModel
+	for index, values := range cabacIIntraChromaPredModeInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [4]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACIIntra4x4PredModeContexts initializes ctxIdx 68-69 from H.264 Table 9-17.
+func NewCABACIIntra4x4PredModeContexts(sliceQPY int) ([2]CABACContextModel, error) {
+	var contexts [2]CABACContextModel
+	for index, values := range cabacIIntra4x4PredModeInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [2]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACITransformSize8x8Contexts initializes ctxIdx 399-401 from H.264 Table 9-16.
+func NewCABACITransformSize8x8Contexts(sliceQPY int) ([3]CABACContextModel, error) {
+	var contexts [3]CABACContextModel
+	for index, values := range cabacITransformSize8x8Init {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [3]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACILumaCodedBlockPatternContexts initializes ctxIdx 73-76 from H.264 Table 9-18.
+func NewCABACILumaCodedBlockPatternContexts(sliceQPY int) ([4]CABACContextModel, error) {
+	var contexts [4]CABACContextModel
+	for index, values := range cabacILumaCodedBlockPatternInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [4]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACIChromaCodedBlockPatternContexts initializes ctxIdx 77-84 from H.264 Table 9-18.
+func NewCABACIChromaCodedBlockPatternContexts(sliceQPY int) ([8]CABACContextModel, error) {
+	var contexts [8]CABACContextModel
+	for index, values := range cabacIChromaCodedBlockPatternInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [8]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
+}
+
+// NewCABACILuma4x4CodedBlockFlagContexts initializes ctxIdx 93-96 from H.264 Table 9-18.
+func NewCABACILuma4x4CodedBlockFlagContexts(sliceQPY int) ([4]CABACContextModel, error) {
+	var contexts [4]CABACContextModel
+	for index, values := range cabacILuma4x4CodedBlockFlagInit {
+		model, err := NewCABACContextModel(values[0], values[1], sliceQPY)
+		if err != nil {
+			return [4]CABACContextModel{}, err
+		}
+		contexts[index] = *model
+	}
+	return contexts, nil
 }
 
 func (model *CABACContextModel) StateIndex() uint8 { return model.stateIndex }

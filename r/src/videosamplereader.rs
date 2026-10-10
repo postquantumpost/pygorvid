@@ -191,30 +191,75 @@ impl VideoSampleReader {
         self.samples.len()
     }
 
-    /// Returns the next sample in decode order, or `None` at end of stream.
-    pub fn next_sample(&mut self) -> io::Result<Option<CompressedSample>> {
-        let Some(file) = self.file.as_mut() else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "sample reader is closed",
-            ));
-        };
-        let Some(location) = self.samples.get(self.next_index) else {
-            return Ok(None);
-        };
+    pub fn first_sync_sample_index(&self) -> Option<u64> {
+        self.samples
+            .iter()
+            .position(|location| location.is_sync)
+            .map(|index| index as u64)
+    }
+
+    pub fn sample_at(&mut self, index: usize) -> io::Result<CompressedSample> {
+        let location = self
+            .samples
+            .get(index)
+            .ok_or_else(|| invalid("sample index is out of range"))?;
+        let file = self.file.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "sample reader is closed")
+        })?;
         file.seek(SeekFrom::Start(location.offset))?;
         let mut data = vec![0u8; location.size as usize];
         file.read_exact(&mut data)?;
         validate_length_prefixed_nals(&data)
-            .map_err(|error| invalid(format!("sample {}: {error}", self.next_index)))?;
-        let sample = CompressedSample {
-            index: self.next_index as u64,
+            .map_err(|error| invalid(format!("sample {index}: {error}")))?;
+        Ok(CompressedSample {
+            index: index as u64,
             data,
             dts_ticks: location.dts_ticks,
             pts_ticks: location.pts_ticks,
             duration_ticks: location.duration_ticks,
             is_sync: location.is_sync,
-        };
+        })
+    }
+
+    pub fn decode_order_dependency_samples(
+        &mut self,
+        presentation_index: usize,
+    ) -> io::Result<Vec<CompressedSample>> {
+        if presentation_index >= self.samples.len() {
+            return Err(invalid("presentation frame index is out of range"));
+        }
+        let mut display_order: Vec<usize> = (0..self.samples.len()).collect();
+        display_order.sort_by_key(|index| (self.samples[*index].pts_ticks, *index));
+        let target_index = display_order[presentation_index];
+        let sync_index = (0..=target_index)
+            .rev()
+            .find(|index| self.samples[*index].is_sync)
+            .ok_or_else(|| invalid("presentation frame has no preceding sync sample"))?;
+        let gop_end = (sync_index + 1..self.samples.len())
+            .find(|index| self.samples[*index].is_sync)
+            .unwrap_or(self.samples.len());
+        let target_pts = self.samples[target_index].pts_ticks;
+        let dependency_end = (sync_index..gop_end)
+            .filter(|index| self.samples[*index].pts_ticks <= target_pts)
+            .max()
+            .ok_or_else(|| invalid("presentation frame has no decode-order dependency window"))?;
+        (sync_index..=dependency_end)
+            .map(|index| self.sample_at(index))
+            .collect()
+    }
+
+    /// Returns the next sample in decode order, or `None` at end of stream.
+    pub fn next_sample(&mut self) -> io::Result<Option<CompressedSample>> {
+        if self.file.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "sample reader is closed",
+            ));
+        }
+        if self.next_index >= self.samples.len() {
+            return Ok(None);
+        }
+        let sample = self.sample_at(self.next_index)?;
         self.next_index += 1;
         Ok(Some(sample))
     }

@@ -42,6 +42,10 @@ impl<'a> BitReader<'a> {
         Ok(self.read_bits(1)? != 0)
     }
 
+    pub fn bit_offset(&self) -> usize {
+        self.bit_offset
+    }
+
     pub fn align_to_byte(&mut self) {
         let remainder = self.bit_offset % 8;
         if remainder != 0 {

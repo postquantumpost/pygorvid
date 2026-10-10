@@ -1,5 +1,10 @@
 use pygorvid::{
-    group_slices_into_pictures, parse_nal_header, same_primary_picture, VideoSampleReader,
+    ebsp_to_rbsp, group_slices_into_pictures, new_cabac_i_chroma_coded_block_pattern_contexts,
+    new_cabac_i_intra4x4_pred_mode_contexts, new_cabac_i_intra_chroma_pred_mode_contexts,
+    new_cabac_i_intra_mb_type_contexts, new_cabac_i_luma4x4_coded_block_flag_contexts,
+    new_cabac_i_luma_coded_block_pattern_contexts, new_cabac_i_mb_qp_delta_contexts,
+    new_cabac_i_transform_size_8x8_contexts, parse_nal_header, same_primary_picture,
+    CabacArithmeticDecoder, VideoSampleReader,
 };
 use pygorvid::{parse_pps, parse_slice_header, parse_sps, PpsInfo, SpsInfo};
 use std::path::PathBuf;
@@ -146,6 +151,9 @@ fn make_slice_with_prefix(
     bits += &ue_bits(0); // disable_deblocking_filter_idc
     bits += &se_bits(0);
     bits += &se_bits(0);
+    while bits.len() % 8 != 0 {
+        bits.push('1');
+    }
     let mut nal = vec![header];
     nal.extend(pack_bits(&bits));
     nal
@@ -315,6 +323,190 @@ fn parses_slice_headers_in_compact_fixtures() {
                 let header = parse_nal_header(nal).unwrap();
                 if header.unit_type == 1 || header.unit_type == 5 {
                     let slice = parse_slice_header(nal, &sps, &pps).unwrap();
+                    if slice.idr && pps.entropy_coding_mode {
+                        assert_eq!(slice.slice_data_bit_offset % 8, 0, "{name}");
+                        let rbsp = ebsp_to_rbsp(&nal[1..]).unwrap();
+                        let byte_offset = slice.slice_data_bit_offset / 8;
+                        assert!(byte_offset < rbsp.len(), "{name}");
+                        let mut cabac = CabacArithmeticDecoder::new(&rbsp[byte_offset..]).unwrap();
+                        if slice.first_macroblock_in_slice == 0 && slice.slice_type % 5 == 2 {
+                            let reference_contexts =
+                                new_cabac_i_intra_mb_type_contexts(26).unwrap();
+                            let states: Vec<_> = reference_contexts
+                                .iter()
+                                .map(|model| (model.state_index(), model.mps()))
+                                .collect();
+                            assert_eq!(
+                                states,
+                                [
+                                    (46, false),
+                                    (6, false),
+                                    (14, true),
+                                    (17, true),
+                                    (2, true),
+                                    (20, false),
+                                    (11, false),
+                                    (1, false),
+                                ]
+                            );
+                            let mode_reference_contexts =
+                                new_cabac_i_intra4x4_pred_mode_contexts(26).unwrap();
+                            let mode_states: Vec<_> = mode_reference_contexts
+                                .iter()
+                                .map(|model| (model.state_index(), model.mps()))
+                                .collect();
+                            assert_eq!(mode_states, [(1, false), (2, true)]);
+                            let slice_qpy = 26 + pps.pic_init_qp_minus26 + slice.slice_qp_delta;
+                            let mut contexts =
+                                new_cabac_i_intra_mb_type_contexts(slice_qpy as i32).unwrap();
+                            let mb_type = cabac
+                                .decode_i_intra_mb_type(
+                                    slice.slice_type,
+                                    &mut contexts,
+                                    false,
+                                    false,
+                                    false,
+                                    false,
+                                )
+                                .unwrap();
+                            assert_eq!(mb_type, 0, "{name} first IDR mb_type should be Intra_NxN");
+                            let transform_contexts =
+                                new_cabac_i_transform_size_8x8_contexts(26).unwrap();
+                            let transform_states: Vec<_> = transform_contexts
+                                .iter()
+                                .map(|model| (model.state_index(), model.mps()))
+                                .collect();
+                            assert_eq!(transform_states, [(7, true), (17, true), (26, true)]);
+                            if pps.transform_8x8_mode {
+                                let mut transform_contexts =
+                                    new_cabac_i_transform_size_8x8_contexts(slice_qpy as i32)
+                                        .unwrap();
+                                let transform_size_8x8 = cabac
+                                    .decode_transform_size_8x8_flag(
+                                        &mut transform_contexts,
+                                        false,
+                                        false,
+                                    )
+                                    .unwrap();
+                                assert!(
+                                    !transform_size_8x8,
+                                    "{name} first IDR transform flag should be false"
+                                );
+                            }
+                            let mut mode_contexts =
+                                new_cabac_i_intra4x4_pred_mode_contexts(slice_qpy as i32).unwrap();
+                            let block_positions = [
+                                (0, 0),
+                                (1, 0),
+                                (0, 1),
+                                (1, 1),
+                                (2, 0),
+                                (3, 0),
+                                (2, 1),
+                                (3, 1),
+                                (0, 2),
+                                (1, 2),
+                                (0, 3),
+                                (1, 3),
+                                (2, 2),
+                                (3, 2),
+                                (2, 3),
+                                (3, 3),
+                            ];
+                            let mut modes_by_position = [[2_u8; 4]; 4];
+                            let mut decoded_modes = [0_u8; 16];
+                            for (block_index, (x, y)) in block_positions.into_iter().enumerate() {
+                                let left_mode = if x > 0 {
+                                    modes_by_position[y][x - 1]
+                                } else {
+                                    2
+                                };
+                                let top_mode = if y > 0 {
+                                    modes_by_position[y - 1][x]
+                                } else {
+                                    2
+                                };
+                                let predicted_mode = left_mode.min(top_mode);
+                                let mode = cabac
+                                    .decode_intra4x4_pred_mode(predicted_mode, &mut mode_contexts)
+                                    .unwrap();
+                                modes_by_position[y][x] = mode;
+                                decoded_modes[block_index] = mode;
+                            }
+                            assert_eq!(
+                                decoded_modes, [2_u8; 16],
+                                "{name} first IDR luma prediction modes"
+                            );
+                            let chroma_reference_contexts =
+                                new_cabac_i_intra_chroma_pred_mode_contexts(26).unwrap();
+                            let chroma_states: Vec<_> = chroma_reference_contexts
+                                .iter()
+                                .map(|model| (model.state_index(), model.mps()))
+                                .collect();
+                            assert_eq!(
+                                chroma_states,
+                                [(4, true), (28, true), (33, true), (3, false)]
+                            );
+                            let mut chroma_contexts =
+                                new_cabac_i_intra_chroma_pred_mode_contexts(slice_qpy as i32)
+                                    .unwrap();
+                            let chroma_mode = cabac
+                                .decode_intra_chroma_pred_mode(&mut chroma_contexts, false, false)
+                                .unwrap();
+                            assert_eq!(
+                                chroma_mode, 0,
+                                "{name} first IDR chroma prediction mode should be DC"
+                            );
+                            let mut luma_cbp_contexts =
+                                new_cabac_i_luma_coded_block_pattern_contexts(slice_qpy as i32)
+                                    .unwrap();
+                            let luma_cbp = cabac
+                                .decode_luma_coded_block_pattern(0, 0, &mut luma_cbp_contexts)
+                                .unwrap();
+                            assert_eq!(luma_cbp, 13, "{name} first IDR luma coded-block-pattern");
+                            let mut chroma_cbp_contexts =
+                                new_cabac_i_chroma_coded_block_pattern_contexts(slice_qpy as i32)
+                                    .unwrap();
+                            let chroma_cbp = cabac
+                                .decode_chroma_coded_block_pattern(0, 0, &mut chroma_cbp_contexts)
+                                .unwrap();
+                            assert_eq!(
+                                chroma_cbp, 2,
+                                "{name} first IDR chroma coded-block-pattern"
+                            );
+                            let mut qp_delta_contexts =
+                                new_cabac_i_mb_qp_delta_contexts(slice_qpy as i32).unwrap();
+                            let qp_delta =
+                                cabac.decode_mb_qp_delta(&mut qp_delta_contexts, 0).unwrap();
+                            let expected_qp_delta = match name {
+                                "high42-1080p.mp4" => -1,
+                                "high52-2160p.mp4" => 0,
+                                _ => unreachable!("unexpected compact fixture {name}"),
+                            };
+                            assert_eq!(qp_delta, expected_qp_delta, "{name} first IDR mb_qp_delta");
+                            let mut coded_block_flag_contexts =
+                                new_cabac_i_luma4x4_coded_block_flag_contexts(
+                                    slice_qpy as i32 + qp_delta,
+                                )
+                                .unwrap();
+                            let coded_block_flag = cabac
+                                .decode_luma4x4_coded_block_flag(
+                                    0,
+                                    0,
+                                    &mut coded_block_flag_contexts,
+                                )
+                                .unwrap();
+                            let expected_coded_block_flag = match name {
+                                "high42-1080p.mp4" => true,
+                                "high52-2160p.mp4" => false,
+                                _ => unreachable!("unexpected compact fixture {name}"),
+                            };
+                            assert_eq!(
+                                coded_block_flag, expected_coded_block_flag,
+                                "{name} first IDR luma coded-block-flag"
+                            );
+                        }
+                    }
                     picture_types[usize::from(slice.slice_type % 5)] = true;
                 }
                 offset += size;
@@ -339,16 +531,38 @@ fn parses_sps_pps_and_slice_metadata_for_every_eligible_input() {
         let mut reader = VideoSampleReader::open(repository_root.join(relative_path)).unwrap();
         let configuration = reader.configuration();
         assert_eq!(configuration.nal_length_size, 4, "{relative_path}");
-        assert_eq!(configuration.sequence_parameter_sets.len(), 1, "{relative_path}");
-        assert_eq!(configuration.picture_parameter_sets.len(), 1, "{relative_path}");
+        assert_eq!(
+            configuration.sequence_parameter_sets.len(),
+            1,
+            "{relative_path}"
+        );
+        assert_eq!(
+            configuration.picture_parameter_sets.len(),
+            1,
+            "{relative_path}"
+        );
         let sps = parse_sps(&configuration.sequence_parameter_sets[0]).unwrap();
         let pps = parse_pps(&configuration.picture_parameter_sets[0]).unwrap();
         assert_eq!(sps.profile_idc, 100, "{relative_path}");
-        assert!(matches!(sps.level_idc, 42 | 52), "{relative_path}: {}", sps.level_idc);
+        assert!(
+            matches!(sps.level_idc, 42 | 52),
+            "{relative_path}: {}",
+            sps.level_idc
+        );
         assert_eq!(sps.chroma_format_idc, 1, "{relative_path}");
-        assert_eq!((sps.bit_depth_luma, sps.bit_depth_chroma), (8, 8), "{relative_path}");
-        assert!(matches!((sps.width, sps.height), (1920, 1080) | (3840, 2160)), "{relative_path}");
-        assert!(sps.frame_mbs_only && !sps.separate_colour_plane, "{relative_path}");
+        assert_eq!(
+            (sps.bit_depth_luma, sps.bit_depth_chroma),
+            (8, 8),
+            "{relative_path}"
+        );
+        assert!(
+            matches!((sps.width, sps.height), (1920, 1080) | (3840, 2160)),
+            "{relative_path}"
+        );
+        assert!(
+            sps.frame_mbs_only && !sps.separate_colour_plane,
+            "{relative_path}"
+        );
         assert_eq!(pps.sequence_parameter_set_id, sps.sps_id, "{relative_path}");
         assert!(pps.entropy_coding_mode, "{relative_path}");
         assert_eq!(pps.num_slice_groups_minus1, 0, "{relative_path}");
@@ -357,20 +571,40 @@ fn parses_sps_pps_and_slice_metadata_for_every_eligible_input() {
         while let Some(sample) = reader.next_sample().unwrap() {
             let mut offset = 0;
             while offset < sample.data.len() {
-                assert!(sample.data.len() - offset >= 4, "{relative_path} sample {} NAL prefix", sample.index);
-                let size = u32::from_be_bytes(sample.data[offset..offset + 4].try_into().unwrap()) as usize;
+                assert!(
+                    sample.data.len() - offset >= 4,
+                    "{relative_path} sample {} NAL prefix",
+                    sample.index
+                );
+                let size = u32::from_be_bytes(sample.data[offset..offset + 4].try_into().unwrap())
+                    as usize;
                 offset += 4;
-                assert!(size > 0 && size <= sample.data.len() - offset, "{relative_path} sample {} NAL size", sample.index);
+                assert!(
+                    size > 0 && size <= sample.data.len() - offset,
+                    "{relative_path} sample {} NAL size",
+                    sample.index
+                );
                 let nal = &sample.data[offset..offset + size];
                 let header = parse_nal_header(nal).unwrap();
                 if header.unit_type == 1 || header.unit_type == 5 {
-                    let slice = parse_slice_header(nal, &sps, &pps)
-                        .unwrap_or_else(|error| panic!("{relative_path} sample {}: {error}", sample.index));
-                    assert_eq!(slice.picture_parameter_set_id, pps.picture_parameter_set_id, "{relative_path}");
-                    assert_eq!(slice.pic_order_cnt_type, sps.pic_order_cnt_type, "{relative_path}");
+                    let slice = parse_slice_header(nal, &sps, &pps).unwrap_or_else(|error| {
+                        panic!("{relative_path} sample {}: {error}", sample.index)
+                    });
+                    assert_eq!(
+                        slice.picture_parameter_set_id, pps.picture_parameter_set_id,
+                        "{relative_path}"
+                    );
+                    assert_eq!(
+                        slice.pic_order_cnt_type, sps.pic_order_cnt_type,
+                        "{relative_path}"
+                    );
                     assert_eq!(slice.idr, header.unit_type == 5, "{relative_path}");
                     let slice_type = usize::from(slice.slice_type % 5);
-                    assert!(slice_type <= 2, "{relative_path} unsupported slice type {}", slice.slice_type);
+                    assert!(
+                        slice_type <= 2,
+                        "{relative_path} unsupported slice type {}",
+                        slice.slice_type
+                    );
                     all_slice_types[slice_type] = true;
                     slice_count += 1;
                 }

@@ -162,6 +162,39 @@ func TestVideoSampleReaderCompactFixtures(t *testing.T) {
 	}
 }
 
+func TestVideoSampleReaderDecodeOrderDependenciesForPresentationIndex(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "h264", "high42-1080p.mp4")
+	reader, err := OpenVideoSampleReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	dependencies, err := reader.DecodeOrderDependencySamples(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([][3]int64, len(dependencies))
+	for index, sample := range dependencies {
+		got[index] = [3]int64{int64(sample.Index), sample.DTSTicks, sample.PTSTicks}
+	}
+	want := [][3]int64{{0, 0, 256}, {1, 256, 1024}, {2, 512, 512}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("dependency window = %v; want %v", got, want)
+	}
+	first, ok, err := reader.NextSample()
+	if err != nil || !ok || first.Index != 0 {
+		t.Fatalf("NextSample() after indexed reads = %#v, %v, %v; want sample 0", first, ok, err)
+	}
+	dependencies, err = reader.DecodeOrderDependencySamples(3)
+	if err != nil || len(dependencies) != 4 {
+		t.Fatalf("dependency window for presentation frame 3 = %d samples, %v; want 4", len(dependencies), err)
+	}
+	if _, err := reader.DecodeOrderDependencySamples(uint64(reader.SampleCount())); err == nil {
+		t.Fatal("DecodeOrderDependencySamples accepted an out-of-range presentation index")
+	}
+}
+
 func TestVideoSampleReaderTablesAndSamples(t *testing.T) {
 	for _, test := range []struct {
 		name         string

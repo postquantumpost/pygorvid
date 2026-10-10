@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, Sequence
 
 
 from .cabac import place_chroma4x4_scan_levels
@@ -1076,6 +1076,141 @@ class Yuv420Frame:
     y: bytes
     u: bytes
     v: bytes
+
+    def _plane_bytes(self, plane: bytes, width: int, height: int, stride: int) -> bytes:
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in (width, height, stride)):
+            raise ValueError("reference picture frame layout is invalid or truncated")
+        if stride <= 0 or stride < width:
+            raise ValueError("reference picture frame layout is invalid or truncated")
+        if len(plane) < stride * height:
+            raise ValueError("reference picture frame layout is invalid or truncated")
+        return b"".join(plane[row * stride : row * stride + width] for row in range(height))
+
+    def luma_plane_bytes(self) -> bytes:
+        return self._plane_bytes(self.y, self.width, self.height, self.y_stride)
+
+    def u_plane_bytes(self) -> bytes:
+        chroma_width = self.width // 2 + self.width % 2
+        chroma_height = self.height // 2 + self.height % 2
+        return self._plane_bytes(self.u, chroma_width, chroma_height, self.u_stride)
+
+    def v_plane_bytes(self) -> bytes:
+        chroma_width = self.width // 2 + self.width % 2
+        chroma_height = self.height // 2 + self.height % 2
+        return self._plane_bytes(self.v, chroma_width, chroma_height, self.v_stride)
+
+    def luma_plane_matches(self, reference: bytes) -> bool:
+        return self.luma_plane_bytes() == bytes(reference)
+
+
+class Yuv420FrameBuilder:
+    def __init__(
+        self,
+        picture_width_in_mbs: int,
+        picture_height_in_mbs: int,
+        crop_left: int = 0,
+        crop_top: int = 0,
+        crop_right: int = 0,
+        crop_bottom: int = 0,
+    ) -> None:
+        values = (
+            picture_width_in_mbs,
+            picture_height_in_mbs,
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom,
+        )
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in values):
+            raise InterPredictionError("YUV 4:2:0 macroblock assembly is invalid")
+        if (
+            picture_width_in_mbs <= 0
+            or picture_height_in_mbs <= 0
+            or min(crop_left, crop_top, crop_right, crop_bottom) < 0
+            or any(offset % 2 for offset in (crop_left, crop_top, crop_right, crop_bottom))
+        ):
+            raise InterPredictionError("YUV 4:2:0 macroblock assembly is invalid")
+        coded_width = picture_width_in_mbs * 16
+        coded_height = picture_height_in_mbs * 16
+        if crop_left + crop_right >= coded_width or crop_top + crop_bottom >= coded_height:
+            raise InterPredictionError("YUV 4:2:0 macroblock assembly is invalid")
+        self._picture_width_in_mbs = picture_width_in_mbs
+        self._crop_left = crop_left
+        self._crop_top = crop_top
+        width = coded_width - crop_left - crop_right
+        height = coded_height - crop_top - crop_bottom
+        chroma_size = (width // 2) * (height // 2)
+        self._frame_width = width
+        self._frame_height = height
+        self._y = bytearray(width * height)
+        self._u = bytearray(chroma_size)
+        self._v = bytearray(chroma_size)
+        self._written = bytearray(picture_width_in_mbs * picture_height_in_mbs)
+
+    @staticmethod
+    def _samples(block: Sequence[int], expected_length: int) -> bytes:
+        if not isinstance(block, Sequence) or len(block) != expected_length:
+            raise InterPredictionError("YUV 4:2:0 macroblock sample block has an invalid length")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255
+            for value in block
+        ):
+            raise InterPredictionError("YUV 4:2:0 macroblock samples must be 8-bit integers")
+        return bytes(block)
+
+    def place_macroblock(
+        self,
+        address: int,
+        y_block: Sequence[int],
+        u_block: Sequence[int],
+        v_block: Sequence[int],
+    ) -> None:
+        if (
+            not isinstance(address, int)
+            or isinstance(address, bool)
+            or not 0 <= address < len(self._written)
+            or self._written[address]
+        ):
+            raise InterPredictionError("YUV 4:2:0 macroblock address is invalid or duplicated")
+        y_samples = self._samples(y_block, 256)
+        u_samples = self._samples(u_block, 64)
+        v_samples = self._samples(v_block, 64)
+        mb_x = address % self._picture_width_in_mbs
+        mb_y = address // self._picture_width_in_mbs
+        for row in range(16):
+            dst_y = mb_y * 16 + row - self._crop_top
+            if not 0 <= dst_y < self._frame_height:
+                continue
+            for column in range(16):
+                dst_x = mb_x * 16 + column - self._crop_left
+                if 0 <= dst_x < self._frame_width:
+                    self._y[dst_y * self._frame_width + dst_x] = y_samples[row * 16 + column]
+        for row in range(8):
+            dst_y = mb_y * 8 + row - self._crop_top // 2
+            if not 0 <= dst_y < self._frame_height // 2:
+                continue
+            for column in range(8):
+                dst_x = mb_x * 8 + column - self._crop_left // 2
+                if 0 <= dst_x < self._frame_width // 2:
+                    block_index = row * 8 + column
+                    self._u[dst_y * (self._frame_width // 2) + dst_x] = u_samples[block_index]
+                    self._v[dst_y * (self._frame_width // 2) + dst_x] = v_samples[block_index]
+        self._written[address] = 1
+
+    def finish(self) -> Yuv420Frame:
+        if not all(self._written):
+            raise InterPredictionError("YUV 4:2:0 macroblock assembly is incomplete")
+        chroma_width = self._frame_width // 2
+        return Yuv420Frame(
+            self._frame_width,
+            self._frame_height,
+            self._frame_width,
+            chroma_width,
+            chroma_width,
+            bytes(self._y),
+            bytes(self._u),
+            bytes(self._v),
+        )
 
 
 @dataclass(frozen=True)

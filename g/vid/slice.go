@@ -47,6 +47,7 @@ type SliceHeader struct {
 	HasDeblockingFilterIDC     bool
 	SliceAlphaC0OffsetDiv2     int64
 	SliceBetaOffsetDiv2        int64
+	SliceDataBitOffset         uint64
 }
 
 type RefPicListModification struct {
@@ -416,6 +417,18 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 			}
 		}
 	}
+	if pps.EntropyCodingMode {
+		for reader.bitOffset%8 != 0 {
+			alignmentBit, err := reader.ReadBit()
+			if err != nil {
+				return SliceHeader{}, fmt.Errorf("slice cabac_alignment_one_bit: %w", err)
+			}
+			if !alignmentBit {
+				return SliceHeader{}, fmt.Errorf("slice cabac_alignment_one_bit is not 1")
+			}
+		}
+	}
+	header.SliceDataBitOffset = reader.bitOffset
 	return header, nil
 }
 

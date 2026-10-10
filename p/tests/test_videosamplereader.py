@@ -124,6 +124,31 @@ def test_video_sample_reader_maps_samples_and_timing(
         reader.next_sample()
 
 
+def test_video_sample_reader_reads_decode_order_dependencies_for_presentation_index():
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "testdata"
+        / "h264"
+        / "high42-1080p.mp4"
+    )
+    reader = VideoSampleReader(fixture)
+    try:
+        dependencies = reader.decode_order_dependency_samples(1)
+        assert [(sample.index, sample.dts_ticks, sample.pts_ticks) for sample in dependencies] == [
+            (0, 0, 256),
+            (1, 256, 1024),
+            (2, 512, 512),
+        ]
+        assert reader.next_sample().index == 0
+        assert [
+            sample.index for sample in reader.decode_order_dependency_samples(3)
+        ] == [0, 1, 2, 3]
+        with pytest.raises(IndexError, match="presentation frame index"):
+            reader.decode_order_dependency_samples(reader.sample_count)
+    finally:
+        reader.close()
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

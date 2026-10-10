@@ -31,6 +31,16 @@ Each implementation follows the same pipeline and owns state explicitly:
 
 Reader/decoder state is per input stream, not global. The returned frame is independent of decoder-owned reference buffers; callers may retain it after the decoder advances or closes. Encoders do not mutate their input frame.
 
+- `PNGEncoder` accepts only an RGB24 `PixelBuffer`; width/height, byte stride, range, and owned input data are explicit. It ignores row padding when encoding pixels and does not mutate the input buffer.
+- PNG chunks store a 32-bit big-endian payload length and CRC-32 over the four-byte type followed by the payload. RGB output uses an 8-bit truecolor IHDR with standard compression/filter methods and no interlace.
+- The native PNG zlib stream uses header `78 01`, uncompressed DEFLATE stored blocks with little-endian LEN/NLEN, and a big-endian Adler-32 trailer. Each stored block contains at most 65535 bytes; larger scanline streams split at that boundary and set BFINAL only on the final block.
+
+### Encoder PixelBuffer
+
+- A pixel buffer has positive width, height, stride, and channel count. Stride is measured in bytes and must cover `width * channels`.
+- Color range is either limited (`0`) or full (`1`).
+- Construction owns exactly `stride * height` bytes, rejects shorter storage, and ignores any trailing bytes. Row access includes padding; pixel offsets point to the first channel of the selected pixel.
+
 ## VideoSampleReader Contract
 
 Each language provides a `VideoSampleReader` with equivalent behavior:
@@ -59,9 +69,11 @@ Idiomatic method shapes may differ: Go may return `(sample, ok, error)`, Python 
 - Format: packed 8-bit RGB24, channel order R then G then B.
 - Pixel origin is top-left; rows are emitted top-to-bottom.
 - Stride is exactly `3 * width`; there is no row padding.
+- The initial YUV 4:2:0 conversion increment uses the Go-verified BT.601 coefficients for limited/full range, replicates each chroma sample over its 2x2 luma footprint, rounds ties away from zero, and clamps each RGB channel to 0..255. Chroma plane dimensions use ceiling division for odd image dimensions; input strides are byte counts.
 - Conversion honors signaled range, matrix, transfer, primaries, and chroma siting for supported inputs. Unsupported or missing required color metadata yields a clear error instead of guessed color output.
 - PNG preserves these RGB values losslessly. JPEG uses the documented baseline encoder quality and is validated with pixel-error bounds, not byte equality: at quality 75, smooth-gradient vectors require maximum per-channel error <=24 and mean <=8; the high-frequency stress vector requires maximum <=64 and mean <=20.
-- JPEG quality defaults to 75 and accepts explicit values from 1 through 100. Quantization scales the baseline luminance/chrominance tables by `5000 / quality` below 50, or `200 - 2 * quality` otherwise, rounds each table value to nearest, and clips entries to 1 through 255. Its initial RGB conversion uses full-range JFIF YCbCr with 4:4:4 sampling: Q16 coefficients are rounded to nearest with an added 32768 before shifting, and output samples are clamped to 8 bits. Chroma subsampling is not performed in this initial layout.
+- JPEG quality defaults to 75 and accepts explicit values from 1 through 100. Quantization scales the baseline luminance/chrominance tables by `5000 / quality` below 50, or `200 - 2 * quality` otherwise, rounds each table value to nearest, and clips entries to 1 through 255. Its initial RGB conversion uses full-range JFIF YCbCr with 4:4:4 sampling: `Y=(19595R+38470G+7471B+32768)>>16`, `Cb=(-11059R-21709G+32768B+128*65536+32768)>>16`, and `Cr=(32768R-27439G-5329B+128*65536+32768)>>16`; each result is clamped to 8 bits. Chroma subsampling is not performed in this initial layout.
+- `JPEGEncoder` accepts RGB24 buffers and baseline dimensions from 1 through 65535. Length-bearing marker segment lengths include their two length bytes; standalone markers have neither a length field nor a payload, and marker payloads are limited to 65533 bytes.
 - JPEG applies an orthonormal 8x8 forward DCT after subtracting 128 from each sample. Quantization divides natural-order coefficients by their nonzero table entries and rounds to nearest with ties away from zero; the resulting coefficients are ordered by the standard 64-position zigzag scan.
 - JPEG entropy coding differences each block's DC coefficient from the previous block in that component. Signed amplitudes use the category-width JPEG mapping; AC coefficients use zero-run/category symbols, with `0xF0` for each 16-zero run and `0x00` for trailing zeros. Canonical Huffman codewords are emitted most-significant bit first; byte packing and stuffing are handled by the marker/scan writer.
 

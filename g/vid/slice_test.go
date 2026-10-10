@@ -49,6 +49,9 @@ func makeSliceNALWithTypePrefix(header byte, firstMB, sliceType, ppsID uint32, s
 		bits += ueBits(0) // cabac_init_idc
 	}
 	bits += seBits(0) + ueBits(0) + seBits(0) + seBits(0) // QP and deblocking syntax
+	for len(bits)%8 != 0 {
+		bits += "1"
+	}
 	return append([]byte{header}, packBitString(bits)...)
 }
 
@@ -373,6 +376,145 @@ func TestParseSliceHeadersCompactFixtures(t *testing.T) {
 					slice, err := ParseSliceHeader(nal, sps, pps)
 					if err != nil {
 						t.Fatalf("%s sample %d: %v", name, sample.Index, err)
+					}
+					if slice.IDR && pps.EntropyCodingMode {
+						if slice.SliceDataBitOffset%8 != 0 {
+							t.Fatalf("%s IDR slice data bit offset %d is not byte-aligned", name, slice.SliceDataBitOffset)
+						}
+						rbsp, err := EBSPToRBSP(nal[1:])
+						if err != nil {
+							t.Fatalf("%s IDR slice RBSP: %v", name, err)
+						}
+						byteOffset := slice.SliceDataBitOffset / 8
+						if byteOffset >= uint64(len(rbsp)) {
+							t.Fatalf("%s IDR slice data offset %d exceeds %d-byte RBSP", name, byteOffset, len(rbsp))
+						}
+						if _, err := NewCABACArithmeticDecoder(rbsp[byteOffset:]); err != nil {
+							t.Fatalf("%s IDR CABAC initialization: %v", name, err)
+						}
+						if slice.FirstMacroblockInSlice == 0 && slice.SliceType%5 == 2 {
+							cabac, err := NewCABACArithmeticDecoder(rbsp[byteOffset:])
+							if err != nil {
+								t.Fatalf("%s IDR CABAC initialization: %v", name, err)
+							}
+							contexts, err := NewCABACIIntraMBTypeContexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+							if err != nil {
+								t.Fatalf("%s IDR mb_type contexts: %v", name, err)
+							}
+							mbType, err := cabac.DecodeIIntraMBType(slice.SliceType, &contexts, false, false, false, false)
+							if err != nil {
+								t.Fatalf("%s first IDR mb_type: %v", name, err)
+							}
+							if mbType != 0 {
+								t.Fatalf("%s first IDR mb_type = %d; want Intra_NxN (0)", name, mbType)
+							}
+							if pps.Transform8x8Mode {
+								transformContexts, err := NewCABACITransformSize8x8Contexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+								if err != nil {
+									t.Fatalf("%s transform_size_8x8 contexts: %v", name, err)
+								}
+								transform8x8, err := cabac.DecodeTransformSize8x8Flag(&transformContexts, false, false)
+								if err != nil {
+									t.Fatalf("%s transform_size_8x8_flag: %v", name, err)
+								}
+								if transform8x8 {
+									t.Fatalf("%s first IDR transform_size_8x8_flag = true; want false", name)
+								}
+							}
+							modeContexts, err := NewCABACIIntra4x4PredModeContexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+							if err != nil {
+								t.Fatalf("%s IDR Intra4x4 contexts: %v", name, err)
+							}
+							blockPositions := [16][2]int{
+								{0, 0}, {1, 0}, {0, 1}, {1, 1},
+								{2, 0}, {3, 0}, {2, 1}, {3, 1},
+								{0, 2}, {1, 2}, {0, 3}, {1, 3},
+								{2, 2}, {3, 2}, {2, 3}, {3, 3},
+							}
+							var modesByPosition [4][4]uint8
+							var decodedModes [16]uint8
+							for blockIndex, position := range blockPositions {
+								x, y := position[0], position[1]
+								leftMode, topMode := uint8(2), uint8(2)
+								if x > 0 {
+									leftMode = modesByPosition[y][x-1]
+								}
+								if y > 0 {
+									topMode = modesByPosition[y-1][x]
+								}
+								predictedMode := leftMode
+								if topMode < predictedMode {
+									predictedMode = topMode
+								}
+								mode, err := cabac.DecodeIntra4x4PredMode(predictedMode, &modeContexts)
+								if err != nil {
+									t.Fatalf("%s IDR Intra4x4 block %d mode: %v", name, blockIndex, err)
+								}
+								modesByPosition[y][x] = mode
+								decodedModes[blockIndex] = mode
+							}
+							wantModes := [16]uint8{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}
+							if decodedModes != wantModes {
+								t.Fatalf("%s first IDR luma prediction modes = %v; want %v", name, decodedModes, wantModes)
+							}
+							chromaContexts, err := NewCABACIIntraChromaPredModeContexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+							if err != nil {
+								t.Fatalf("%s IDR chroma prediction contexts: %v", name, err)
+							}
+							chromaMode, err := cabac.DecodeIntraChromaPredMode(&chromaContexts, false, false)
+							if err != nil {
+								t.Fatalf("%s first IDR intra_chroma_pred_mode: %v", name, err)
+							}
+							if chromaMode != 0 {
+								t.Fatalf("%s first IDR intra_chroma_pred_mode = %d; want DC (0)", name, chromaMode)
+							}
+							lumaCBPContexts, err := NewCABACILumaCodedBlockPatternContexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+							if err != nil {
+								t.Fatalf("%s IDR luma coded-block-pattern contexts: %v", name, err)
+							}
+							lumaCBP, err := cabac.DecodeLumaCodedBlockPattern(0, 0, &lumaCBPContexts)
+							if err != nil {
+								t.Fatalf("%s first IDR luma coded_block_pattern: %v", name, err)
+							}
+							if lumaCBP != 13 {
+								t.Fatalf("%s first IDR luma coded_block_pattern = %d; want 13", name, lumaCBP)
+							}
+							chromaCBPContexts, err := NewCABACIChromaCodedBlockPatternContexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+							if err != nil {
+								t.Fatalf("%s IDR chroma coded-block-pattern contexts: %v", name, err)
+							}
+							chromaCBP, err := cabac.DecodeChromaCodedBlockPattern(0, 0, &chromaCBPContexts)
+							if err != nil {
+								t.Fatalf("%s first IDR chroma coded_block_pattern: %v", name, err)
+							}
+							if chromaCBP != 2 {
+								t.Fatalf("%s first IDR chroma coded_block_pattern = %d; want 2", name, chromaCBP)
+							}
+							qpDeltaContexts, err := NewCABACIMBQPDeltaContexts(int(26 + pps.PicInitQpMinus26 + slice.SliceQPDelta))
+							if err != nil {
+								t.Fatalf("%s IDR mb_qp_delta contexts: %v", name, err)
+							}
+							qpDelta, err := cabac.DecodeMBQPDelta(&qpDeltaContexts, 0)
+							if err != nil {
+								t.Fatalf("%s first IDR mb_qp_delta: %v", name, err)
+							}
+							wantQPDelta := map[string]int{"high42-1080p.mp4": -1, "high52-2160p.mp4": 0}[name]
+							if qpDelta != wantQPDelta {
+								t.Fatalf("%s first IDR mb_qp_delta = %d; want %d", name, qpDelta, wantQPDelta)
+							}
+							codedBlockFlagContexts, err := NewCABACILuma4x4CodedBlockFlagContexts(int(26+pps.PicInitQpMinus26+slice.SliceQPDelta) + qpDelta)
+							if err != nil {
+								t.Fatalf("%s IDR luma coded-block-flag contexts: %v", name, err)
+							}
+							codedBlockFlag, err := cabac.DecodeLuma4x4CodedBlockFlag(0, 0, &codedBlockFlagContexts)
+							if err != nil {
+								t.Fatalf("%s first IDR luma coded_block_flag: %v", name, err)
+							}
+							wantCodedBlockFlag := map[string]bool{"high42-1080p.mp4": true, "high52-2160p.mp4": false}[name]
+							if codedBlockFlag != wantCodedBlockFlag {
+								t.Fatalf("%s first IDR luma coded_block_flag = %t; want %t", name, codedBlockFlag, wantCodedBlockFlag)
+							}
+						}
 					}
 					pictureTypes[uint32(slice.SliceType%5)]++
 				}

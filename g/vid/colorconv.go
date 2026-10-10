@@ -85,5 +85,22 @@ func (c PixelConverter) ConvertYUV420ToRGB(width, height int, y, u, v []byte, yS
 			outData[offset+2] = b
 		}
 	}
-	return NewPixelBuffer(width, height, outStride, 3, ColorRangeFull, outData)
+	return NewPixelBuffer(width, height, outStride, 3, c.ColorRange, outData)
+}
+
+func (frame Yuv420Frame) ConvertToRGB(colorRange PixelColorRange) (PixelBuffer, error) {
+	if frame.Width <= 0 || frame.Height <= 0 {
+		return PixelBuffer{}, fmt.Errorf("%w: YUV frame dimensions must be positive", ErrPixelConverter)
+	}
+	if frame.YStride < frame.Width || frame.UStride < (frame.Width+1)/2 || frame.VStride < (frame.Width+1)/2 {
+		return PixelBuffer{}, fmt.Errorf("%w: YUV frame strides are too small for the decoded geometry", ErrPixelConverter)
+	}
+	if len(frame.Y) < frame.YStride*frame.Height || len(frame.U) < frame.UStride*((frame.Height+1)/2) || len(frame.V) < frame.VStride*((frame.Height+1)/2) {
+		return PixelBuffer{}, fmt.Errorf("%w: YUV frame planes are too short for the decoded geometry", ErrPixelConverter)
+	}
+	converter, err := NewPixelConverter(colorRange)
+	if err != nil {
+		return PixelBuffer{}, err
+	}
+	return converter.ConvertYUV420ToRGB(frame.Width, frame.Height, frame.Y, frame.U, frame.V, frame.YStride, frame.UStride, frame.VStride)
 }

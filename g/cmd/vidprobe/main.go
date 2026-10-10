@@ -147,10 +147,57 @@ func prefixedOutput(output, prefix string) string {
 	return filepath.Join(filepath.Dir(output), prefix+filepath.Base(output))
 }
 
+func writeOutputFile(output string, payload []byte) error {
+	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(output), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	if _, err := temp.Write(payload); err != nil {
+		temp.Close()
+		os.Remove(tempPath)
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		os.Remove(tempPath)
+		return err
+	}
+	if err := os.Rename(tempPath, output); err != nil {
+		os.Remove(tempPath)
+		return err
+	}
+	return nil
+}
+
 func extractFrame(input string, frame int, output string) error {
 	extension := strings.ToLower(filepath.Ext(output))
 	if extension != ".png" && extension != ".jpg" {
 		return errors.New("--output must end in .png or .jpg")
 	}
-	return errors.New("native frame extraction is not available in this build; ffmpeg is no longer invoked by the extraction path")
+	if extension == ".jpg" {
+		return errors.New("JPEG output is not implemented yet; native PNG extraction is enabled")
+	}
+	reader, err := vid.OpenVideoSampleReader(input)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	decoder := vid.NewH264Decoder(reader)
+	decoded, err := decoder.DecodeFrame(uint64(frame))
+	if err != nil {
+		return err
+	}
+	rgb, err := decoded.ConvertToRGB(vid.ColorRangeLimited)
+	if err != nil {
+		return err
+	}
+	encoder := vid.NewPNGEncoder()
+	payload, err := encoder.Encode(rgb)
+	if err != nil {
+		return err
+	}
+	return writeOutputFile(output, payload)
 }

@@ -58,6 +58,28 @@ _PROFILES_WITH_CHROMA_DEPTH_SYNTAX = {
     144,
     244,
 }
+_SUPPORTED_PROFILE_IDS = {66, 77, 88, 100, 110, 122, 244}
+
+
+def _validate_supported_sps(info: SPSInfo) -> None:
+    if info.profile_idc not in _SUPPORTED_PROFILE_IDS:
+        raise SPSParseError(
+            f"unsupported SPS profile_idc {info.profile_idc}: only progressive 8-bit 4:2:0 profiles are supported"
+        )
+    if info.chroma_format_idc != 1:
+        raise SPSParseError(
+            f"unsupported SPS chroma_format_idc {info.chroma_format_idc}: only 4:2:0 is supported"
+        )
+    if info.separate_colour_plane:
+        raise SPSParseError("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported")
+    if info.bit_depth_luma != 8 or info.bit_depth_chroma != 8:
+        raise SPSParseError(
+            f"unsupported SPS bit depth {info.bit_depth_luma}/{info.bit_depth_chroma}: only 8-bit 4:2:0 is supported"
+        )
+    if not info.frame_mbs_only or info.mb_adaptive_frame_field:
+        raise SPSParseError(
+            "unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported"
+        )
 
 
 def parse_sps(nal: bytes) -> SPSInfo:
@@ -173,7 +195,7 @@ def parse_sps(nal: bytes) -> SPSInfo:
         crop,
     )
 
-    return SPSInfo(
+    info = SPSInfo(
         profile_idc=profile_idc,
         constraint_flags=constraint_flags,
         level_idc=level_idc,
@@ -196,6 +218,8 @@ def parse_sps(nal: bytes) -> SPSInfo:
         direct_8x8_inference=direct_8x8_inference,
         **dimensions,
     )
+    _validate_supported_sps(info)
+    return info
 
 
 def _read_byte(reader: BitReader, field: str) -> int:

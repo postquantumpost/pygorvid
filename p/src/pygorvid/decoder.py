@@ -1,7 +1,5 @@
 """Decoder contract for the native H.264 frame pipeline."""
 
-import json
-import subprocess
 from typing import Optional
 
 from .reconstruction import (
@@ -11,6 +9,7 @@ from .reconstruction import (
     ReferencePictureBuffer,
     Yuv420Frame,
 )
+from .sps import SPSParseError, parse_sps
 from .videosamplereader import VideoSampleReader
 
 
@@ -18,12 +17,12 @@ class DecoderError(NotImplementedError):
     """Raised while the native decoder pipeline is still under construction."""
 
 
-class H264Decoder:
-    """Placeholder for the native H.264 decoder contract.
+class DecoderReferenceMismatch(DecoderError):
+    """Raised when cached frame data does not match the expected reference bytes."""
 
-    The actual decode pipeline is intentionally left unimplemented until the
-    reference-picture management and picture reconstruction state are ready.
-    """
+
+class H264Decoder:
+    """Own H.264 sample and picture state for the native decode pipeline."""
 
     def __init__(self, sample_reader: Optional[VideoSampleReader] = None):
         self.sample_reader = sample_reader
@@ -32,6 +31,7 @@ class H264Decoder:
         self.picture_parameter_sets = ()
         self.reference_picture_buffer = ReferencePictureBuffer()
         self.presentation_order_buffer = PresentationOrderBuffer(0)
+        self.unsupported_feature = False
 
         if sample_reader is not None:
             sample_count = getattr(sample_reader, "sample_count", None)
@@ -45,6 +45,12 @@ class H264Decoder:
                 self.picture_parameter_sets = tuple(
                     getattr(configuration, "picture_parameter_sets", ())
                 )
+                for nal in self.sequence_parameter_sets:
+                    try:
+                        parse_sps(nal)
+                    except (SPSParseError, ValueError):
+                        self.unsupported_feature = True
+                        break
 
     def store_reference_picture(self, reference: ReferencePicture, frame: Yuv420Frame) -> None:
         self.reference_picture_buffer.store(reference, frame)
@@ -52,9 +58,36 @@ class H264Decoder:
     def queue_presentation(self, picture: PresentationPicture) -> PresentationPicture | None:
         return self.presentation_order_buffer.push(picture)
 
+    def first_sync_sample_index(self) -> int:
+        if self.sample_reader is None:
+            raise DecoderError("H.264 decoder requires a sample reader")
+        sync_index = getattr(self.sample_reader, "first_sync_sample_index", None)
+        if callable(sync_index):
+            value = sync_index()
+            if value is None:
+                raise DecoderError("sample reader does not expose a first sync sample")
+            return int(value)
+        sample_count = getattr(self.sample_reader, "sample_count", None)
+        if sample_count is None:
+            raise DecoderError("H.264 decoder requires a sample reader")
+        for index in range(sample_count):
+            sample = getattr(self.sample_reader, "_samples", [])[index]
+            if getattr(sample, "is_sync", True):
+                return index
+        raise DecoderError("sample reader does not expose a first sync sample")
+
+    def decode_first_sync_frame(self) -> Yuv420Frame:
+        return self.decode_frame(self.first_sync_sample_index())
+
+    def validate_first_sync_frame_reference(self, y_plane: bytes, u_plane: bytes, v_plane: bytes) -> None:
+        index = self.first_sync_sample_index()
+        self.validate_reference_frame(index, y_plane, u_plane, v_plane)
+
     def decode_frame(self, index: int) -> Yuv420Frame:
         if self.sample_reader is None:
             raise DecoderError("H.264 decoder requires a sample reader")
+        if self.unsupported_feature:
+            raise DecoderError("unsupported H.264 profile, chroma format, bit depth, or interlace mode")
 
         sample_count = getattr(self.sample_reader, "sample_count", None)
         if sample_count is None:
@@ -64,72 +97,39 @@ class H264Decoder:
 
         cached = self.reference_picture_buffer.get(index)
         if cached is not None:
-            return cached.frame
-
-        sample_path = getattr(self.sample_reader, "path", None)
-        if not sample_path:
-            raise DecoderError(f"H.264 decoder is not implemented yet; frame {index} cannot be decoded")
-
-        probe = json.loads(
-            subprocess.check_output(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-select_streams",
-                    "v:0",
-                    "-show_entries",
-                    "stream=width,height",
-                    "-of",
-                    "json",
-                    str(sample_path),
-                ],
-                text=True,
+            frame = cached.frame
+            try:
+                y_plane = frame.luma_plane_bytes()
+                u_plane = frame.u_plane_bytes()
+                v_plane = frame.v_plane_bytes()
+            except ValueError as error:
+                raise DecoderError("cached frame has an invalid YUV plane layout") from error
+            chroma_width = frame.width // 2 + frame.width % 2
+            return Yuv420Frame(
+                frame.width,
+                frame.height,
+                frame.width,
+                chroma_width,
+                chroma_width,
+                y_plane,
+                u_plane,
+                v_plane,
             )
-        )
-        stream = probe["streams"][0]
-        width = int(stream["width"])
-        height = int(stream["height"])
-        raw = subprocess.check_output(
-            [
-                "ffmpeg",
-                "-nostdin",
-                "-v",
-                "error",
-                "-i",
-                str(sample_path),
-                "-vf",
-                f"select=eq(n\\,{index})",
-                "-frames:v",
-                "1",
-                "-pix_fmt",
-                "yuv420p",
-                "-f",
-                "rawvideo",
-                "pipe:1",
-            ]
-        )
-        expected_size = width * height * 3 // 2
-        if len(raw) != expected_size:
-            raise DecoderError(f"decoded frame length mismatch: expected {expected_size}, found {len(raw)}")
 
-        y_size = width * height
-        chroma_size = y_size // 4
-        frame = Yuv420Frame(
-            width,
-            height,
-            width,
-            width // 2,
-            width // 2,
-            raw[:y_size],
-            raw[y_size : y_size + chroma_size],
-            raw[y_size + chroma_size :],
+        raise DecoderError(
+            "H.264 decoder is not implemented yet; native decode does not invoke ffprobe or ffmpeg"
         )
-        self.reference_picture_buffer.store(
-            ReferencePicture(index, frame_num=index, picture_order_cnt=index), frame
-        )
-        self.presentation_order_buffer.push(PresentationPicture(index, frame))
-        return frame
+
+    def validate_reference_frame(
+        self, index: int, y_plane: bytes, u_plane: bytes, v_plane: bytes
+    ) -> None:
+        frame = self.decode_frame(index)
+        if not frame.luma_plane_matches(y_plane):
+            raise DecoderReferenceMismatch("decoded frame does not match the reference frame data")
+        if frame.u_plane_bytes() != bytes(u_plane):
+            raise DecoderReferenceMismatch("decoded frame does not match the reference frame data")
+        if frame.v_plane_bytes() != bytes(v_plane):
+            raise DecoderReferenceMismatch("decoded frame does not match the reference frame data")
 
 
-__all__ = ["DecoderError", "H264Decoder"]
+__all__ = ["DecoderError", "DecoderReferenceMismatch", "H264Decoder"]

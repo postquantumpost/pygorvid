@@ -1666,6 +1666,64 @@ func TestReconstructChroma420MacroblockAddsResidualAndClips(t *testing.T) {
 	}
 }
 
+func TestYuv420FrameBuilderPlacesCroppedRasterMacroblocks(t *testing.T) {
+	builder, err := NewYuv420FrameBuilder(2, 2, 2, 2, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := builder.Finish(); !errors.Is(err, ErrYuv420MacroblockAssembly) {
+		t.Fatalf("incomplete frame error = %v; want macroblock assembly error", err)
+	}
+	if err := builder.PlaceMacroblock(4, [256]uint8{}, [64]uint8{}, [64]uint8{}); !errors.Is(err, ErrYuv420MacroblockAssembly) {
+		t.Fatalf("out-of-range macroblock error = %v; want macroblock assembly error", err)
+	}
+	for address, values := range [][3]uint8{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {10, 11, 12}} {
+		var yBlock [256]uint8
+		var uBlock, vBlock [64]uint8
+		for index := range yBlock {
+			yBlock[index] = values[0]
+		}
+		for index := range uBlock {
+			uBlock[index] = values[1]
+			vBlock[index] = values[2]
+		}
+		if err := builder.PlaceMacroblock(address, yBlock, uBlock, vBlock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := builder.PlaceMacroblock(0, [256]uint8{}, [64]uint8{}, [64]uint8{}); !errors.Is(err, ErrYuv420MacroblockAssembly) {
+		t.Fatalf("duplicate macroblock error = %v; want macroblock assembly error", err)
+	}
+	frame, err := builder.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Width != 28 || frame.Height != 28 || frame.YStride != 28 || frame.UStride != 14 || frame.VStride != 14 {
+		t.Fatalf("cropped frame layout = %dx%d strides %d/%d/%d; want 28x28 strides 28/14/14", frame.Width, frame.Height, frame.YStride, frame.UStride, frame.VStride)
+	}
+	for _, test := range []struct {
+		plane        []uint8
+		stride, x, y int
+		want         uint8
+	}{
+		{frame.Y, frame.YStride, 0, 0, 1},
+		{frame.Y, frame.YStride, 14, 0, 4},
+		{frame.Y, frame.YStride, 0, 14, 7},
+		{frame.Y, frame.YStride, 27, 27, 10},
+		{frame.U, frame.UStride, 0, 0, 2},
+		{frame.U, frame.UStride, 7, 0, 5},
+		{frame.V, frame.VStride, 0, 7, 9},
+		{frame.V, frame.VStride, 13, 13, 12},
+	} {
+		if got := test.plane[test.y*test.stride+test.x]; got != test.want {
+			t.Errorf("plane sample at (%d,%d) = %d; want %d", test.x, test.y, got, test.want)
+		}
+	}
+	if _, err := NewYuv420FrameBuilder(1, 1, 1, 0, 0, 0); !errors.Is(err, ErrYuv420MacroblockAssembly) {
+		t.Fatalf("odd 4:2:0 crop error = %v; want macroblock assembly error", err)
+	}
+}
+
 func TestDeriveChromaQPCMatchesTable815(t *testing.T) {
 	qpcForQPI := [22]int{29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39}
 	for qpy := 0; qpy <= 51; qpy++ {

@@ -63,37 +63,16 @@ def make_sps(
     return make_raw_sps(profile, constraints, level, syntax_bits)
 
 
-@pytest.mark.parametrize(
-    ("nal", "expected"),
-    [
-        (
-            make_sps(66, 0, 30, "1"),
-            (66, 0, 30, 0, 1, False, 8, 8),
-        ),
-        (
-            make_sps(100, 0, 42, "1" + "010" + "1" + "1"),
-            (100, 0, 42, 0, 1, False, 8, 8),
-        ),
-        (
-            make_sps(100, 0, 50, "1" + "00100" + "1" + "011" + "010"),
-            (100, 0, 50, 0, 3, True, 10, 9),
-        ),
-    ],
-    ids=["baseline-defaults", "high-420-8bit", "high-444-separate-10bit"],
-)
-def test_parse_sps_profile_chroma_and_bit_depth(nal, expected):
-    info = parse_sps(nal)
-    assert (
-        info.profile_idc,
-        info.constraint_flags,
-        info.level_idc,
-        info.sps_id,
-        info.chroma_format_idc,
-        info.separate_colour_plane,
-        info.bit_depth_luma,
-        info.bit_depth_chroma,
-    ) == expected
-    assert (info.coded_width, info.coded_height, info.width, info.height) == (16, 16, 16, 16)
+def test_parse_sps_rejects_unsupported_feature_set():
+    unsupported_cases = [
+        make_sps(118, 0, 42, "1" + "010" + "1" + "1"),
+        make_sps(100, 0, 42, "1" + "00100" + "1" + "011" + "010"),
+        make_sps(100, 0, 42, "1" + "010" + "1" + "1", frame_mbs_only=False),
+        make_sps(100, 0, 42, "1" + "00100" + "1" + "1" + "1"),
+    ]
+    for nal in unsupported_cases:
+        with pytest.raises(SPSParseError, match="unsupported|not supported"):
+            parse_sps(nal)
 
 
 def test_parse_sps_dimensions_and_crop_units():
@@ -109,32 +88,32 @@ def test_parse_sps_dimensions_and_crop_units():
     )
     assert info.frame_crop_bottom == 8
 
-    field_coded = make_sps(66, 0, 30, "1", 0, 0, False, (0, 0, 0, 1))
-    info = parse_sps(field_coded)
-    assert (info.coded_width, info.coded_height, info.width, info.height) == (16, 32, 16, 28)
-    assert info.frame_crop_bottom == 4
-    assert not info.frame_mbs_only
+    progressive_cropped = make_sps(100, 0, 42, "1" + "010" + "1" + "1", 0, 1, True, (0, 0, 0, 1))
+    info = parse_sps(progressive_cropped)
+    assert (info.coded_width, info.coded_height, info.width, info.height) == (16, 32, 16, 30)
+    assert info.frame_crop_bottom == 2
+    assert info.frame_mbs_only
     assert not info.mb_adaptive_frame_field
     assert info.direct_8x8_inference
 
 
 def test_parse_sps_reference_and_frame_flags():
     nal = make_sps(
-        66,
+        100,
         0,
-        30,
-        "1",
-        frame_mbs_only=False,
+        42,
+        "1" + "010" + "1" + "1",
+        frame_mbs_only=True,
         max_num_ref_frames=4,
         gaps_allowed=True,
-        mb_adaptive_frame_field=True,
+        mb_adaptive_frame_field=False,
         direct_8x8_inference=False,
     )
     info = parse_sps(nal)
     assert info.max_num_ref_frames == 4
     assert info.gaps_in_frame_num_value_allowed
-    assert not info.frame_mbs_only
-    assert info.mb_adaptive_frame_field
+    assert info.frame_mbs_only
+    assert not info.mb_adaptive_frame_field
     assert not info.direct_8x8_inference
 
 

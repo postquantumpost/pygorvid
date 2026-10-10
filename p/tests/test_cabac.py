@@ -6,6 +6,10 @@ from pygorvid import (
     CABACContextModel,
     CABACError,
     CABACTerminatedError,
+    initialize_i_intra_chroma_pred_mode_contexts,
+    initialize_i_intra4x4_pred_mode_contexts,
+    initialize_i_intra_mb_type_contexts,
+    initialize_i_transform_size_8x8_contexts,
     place_chroma4x4_scan_levels,
     place_luma4x4_scan_levels,
 )
@@ -76,6 +80,43 @@ def test_context_initialization_matches_signed_shift_boundary_vectors():
     ):
         model = CABACContextModel(m, n, slice_qpy)
         assert (model.state_index, model.mps) == expected
+
+
+def test_i_intra_mb_type_contexts_match_table_912():
+    contexts = initialize_i_intra_mb_type_contexts(26)
+    assert [(model.state_index, model.mps) for model in contexts] == [
+        (46, False), (6, False), (14, True), (17, True),
+        (2, True), (20, False), (11, False), (1, False),
+    ]
+    for slice_qpy in (-1, 52):
+        with pytest.raises(CABACError, match="initialization value"):
+            initialize_i_intra_mb_type_contexts(slice_qpy)
+
+
+def test_i_intra_prediction_contexts_match_tables_916_and_917():
+    mode_contexts = initialize_i_intra4x4_pred_mode_contexts(26)
+    assert [(model.state_index, model.mps) for model in mode_contexts] == [
+        (1, False), (2, True)
+    ]
+    transform_contexts = initialize_i_transform_size_8x8_contexts(26)
+    assert [(model.state_index, model.mps) for model in transform_contexts] == [
+        (7, True), (17, True), (26, True)
+    ]
+    for initialize in (
+        initialize_i_intra_chroma_pred_mode_contexts,
+        initialize_i_intra4x4_pred_mode_contexts,
+        initialize_i_transform_size_8x8_contexts,
+    ):
+        for slice_qpy in (-1, 52):
+            with pytest.raises(CABACError, match="initialization value"):
+                initialize(slice_qpy)
+
+
+def test_i_intra_chroma_pred_mode_contexts_match_table_917():
+    contexts = initialize_i_intra_chroma_pred_mode_contexts(26)
+    assert [(model.state_index, model.mps) for model in contexts] == [
+        (4, True), (28, True), (33, True), (3, False)
+    ]
 
 
 def test_context_update_flips_mps_at_state_zero_and_saturates():
