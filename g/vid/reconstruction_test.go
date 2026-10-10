@@ -188,6 +188,35 @@ func TestFilterLumaWeakEdgeMatchesNormativeVectors(t *testing.T) {
 	}
 }
 
+func TestFilterChromaWeakEdgeUsesChromaStyleClippingAndPreservesSideSamples(t *testing.T) {
+	tests := []struct {
+		name    string
+		samples ChromaEdgeSamples
+		tc0     uint8
+		want    ChromaEdgeSamples
+	}{
+		{
+			name:    "updates p0 and q0",
+			samples: ChromaEdgeSamples{P0: 100, P1: 98, Q0: 104, Q1: 105},
+			tc0:     0,
+			want:    ChromaEdgeSamples{P0: 101, P1: 98, Q0: 103, Q1: 105},
+		},
+		{
+			name:    "clips using tc0 plus one",
+			samples: ChromaEdgeSamples{P0: 110, P1: 110, Q0: 100, Q1: 100},
+			tc0:     2,
+			want:    ChromaEdgeSamples{P0: 107, P1: 110, Q0: 103, Q1: 100},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := FilterChromaWeakEdge(test.samples, test.tc0); got != test.want {
+				t.Fatalf("filtered samples = %+v; want %+v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestFilterLumaStrongEdgeSelectsStrongAndFallbackBranches(t *testing.T) {
 	strong := LumaStrongEdgeSamples{P0: 100, P1: 99, P2: 98, P3: 97, Q0: 102, Q1: 103, Q2: 104, Q3: 105}
 	if got, want := FilterLumaStrongEdge(strong, 16, 5), (LumaEdgeSamples{P0: 100, P1: 100, P2: 99, Q0: 102, Q1: 102, Q2: 103}); got != want {
@@ -1482,6 +1511,201 @@ func TestInverseScaleLuma4x4RejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+func TestInverseScaleChromaDC2x2MatchesQPCVectors(t *testing.T) {
+	tests := []struct {
+		name        string
+		transformed [4]int64
+		qpc         int
+		want        [4]int64
+	}{
+		{name: "low QP signed rounding", transformed: [4]int64{32, -32, 1, -1}, qpc: 0, want: [4]int64{10, -10, 0, -1}},
+		{name: "QP quotient zero", transformed: [4]int64{1, 2, -1, -2}, qpc: 5, want: [4]int64{0, 1, -1, -2}},
+		{name: "QP quotient one", transformed: [4]int64{1, 2, -1, -2}, qpc: 6, want: [4]int64{0, 1, -1, -2}},
+		{name: "maximum chroma QP", transformed: [4]int64{1, 2, -1, -2}, qpc: 39, want: [4]int64{28, 56, -28, -56}},
+		{name: "minimum and maximum 8-bit DC input", transformed: [4]int64{-(1 << 15), (1 << 15) - 1}, qpc: 0, want: [4]int64{-10240, 10239}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := inverseScaleChromaDC2x2(test.transformed, test.qpc)
+			if err != nil || got != test.want {
+				t.Fatalf("inverseScaleChromaDC2x2(%v, %d) = %v, %v; want %v", test.transformed, test.qpc, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestInverseScaleChromaDC2x2RejectsOutOfRangeValues(t *testing.T) {
+	for _, qpc := range []int{-1, 40, 51} {
+		if _, err := inverseScaleChromaDC2x2([4]int64{}, qpc); !errors.Is(err, ErrInverseScaleQPCOutOfRange) {
+			t.Errorf("qpc %d error = %v; want QP range error", qpc, err)
+		}
+	}
+	for _, coefficient := range []int64{-(1 << 15) - 1, 1 << 15} {
+		if _, err := inverseScaleChromaDC2x2([4]int64{coefficient}, 0); !errors.Is(err, ErrInverseScaleChromaDCOutOfRange) {
+			t.Errorf("coefficient %d error = %v; want chroma DC range error", coefficient, err)
+		}
+	}
+	if _, err := inverseScaleChromaDC2x2([4]int64{(1 << 15) - 1}, 39); !errors.Is(err, ErrInverseScaleChromaDCOutOfRange) {
+		t.Errorf("scaled coefficient error = %v; want chroma DC range error", err)
+	}
+}
+
+func TestInverseScaleChroma4x4PreservesDCAndScalesAC(t *testing.T) {
+	var levels [16]int32
+	var scalingList [16]uint8
+	for index := range levels {
+		levels[index] = 1
+		scalingList[index] = 16
+	}
+	levels[0] = 7
+	for _, qpc := range []int{0, 23, 24, 39} {
+		got, err := inverseScaleChroma4x4(levels, scalingList, qpc)
+		if err != nil {
+			t.Fatalf("inverseScaleChroma4x4(qpc=%d) error = %v", qpc, err)
+		}
+		lumaLevels := levels
+		lumaLevels[0] = 1
+		want, err := inverseScaleLuma4x4(lumaLevels, scalingList, qpc)
+		if err != nil {
+			t.Fatalf("inverseScaleLuma4x4(qpc=%d) error = %v", qpc, err)
+		}
+		want[0] = 7
+		if got != want {
+			t.Errorf("inverseScaleChroma4x4(qpc=%d) = %v; want %v", qpc, got, want)
+		}
+	}
+}
+
+func TestInverseScaleChroma4x4RejectsOutOfRangeValues(t *testing.T) {
+	var levels [16]int32
+	var scalingList [16]uint8
+	for index := range scalingList {
+		scalingList[index] = 16
+	}
+	for _, qpc := range []int{-1, 40, 51} {
+		if _, err := inverseScaleChroma4x4(levels, scalingList, qpc); !errors.Is(err, ErrInverseScaleQPCOutOfRange) {
+			t.Errorf("qpc %d error = %v; want QPC range error", qpc, err)
+		}
+	}
+	for _, level := range []int32{-(1 << 15) - 1, 1 << 15} {
+		levels[1] = level
+		if _, err := inverseScaleChroma4x4(levels, scalingList, 0); !errors.Is(err, ErrInverseScaleChromaBlockRange) {
+			t.Errorf("level %d error = %v; want chroma block range error", level, err)
+		}
+	}
+	levels[1] = (1 << 15) - 1
+	if _, err := inverseScaleChroma4x4(levels, scalingList, 39); !errors.Is(err, ErrInverseScaleChromaBlockRange) {
+		t.Errorf("scaled output error = %v; want chroma block range error", err)
+	}
+	scalingList[3] = 0
+	if _, err := inverseScaleChroma4x4([16]int32{}, scalingList, 0); !errors.Is(err, ErrInverseScaleListZero) {
+		t.Errorf("zero scaling weight error = %v; want scaling-list error", err)
+	}
+}
+
+func TestReconstructChroma4x4ResidualComposesDCACScalingAndTransform(t *testing.T) {
+	scalingList := [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}
+	var acScanLevels [15]int32
+	acScanLevels[0] = 1
+	got, err := reconstructChroma4x4Residual(0, acScanLevels, scalingList, 24)
+	want := [16]int64{
+		3, 2, -2, -3,
+		3, 2, -2, -3,
+		3, 2, -2, -3,
+		3, 2, -2, -3,
+	}
+	if err != nil || got != want {
+		t.Fatalf("reconstructed chroma residual = %v, %v; want %v", got, err, want)
+	}
+
+	zeroAC := [15]int32{}
+	got, err = reconstructChroma4x4Residual(64, zeroAC, scalingList, 0)
+	if err != nil || got != [16]int64{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1} {
+		t.Fatalf("DC-only chroma residual = %v, %v; want sixteen ones", got, err)
+	}
+}
+
+func TestReconstructChroma4x4ResidualRejectsInvalidDCAndQPC(t *testing.T) {
+	scalingList := [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}
+	if _, err := reconstructChroma4x4Residual(1<<15, [15]int32{}, scalingList, 0); !errors.Is(err, ErrInverseScaleChromaBlockRange) {
+		t.Errorf("out-of-range DC error = %v; want chroma block range error", err)
+	}
+	if _, err := reconstructChroma4x4Residual(0, [15]int32{}, scalingList, 40); !errors.Is(err, ErrInverseScaleQPCOutOfRange) {
+		t.Errorf("out-of-range QPC error = %v; want QPC range error", err)
+	}
+}
+
+func TestAssembleChroma420ResidualMacroblockUsesBlockRasterOrder(t *testing.T) {
+	var blocks [4][16]int64
+	for blockIndex := range blocks {
+		for sampleIndex := range blocks[blockIndex] {
+			blocks[blockIndex][sampleIndex] = int64(blockIndex*16 + sampleIndex)
+		}
+	}
+	want := [64]int64{
+		0, 1, 2, 3, 16, 17, 18, 19,
+		4, 5, 6, 7, 20, 21, 22, 23,
+		8, 9, 10, 11, 24, 25, 26, 27,
+		12, 13, 14, 15, 28, 29, 30, 31,
+		32, 33, 34, 35, 48, 49, 50, 51,
+		36, 37, 38, 39, 52, 53, 54, 55,
+		40, 41, 42, 43, 56, 57, 58, 59,
+		44, 45, 46, 47, 60, 61, 62, 63,
+	}
+	if got := assembleChroma420ResidualMacroblock(blocks); got != want {
+		t.Fatalf("assembled chroma residual macroblock = %v; want %v", got, want)
+	}
+}
+
+func TestReconstructChroma420MacroblockAddsResidualAndClips(t *testing.T) {
+	prediction := [64]uint8{10, 250, 100, 100}
+	residual := [64]int64{-20, 20, -25, 25}
+	want := [64]uint8{0, 255, 75, 125}
+	if got := reconstructChroma420Macroblock(prediction, residual); got != want {
+		t.Fatalf("reconstructed chroma samples = %v; want %v", got, want)
+	}
+}
+
+func TestDeriveChromaQPCMatchesTable815(t *testing.T) {
+	qpcForQPI := [22]int{29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39}
+	for qpy := 0; qpy <= 51; qpy++ {
+		want := qpy
+		if qpy >= 30 {
+			want = qpcForQPI[qpy-30]
+		}
+		if got, err := deriveChromaQPC(qpy, 0); err != nil || got != want {
+			t.Errorf("deriveChromaQPC(%d, 0) = %d, %v; want %d, nil", qpy, got, err, want)
+		}
+	}
+}
+
+func TestDeriveChromaQPCClipsQPIAndRejectsInvalidInputs(t *testing.T) {
+	tests := []struct {
+		qpy, offset, want int
+	}{
+		{qpy: 0, offset: -12, want: 0},
+		{qpy: 0, offset: 12, want: 12},
+		{qpy: 26, offset: -12, want: 14},
+		{qpy: 26, offset: 12, want: 35},
+		{qpy: 51, offset: 12, want: 39},
+	}
+	for _, test := range tests {
+		if got, err := deriveChromaQPC(test.qpy, test.offset); err != nil || got != test.want {
+			t.Errorf("deriveChromaQPC(%d, %d) = %d, %v; want %d, nil", test.qpy, test.offset, got, err, test.want)
+		}
+	}
+	for _, qpy := range []int{-1, 52} {
+		if _, err := deriveChromaQPC(qpy, 0); !errors.Is(err, ErrChromaQPYOutOfRange) {
+			t.Errorf("QPY %d error = %v; want QPY range error", qpy, err)
+		}
+	}
+	for _, offset := range []int{-13, 13} {
+		if _, err := deriveChromaQPC(26, offset); !errors.Is(err, ErrChromaQPIndexOffsetOutOfRange) {
+			t.Errorf("QP offset %d error = %v; want offset range error", offset, err)
+		}
+	}
+}
+
 func TestInverseScaleLuma8x8ScalingClassesAndQPRounding(t *testing.T) {
 	var levels [64]int32
 	var scalingList [64]uint8
@@ -1831,6 +2055,131 @@ func TestPredictLumaIntra8x8DCReferenceAvailabilityAndRounding(t *testing.T) {
 				t.Fatalf("DC intra prediction = %v; want every sample %d", got, test.want)
 			}
 		})
+	}
+}
+
+func TestPredictChromaIntra8x8DCQuadrantsAndReferenceFallbacks(t *testing.T) {
+	top := [8]uint8{10, 20, 30, 40, 50, 60, 70, 80}
+	left := [8]uint8{1, 3, 5, 7, 9, 11, 13, 15}
+	expandQuadrants := func(values [4]uint8) [64]uint8 {
+		var prediction [64]uint8
+		for row := 0; row < 8; row++ {
+			for column := 0; column < 8; column++ {
+				prediction[row*8+column] = values[(row/4)*2+column/4]
+			}
+		}
+		return prediction
+	}
+	tests := []struct {
+		name string
+		top  *[8]uint8
+		left *[8]uint8
+		want [4]uint8
+	}{
+		{name: "both edges use quadrant sums", top: &top, left: &left, want: [4]uint8{15, 65, 12, 39}},
+		{name: "top only", top: &top, want: [4]uint8{25, 65, 25, 65}},
+		{name: "left only", left: &left, want: [4]uint8{4, 4, 12, 12}},
+		{name: "neither edge uses midpoint", want: [4]uint8{128, 128, 128, 128}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got, want := predictChromaIntra8x8DC(test.top, test.left), expandQuadrants(test.want); got != want {
+				t.Fatalf("chroma DC prediction = %v; want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestPredictChromaIntra8x8HorizontalRepeatsLeftSamplesAcrossRows(t *testing.T) {
+	left := [8]uint8{0, 17, 63, 129, 190, 220, 254, 255}
+	var expected [64]uint8
+	for row, sample := range left {
+		for column := 0; column < 8; column++ {
+			expected[row*8+column] = sample
+		}
+	}
+	if got := predictChromaIntra8x8Horizontal(left); got != expected {
+		t.Fatalf("chroma horizontal prediction = %v; want %v", got, expected)
+	}
+}
+
+func TestPredictChromaIntra8x8VerticalRepeatsTopSamplesDownColumns(t *testing.T) {
+	top := [8]uint8{0, 17, 63, 129, 190, 220, 254, 255}
+	var expected [64]uint8
+	for row := 0; row < 8; row++ {
+		copy(expected[row*8:row*8+8], top[:])
+	}
+	if got := predictChromaIntra8x8Vertical(top); got != expected {
+		t.Fatalf("chroma vertical prediction = %v; want %v", got, expected)
+	}
+}
+
+func TestPredictChromaIntra8x8PlaneGradientAndClipping(t *testing.T) {
+	top := [8]uint8{82, 84, 86, 88, 90, 92, 94, 96}
+	left := [8]uint8{83, 86, 89, 92, 95, 98, 101, 104}
+	for row := 0; row < 8; row++ {
+		for column := 0; column < 8; column++ {
+			want := uint8(85 + 2*column + 3*row)
+			if got := predictChromaIntra8x8Plane(top, left, 80)[row*8+column]; got != want {
+				t.Fatalf("plane prediction[%d][%d] = %d; want %d", row, column, got, want)
+			}
+		}
+	}
+
+	var highTop, highLeft [8]uint8
+	for index := range highTop {
+		highTop[index], highLeft[index] = 255, 255
+	}
+	if got := predictChromaIntra8x8Plane(highTop, highLeft, 0)[63]; got != 255 {
+		t.Fatalf("high plane prediction = %d; want clipped value 255", got)
+	}
+	var lowTop, lowLeft [8]uint8
+	if got := predictChromaIntra8x8Plane(lowTop, lowLeft, 255)[63]; got != 0 {
+		t.Fatalf("low plane prediction = %d; want clipped value 0", got)
+	}
+}
+
+func TestPredictChromaIntra8x8SelectsDecodedMode(t *testing.T) {
+	top := [8]uint8{82, 84, 86, 88, 90, 92, 94, 96}
+	left := [8]uint8{83, 86, 89, 92, 95, 98, 101, 104}
+	topLeft := uint8(80)
+	for mode, want := range [4][64]uint8{
+		predictChromaIntra8x8DC(&top, &left),
+		predictChromaIntra8x8Horizontal(left),
+		predictChromaIntra8x8Vertical(top),
+		predictChromaIntra8x8Plane(top, left, topLeft),
+	} {
+		if got, err := predictChromaIntra8x8(uint8(mode), &top, &left, &topLeft); err != nil || got != want {
+			t.Errorf("chroma mode %d prediction = %v, %v; want %v", mode, got, err, want)
+		}
+	}
+	var midpoint [64]uint8
+	for index := range midpoint {
+		midpoint[index] = 128
+	}
+	if got, err := predictChromaIntra8x8(0, nil, nil, nil); err != nil || got != midpoint {
+		t.Fatalf("chroma DC mode without edges = %v, %v; want midpoint", got, err)
+	}
+}
+
+func TestPredictChromaIntra8x8RejectsInvalidModeAndMissingEdges(t *testing.T) {
+	top, left := [8]uint8{}, [8]uint8{}
+	topLeft := uint8(0)
+	for _, test := range []struct {
+		mode      uint8
+		top, left *[8]uint8
+		topLeft   *uint8
+		want      error
+	}{
+		{mode: 1, top: &top, want: ErrChromaIntraPredictionReference},
+		{mode: 2, left: &left, want: ErrChromaIntraPredictionReference},
+		{mode: 3, top: &top, left: &left, want: ErrChromaIntraPredictionReference},
+		{mode: 3, top: &top, topLeft: &topLeft, want: ErrChromaIntraPredictionReference},
+		{mode: 4, want: ErrChromaIntraPredictionMode},
+	} {
+		if _, err := predictChromaIntra8x8(test.mode, test.top, test.left, test.topLeft); !errors.Is(err, test.want) {
+			t.Errorf("mode %d error = %v; want %v", test.mode, err, test.want)
+		}
 	}
 }
 

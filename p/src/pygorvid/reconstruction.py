@@ -6,11 +6,16 @@ from enum import Enum
 from typing import Optional
 
 
+from .cabac import place_chroma4x4_scan_levels
 from .slice import RefPicListModification
 
 
 class InverseScaleError(ValueError):
     """Raised when inverse-scaling inputs are invalid."""
+
+
+class ChromaQPError(ValueError):
+    """Raised when chroma quantization-parameter inputs are invalid."""
 
 
 class InverseTransformError(ValueError):
@@ -92,6 +97,30 @@ class LumaEdgeSamples:
     q0: int
     q1: int
     q2: int
+
+
+@dataclass(frozen=True)
+class ChromaEdgeSamples:
+    p0: int
+    p1: int
+    q0: int
+    q1: int
+
+
+def filter_chroma_weak_edge(samples: ChromaEdgeSamples, tc0: int) -> ChromaEdgeSamples:
+    """Apply the 8-bit chroma weak-edge equations for bS 1-3."""
+    if not isinstance(samples, ChromaEdgeSamples):
+        raise DeblockingError("chroma weak-edge filter inputs are invalid")
+    values = (samples.p0, samples.p1, samples.q0, samples.q1, tc0)
+    if any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255 for value in values):
+        raise DeblockingError("chroma weak-edge filter inputs are invalid")
+
+    tc = tc0 + 1
+    delta = (((samples.q0 - samples.p0) << 2) + (samples.p1 - samples.q1) + 4) >> 3
+    delta = min(tc, max(-tc, delta))
+    p0 = min(255, max(0, samples.p0 + delta))
+    q0 = min(255, max(0, samples.q0 - delta))
+    return ChromaEdgeSamples(p0, samples.p1, q0, samples.q1)
 
 
 def filter_luma_weak_edge(
@@ -1650,6 +1679,10 @@ _INVERSE_SCALE_4X4_FACTORS = (
     (16, 20, 25),
     (18, 23, 29),
 )
+_CHROMA_QPC_FROM_QPI = (
+    29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
+    36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+)
 _INVERSE_SCALE_8X8_FACTORS = (
     (20, 18, 32, 19, 25, 24),
     (22, 19, 35, 21, 28, 26),
@@ -1668,6 +1701,23 @@ _INVERSE_SCALE_8X8_CLASSES = (
     4, 5, 2, 5, 4, 5, 2, 5,
     3, 1, 5, 1, 3, 1, 5, 1,
 )
+
+
+def derive_chroma_qpc(qpy: int, qp_offset: int) -> int:
+    """Derive 8-bit chroma QPC from luma QPY and a PPS component offset."""
+    if not isinstance(qpy, int) or isinstance(qpy, bool) or not 0 <= qpy <= 51:
+        raise ChromaQPError("QPY is outside [0,51]")
+    if (
+        not isinstance(qp_offset, int)
+        or isinstance(qp_offset, bool)
+        or not -12 <= qp_offset <= 12
+    ):
+        raise ChromaQPError("chroma QP index offset is outside [-12,12]")
+
+    qpi = min(51, max(0, qpy + qp_offset))
+    if qpi < 30:
+        return qpi
+    return _CHROMA_QPC_FROM_QPI[qpi - 30]
 
 
 def inverse_scale_luma4x4(
@@ -1703,6 +1753,125 @@ def inverse_scale_luma4x4(
             rounding = 1 << (shift - 1)
             scaled.append((value + rounding) >> shift)
     return scaled
+
+
+def inverse_scale_chroma_dc2x2(transformed: Sequence[int], qpc: int) -> list[int]:
+    """Scale 4:2:0 chroma DC values for an 8-bit QP-prime C."""
+    if not isinstance(qpc, int) or isinstance(qpc, bool) or not 0 <= qpc <= 39:
+        raise InverseScaleError("inverse scaling QPC is outside [0,39]")
+    if len(transformed) != 4 or any(
+        not isinstance(coefficient, int)
+        or isinstance(coefficient, bool)
+        or not -(1 << 15) <= coefficient < (1 << 15)
+        for coefficient in transformed
+    ):
+        raise InverseScaleError("chroma DC values must contain four signed 16-bit integers")
+
+    factor = _INVERSE_SCALE_4X4_FACTORS[qpc % 6][0]
+    shift = qpc // 6
+    scaled = [(coefficient * factor << shift) >> 5 for coefficient in transformed]
+    if any(not -(1 << 15) <= coefficient < (1 << 15) for coefficient in scaled):
+        raise InverseScaleError("scaled chroma DC value is outside the signed 16-bit range")
+    return scaled
+
+
+def inverse_scale_chroma4x4(
+    levels: Sequence[int], scaling_list: Sequence[int], qpc: int
+) -> list[int]:
+    """Preserve scaled chroma DC and inverse-scale 4x4 chroma AC levels."""
+    if not isinstance(qpc, int) or isinstance(qpc, bool) or not 0 <= qpc <= 39:
+        raise InverseScaleError("inverse scaling QPC is outside [0,39]")
+    if len(levels) != 16 or any(
+        not isinstance(level, int)
+        or isinstance(level, bool)
+        or not -(1 << 15) <= level < (1 << 15)
+        for level in levels
+    ):
+        raise InverseScaleError("chroma block levels must contain 16 signed 16-bit integers")
+    if len(scaling_list) != 16 or any(
+        not isinstance(weight, int)
+        or isinstance(weight, bool)
+        or not 1 <= weight <= 255
+        for weight in scaling_list
+    ):
+        raise InverseScaleError("inverse scaling list must contain 16 values in [1,255]")
+
+    scaled = [levels[0]] + [0] * 15
+    for index in range(1, 16):
+        row, column = divmod(index, 4)
+        factor_class = row % 2 + column % 2
+        value = levels[index] * _INVERSE_SCALE_4X4_FACTORS[qpc % 6][factor_class] * scaling_list[index]
+        if qpc >= 24:
+            scaled[index] = value << (qpc // 6 - 4)
+        else:
+            shift = 4 - qpc // 6
+            rounding = 1 << (shift - 1)
+            scaled[index] = (value + rounding) >> shift
+        if not -(1 << 15) <= scaled[index] < (1 << 15):
+            raise InverseScaleError("scaled chroma block value is outside the signed 16-bit range")
+    return scaled
+
+
+def reconstruct_chroma4x4_residual(
+    dc_c: int,
+    ac_scan_levels: Sequence[int],
+    scaling_list: Sequence[int],
+    qpc: int,
+) -> list[int]:
+    """Assemble, scale, and inverse-transform one 4x4 chroma residual block."""
+    if not isinstance(qpc, int) or isinstance(qpc, bool) or not 0 <= qpc <= 39:
+        raise InverseScaleError("inverse scaling QPC is outside [0,39]")
+    if (
+        not isinstance(dc_c, int)
+        or isinstance(dc_c, bool)
+        or not -(1 << 15) <= dc_c < (1 << 15)
+    ):
+        raise InverseScaleError("chroma block DC must be a signed 16-bit integer")
+
+    scan_levels = place_chroma4x4_scan_levels(dc_c, list(ac_scan_levels))
+    scaled = inverse_scale_chroma4x4(scan_levels, scaling_list, qpc)
+    return inverse_transform_luma4x4(scaled)
+
+
+def assemble_chroma420_residual_macroblock(blocks: Sequence[Sequence[int]]) -> list[int]:
+    """Place four raster-ordered 4x4 residual blocks into an 8x8 chroma macroblock."""
+    if not isinstance(blocks, Sequence) or isinstance(blocks, (str, bytes)) or len(blocks) != 4:
+        raise InverseTransformError("4:2:0 chroma macroblock requires four 4x4 residual blocks")
+    if any(
+        not isinstance(block, Sequence)
+        or isinstance(block, (str, bytes))
+        or len(block) != 16
+        or any(not isinstance(sample, int) or isinstance(sample, bool) for sample in block)
+        for block in blocks
+    ):
+        raise InverseTransformError("each chroma residual block must contain 16 integer samples")
+
+    macroblock = [0] * 64
+    for block_index, block in enumerate(blocks):
+        x_offset = block_index % 2 * 4
+        y_offset = block_index // 2 * 4
+        for row in range(4):
+            destination = (y_offset + row) * 8 + x_offset
+            macroblock[destination : destination + 4] = block[row * 4 : row * 4 + 4]
+    return macroblock
+
+
+def reconstruct_chroma420_macroblock(
+    prediction: Sequence[int], residual: Sequence[int]
+) -> list[int]:
+    """Add chroma residuals to prediction samples and apply 8-bit Clip1C."""
+    if len(prediction) != 64 or any(
+        not isinstance(sample, int)
+        or isinstance(sample, bool)
+        or not 0 <= sample <= 255
+        for sample in prediction
+    ):
+        raise IntraPredictionError("chroma prediction must contain 64 8-bit samples")
+    if len(residual) != 64 or any(
+        not isinstance(sample, int) or isinstance(sample, bool) for sample in residual
+    ):
+        raise InverseTransformError("chroma residual must contain 64 integer samples")
+    return [min(255, max(0, predicted + value)) for predicted, value in zip(prediction, residual)]
 
 
 def inverse_scale_luma8x8(
@@ -1892,6 +2061,76 @@ def predict_luma_intra8x8_dc(
     else:
         dc_value = 128
     return [dc_value] * 64
+
+
+def predict_chroma_intra8x8_dc(
+    top: Optional[Sequence[int]] = None, left: Optional[Sequence[int]] = None
+) -> list[int]:
+    """Predict 4:2:0 chroma DC with the normative 4x4 quadrant edge fallbacks."""
+    for name, references in (("top", top), ("left", left)):
+        if references is not None and (
+            len(references) != 8
+            or any(
+                not isinstance(sample, int)
+                or isinstance(sample, bool)
+                or not 0 <= sample <= 255
+                for sample in references
+            )
+        ):
+            raise IntraPredictionError(
+                f"chroma DC 8x8 prediction requires eight 8-bit filtered {name} samples"
+            )
+
+    def edge_average(samples: Sequence[int], offset: int) -> int:
+        return (sum(samples[offset : offset + 4]) + 2) >> 2
+
+    quadrant_values = [128] * 4
+    for block_row in range(2):
+        for block_column in range(2):
+            index = block_row * 2 + block_column
+            top_offset = block_column * 4
+            left_offset = block_row * 4
+            if block_row == 0 and block_column == 1:
+                if top is not None:
+                    quadrant_values[index] = edge_average(top, top_offset)
+                elif left is not None:
+                    quadrant_values[index] = edge_average(left, left_offset)
+            elif block_row == 1 and block_column == 0:
+                if left is not None:
+                    quadrant_values[index] = edge_average(left, left_offset)
+                elif top is not None:
+                    quadrant_values[index] = edge_average(top, top_offset)
+            elif top is not None and left is not None:
+                quadrant_values[index] = (
+                    sum(top[top_offset : top_offset + 4])
+                    + sum(left[left_offset : left_offset + 4])
+                    + 4
+                ) >> 3
+            elif left is not None:
+                quadrant_values[index] = edge_average(left, left_offset)
+            elif top is not None:
+                quadrant_values[index] = edge_average(top, top_offset)
+
+    prediction = [0] * 64
+    for row in range(8):
+        for column in range(8):
+            quadrant_index = (row // 4) * 2 + column // 4
+            prediction[row * 8 + column] = quadrant_values[quadrant_index]
+    return prediction
+
+
+def predict_chroma_intra8x8_horizontal(left: Sequence[int]) -> list[int]:
+    """Repeat each filtered left sample across one row of an 8x8 chroma block."""
+    if len(left) != 8 or any(
+        not isinstance(sample, int)
+        or isinstance(sample, bool)
+        or not 0 <= sample <= 255
+        for sample in left
+    ):
+        raise IntraPredictionError(
+            "chroma horizontal 8x8 prediction requires eight 8-bit filtered left samples"
+        )
+    return [sample for sample in left for _ in range(8)]
 
 
 def predict_luma_intra8x8_diagonal_down_left(top: Sequence[int]) -> list[int]:
@@ -2158,6 +2397,85 @@ def predict_luma_intra4x4_horizontal(left: Sequence[int]) -> list[int]:
         raise IntraPredictionError("horizontal 4x4 prediction requires four 8-bit left samples")
     return [sample for sample in left for _ in range(4)]
 
+def predict_chroma_intra8x8_vertical(top: Sequence[int]) -> list[int]:
+    """Repeat each filtered top sample down one column of an 8x8 chroma block."""
+    if len(top) != 8 or any(
+        not isinstance(sample, int)
+        or isinstance(sample, bool)
+        or not 0 <= sample <= 255
+        for sample in top
+    ):
+        raise IntraPredictionError(
+            "chroma vertical 8x8 prediction requires eight 8-bit filtered top samples"
+        )
+    return list(top) * 8
+
+
+def predict_chroma_intra8x8_plane(
+    top: Sequence[int], left: Sequence[int], top_left: int
+) -> list[int]:
+    """Predict 4:2:0 chroma with the normative 8x8 plane gradients and clipping."""
+    for name, references in (("top", top), ("left", left)):
+        if len(references) != 8 or any(
+            not isinstance(sample, int)
+            or isinstance(sample, bool)
+            or not 0 <= sample <= 255
+            for sample in references
+        ):
+            raise IntraPredictionError(
+                f"chroma plane prediction requires eight 8-bit filtered {name} samples"
+            )
+    if (
+        not isinstance(top_left, int)
+        or isinstance(top_left, bool)
+        or not 0 <= top_left <= 255
+    ):
+        raise IntraPredictionError(
+            "chroma plane prediction requires an 8-bit filtered top-left sample"
+        )
+
+    horizontal_gradient = 0
+    vertical_gradient = 0
+    for index in range(4):
+        top_reference = top_left if index == 3 else top[2 - index]
+        left_reference = top_left if index == 3 else left[2 - index]
+        horizontal_gradient += (index + 1) * (top[4 + index] - top_reference)
+        vertical_gradient += (index + 1) * (left[4 + index] - left_reference)
+    a = 16 * (top[7] + left[7])
+    b = (34 * horizontal_gradient + 32) >> 6
+    c = (34 * vertical_gradient + 32) >> 6
+
+    prediction = [0] * 64
+    for row in range(8):
+        for column in range(8):
+            value = (a + b * (column - 3) + c * (row - 3) + 16) >> 5
+            prediction[row * 8 + column] = min(255, max(0, value))
+    return prediction
+
+
+def predict_chroma_intra8x8(
+    mode: int,
+    top: Optional[Sequence[int]] = None,
+    left: Optional[Sequence[int]] = None,
+    top_left: Optional[int] = None,
+) -> list[int]:
+    """Dispatch 4:2:0 chroma intra modes 0=DC, 1=Horizontal, 2=Vertical, 3=Plane."""
+    if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 3:
+        raise IntraPredictionError("chroma intra prediction mode is outside [0,3]")
+    if mode == 0:
+        return predict_chroma_intra8x8_dc(top, left)
+    if mode == 1:
+        if left is None:
+            raise IntraPredictionError("left edge is required for chroma horizontal prediction")
+        return predict_chroma_intra8x8_horizontal(left)
+    if mode == 2:
+        if top is None:
+            raise IntraPredictionError("top edge is required for chroma vertical prediction")
+        return predict_chroma_intra8x8_vertical(top)
+    if top is None or left is None or top_left is None:
+        raise IntraPredictionError("top, left, and top-left edges are required for chroma plane prediction")
+    return predict_chroma_intra8x8_plane(top, left, top_left)
+
 
 def predict_luma_intra4x4_dc(
     top: Optional[Sequence[int]] = None, left: Optional[Sequence[int]] = None
@@ -2404,6 +2722,23 @@ def inverse_transform_luma4x4(coefficients: Sequence[int]) -> list[int]:
         for row, value in enumerate(transformed):
             residual[row * 4 + column] = (value + 32) >> 6
     return residual
+
+
+def inverse_transform_chroma_dc2x2(coefficients: Sequence[int]) -> list[int]:
+    """Apply the 4:2:0 2x2 inverse Hadamard transform to chroma DC levels."""
+    if len(coefficients) != 4 or any(
+        not isinstance(coefficient, int) or isinstance(coefficient, bool)
+        for coefficient in coefficients
+    ):
+        raise InverseTransformError("inverse chroma DC transform requires four integer coefficients")
+
+    c00, c01, c10, c11 = coefficients
+    return [
+        c00 + c01 + c10 + c11,
+        c00 - c01 + c10 - c11,
+        c00 + c01 - c10 - c11,
+        c00 - c01 - c10 + c11,
+    ]
 
 
 def inverse_transform_luma8x8(coefficients: Sequence[int]) -> list[int]:

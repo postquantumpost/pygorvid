@@ -1196,6 +1196,14 @@ func TestCABACPlaceLuma4x4ScanLevels(t *testing.T) {
 	}
 }
 
+func TestCABACPlaceChroma4x4ScanLevels(t *testing.T) {
+	acScanLevels := [15]int32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	wantRaster := [16]int32{100, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15}
+	if got := PlaceChroma4x4ScanLevels(100, acScanLevels); got != wantRaster {
+		t.Fatalf("chroma raster levels = %v; want %v", got, wantRaster)
+	}
+}
+
 func TestCABACLuma4x4ResidualBlockAndRollback(t *testing.T) {
 	makeSignificanceContexts := func() [15]CABACContextModel {
 		contexts := [15]CABACContextModel{}

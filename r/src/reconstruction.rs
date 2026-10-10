@@ -284,6 +284,31 @@ pub struct LumaStrongEdgeSamples {
     pub q3: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChromaEdgeSamples {
+    pub p0: u8,
+    pub p1: u8,
+    pub q0: u8,
+    pub q1: u8,
+}
+
+pub fn filter_chroma_weak_edge(samples: ChromaEdgeSamples, tc0: u8) -> ChromaEdgeSamples {
+    let tc = i32::from(tc0) + 1;
+    let delta = (((i32::from(samples.q0) - i32::from(samples.p0)) << 2)
+        + (i32::from(samples.p1) - i32::from(samples.q1))
+        + 4)
+        >> 3;
+    let delta = delta.clamp(-tc, tc);
+    let p0 = (i32::from(samples.p0) + delta).clamp(0, 255) as u8;
+    let q0 = (i32::from(samples.q0) - delta).clamp(0, 255) as u8;
+    ChromaEdgeSamples {
+        p0,
+        p1: samples.p1,
+        q0,
+        q1: samples.q1,
+    }
+}
+
 pub fn filter_luma_weak_edge(samples: LumaEdgeSamples, beta: u8, tc0: u8) -> LumaEdgeSamples {
     let ap = samples.p2.abs_diff(samples.p0);
     let aq = samples.q2.abs_diff(samples.q0);
@@ -1654,6 +1679,9 @@ const INVERSE_SCALE_4X4_FACTORS: [[i64; 3]; 6] = [
     [16, 20, 25],
     [18, 23, 29],
 ];
+const CHROMA_QPC_FROM_QPI: [i32; 22] = [
+    29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+];
 const INVERSE_SCALE_8X8_FACTORS: [[i64; 6]; 6] = [
     [20, 18, 32, 19, 25, 24],
     [22, 19, 35, 21, 28, 26],
@@ -1697,6 +1725,145 @@ pub fn inverse_scale_luma4x4(
         };
     }
     Ok(scaled)
+}
+
+/// Applies H.264 4:2:0 chroma DC inverse scaling for 8-bit QP-prime C.
+pub fn inverse_scale_chroma_dc2x2(transformed: &[i64; 4], qpc: i32) -> io::Result<[i64; 4]> {
+    if !(0..=39).contains(&qpc) {
+        return Err(invalid("inverse scaling QPC is outside [0,39]"));
+    }
+    if transformed
+        .iter()
+        .any(|coefficient| !(-(1_i64 << 15)..=(1_i64 << 15) - 1).contains(coefficient))
+    {
+        return Err(invalid(
+            "chroma DC values must be in the signed 16-bit range",
+        ));
+    }
+
+    let factor = INVERSE_SCALE_4X4_FACTORS[(qpc % 6) as usize][0];
+    let shift = qpc / 6;
+    let mut scaled = [0_i64; 4];
+    for (index, coefficient) in transformed.iter().enumerate() {
+        let value = (coefficient * factor << shift) >> 5;
+        if !(-(1_i64 << 15)..=(1_i64 << 15) - 1).contains(&value) {
+            return Err(invalid(
+                "scaled chroma DC value is outside the signed 16-bit range",
+            ));
+        }
+        scaled[index] = value;
+    }
+    Ok(scaled)
+}
+
+/// Preserves pre-scaled chroma DC and inverse-scales the 4x4 chroma AC levels.
+pub fn inverse_scale_chroma4x4(
+    levels: &[i32; 16],
+    scaling_list: &[u8; 16],
+    qpc: i32,
+) -> io::Result<[i64; 16]> {
+    if !(0..=39).contains(&qpc) {
+        return Err(invalid("inverse scaling QPC is outside [0,39]"));
+    }
+    if levels
+        .iter()
+        .any(|level| !(-(1_i32 << 15)..=(1_i32 << 15) - 1).contains(level))
+    {
+        return Err(invalid(
+            "chroma block levels must be in the signed 16-bit range",
+        ));
+    }
+    if scaling_list.contains(&0) {
+        return Err(invalid("inverse scaling list contains zero"));
+    }
+
+    let mut scaled = [0_i64; 16];
+    scaled[0] = i64::from(levels[0]);
+    for index in 1..16 {
+        let row = index / 4;
+        let column = index % 4;
+        let factor_class = row % 2 + column % 2;
+        let value = i64::from(levels[index])
+            * INVERSE_SCALE_4X4_FACTORS[(qpc % 6) as usize][factor_class]
+            * i64::from(scaling_list[index]);
+        scaled[index] = if qpc >= 24 {
+            value << (qpc / 6 - 4)
+        } else {
+            let shift = 4 - qpc / 6;
+            let rounding = 1_i64 << (shift - 1);
+            (value + rounding) >> shift
+        };
+        if !(-(1_i64 << 15)..=(1_i64 << 15) - 1).contains(&scaled[index]) {
+            return Err(invalid(
+                "scaled chroma block value is outside the signed 16-bit range",
+            ));
+        }
+    }
+    Ok(scaled)
+}
+
+/// Assembles, scales, and inverse-transforms one 4x4 chroma residual block.
+pub fn reconstruct_chroma4x4_residual(
+    dc_c: i64,
+    ac_scan_levels: &[i32; 15],
+    scaling_list: &[u8; 16],
+    qpc: i32,
+) -> io::Result<[i64; 16]> {
+    if !(0..=39).contains(&qpc) {
+        return Err(invalid("inverse scaling QPC is outside [0,39]"));
+    }
+    if !(-(1_i64 << 15)..=(1_i64 << 15) - 1).contains(&dc_c) {
+        return Err(invalid(
+            "chroma block DC must be in the signed 16-bit range",
+        ));
+    }
+
+    let dc_level = i32::try_from(dc_c)
+        .map_err(|_| invalid("chroma block DC must be in the signed 16-bit range"))?;
+    let levels = crate::place_chroma4x4_scan_levels(dc_level, ac_scan_levels);
+    let scaled = inverse_scale_chroma4x4(&levels, scaling_list, qpc)?;
+    Ok(inverse_transform_luma4x4(&scaled))
+}
+
+/// Places four raster-ordered 4x4 residual blocks into an 8x8 4:2:0 chroma macroblock.
+pub fn assemble_chroma420_residual_macroblock(blocks: &[[i64; 16]; 4]) -> [i64; 64] {
+    let mut macroblock = [0_i64; 64];
+    for (block_index, block) in blocks.iter().enumerate() {
+        let x_offset = block_index % 2 * 4;
+        let y_offset = block_index / 2 * 4;
+        for row in 0..4 {
+            let destination = (y_offset + row) * 8 + x_offset;
+            macroblock[destination..destination + 4].copy_from_slice(&block[row * 4..row * 4 + 4]);
+        }
+    }
+    macroblock
+}
+
+/// Adds chroma residual samples to prediction and applies 8-bit Clip1C.
+pub fn reconstruct_chroma420_macroblock(prediction: &[u8; 64], residual: &[i64; 64]) -> [u8; 64] {
+    let mut samples = [0_u8; 64];
+    for index in 0..64 {
+        samples[index] = i64::from(prediction[index])
+            .saturating_add(residual[index])
+            .clamp(0, 255) as u8;
+    }
+    samples
+}
+
+/// Derives 8-bit chroma QPC from luma QPY and a PPS component offset.
+pub fn derive_chroma_qpc(qpy: i32, qp_offset: i32) -> io::Result<i32> {
+    if !(0..=51).contains(&qpy) {
+        return Err(invalid("chroma QPY is outside [0,51]"));
+    }
+    if !(-12..=12).contains(&qp_offset) {
+        return Err(invalid("chroma QP index offset is outside [-12,12]"));
+    }
+
+    let qpi = (qpy + qp_offset).clamp(0, 51);
+    if qpi < 30 {
+        return Ok(qpi);
+    }
+    Ok(CHROMA_QPC_FROM_QPI[(qpi - 30) as usize])
 }
 
 /// Applies H.264 8x8 luma inverse scaling to raster-order coefficient levels.
@@ -1756,6 +1923,17 @@ pub fn inverse_transform_luma4x4(coefficients: &[i64; 16]) -> [i64; 16] {
         }
     }
     residual
+}
+
+/// Applies the 4:2:0 2x2 inverse Hadamard transform to chroma DC levels.
+pub fn inverse_transform_chroma_dc2x2(coefficients: &[i32; 4]) -> [i64; 4] {
+    let [c00, c01, c10, c11] = coefficients.map(i64::from);
+    [
+        c00 + c01 + c10 + c11,
+        c00 - c01 + c10 - c11,
+        c00 + c01 - c10 - c11,
+        c00 - c01 - c10 + c11,
+    ]
 }
 
 /// Transforms 8x8 dequantized raster-order coefficients into residual samples.
@@ -1903,6 +2081,127 @@ pub fn predict_luma_intra8x8_dc(top: Option<&[u8; 8]>, left: Option<&[u8; 8]>) -
         (None, None) => 128,
     } as u8;
     [dc_value; 64]
+}
+
+/// Predicts 4:2:0 chroma DC using quadrant-specific edge fallbacks.
+pub fn predict_chroma_intra8x8_dc(top: Option<&[u8; 8]>, left: Option<&[u8; 8]>) -> [u8; 64] {
+    let average_edge = |samples: &[u8; 8], offset: usize| -> u32 {
+        (samples[offset..offset + 4]
+            .iter()
+            .map(|sample| u32::from(*sample))
+            .sum::<u32>()
+            + 2)
+            >> 2
+    };
+    let mut prediction = [0_u8; 64];
+    for block_row in 0..2 {
+        for block_column in 0..2 {
+            let top_offset = block_column * 4;
+            let left_offset = block_row * 4;
+            let dc_value = match (block_row, block_column) {
+                (0, 1) => top
+                    .map(|samples| average_edge(samples, top_offset))
+                    .or_else(|| left.map(|samples| average_edge(samples, left_offset)))
+                    .unwrap_or(128),
+                (1, 0) => left
+                    .map(|samples| average_edge(samples, left_offset))
+                    .or_else(|| top.map(|samples| average_edge(samples, top_offset)))
+                    .unwrap_or(128),
+                _ => match (top, left) {
+                    (Some(top), Some(left)) => {
+                        let sum = top[top_offset..top_offset + 4]
+                            .iter()
+                            .chain(&left[left_offset..left_offset + 4])
+                            .map(|sample| u32::from(*sample))
+                            .sum::<u32>();
+                        (sum + 4) >> 3
+                    }
+                    (Some(top), None) => average_edge(top, top_offset),
+                    (None, Some(left)) => average_edge(left, left_offset),
+                    (None, None) => 128,
+                },
+            } as u8;
+            for row in block_row * 4..block_row * 4 + 4 {
+                prediction[row * 8 + block_column * 4..row * 8 + block_column * 4 + 4]
+                    .fill(dc_value);
+            }
+        }
+    }
+    prediction
+}
+
+/// Predicts 4:2:0 chroma horizontally by repeating each left sample across one row.
+pub fn predict_chroma_intra8x8_horizontal(left: &[u8; 8]) -> [u8; 64] {
+    let mut prediction = [0_u8; 64];
+    for (row, sample) in left.iter().enumerate() {
+        prediction[row * 8..row * 8 + 8].fill(*sample);
+    }
+    prediction
+}
+
+/// Predicts 4:2:0 chroma vertically by repeating each top sample down one column.
+pub fn predict_chroma_intra8x8_vertical(top: &[u8; 8]) -> [u8; 64] {
+    predict_luma_intra8x8_vertical(top)
+}
+
+/// Predicts 4:2:0 chroma with the normative 8x8 plane gradients and clipping.
+pub fn predict_chroma_intra8x8_plane(top: &[u8; 8], left: &[u8; 8], top_left: u8) -> [u8; 64] {
+    let mut horizontal_gradient = 0_i32;
+    let mut vertical_gradient = 0_i32;
+    for index in 0..4 {
+        let weight = (index + 1) as i32;
+        let top_reference = if index == 3 {
+            i32::from(top_left)
+        } else {
+            i32::from(top[2 - index])
+        };
+        let left_reference = if index == 3 {
+            i32::from(top_left)
+        } else {
+            i32::from(left[2 - index])
+        };
+        horizontal_gradient += weight * (i32::from(top[4 + index]) - top_reference);
+        vertical_gradient += weight * (i32::from(left[4 + index]) - left_reference);
+    }
+
+    let a = 16 * (i32::from(top[7]) + i32::from(left[7]));
+    let b = (34 * horizontal_gradient + 32) >> 6;
+    let c = (34 * vertical_gradient + 32) >> 6;
+    let mut prediction = [0_u8; 64];
+    for row in 0..8 {
+        for column in 0..8 {
+            let value = (a + b * (column as i32 - 3) + c * (row as i32 - 3) + 16) >> 5;
+            prediction[row * 8 + column] = value.clamp(0, 255) as u8;
+        }
+    }
+    prediction
+}
+
+/// Dispatches 4:2:0 chroma intra prediction modes 0=DC, 1=Horizontal, 2=Vertical, and 3=Plane.
+pub fn predict_chroma_intra8x8(
+    mode: u8,
+    top: Option<&[u8; 8]>,
+    left: Option<&[u8; 8]>,
+    top_left: Option<u8>,
+) -> io::Result<[u8; 64]> {
+    match mode {
+        0 => Ok(predict_chroma_intra8x8_dc(top, left)),
+        1 => left
+            .map(predict_chroma_intra8x8_horizontal)
+            .ok_or_else(|| invalid("left edge is required for chroma horizontal prediction")),
+        2 => top
+            .map(predict_chroma_intra8x8_vertical)
+            .ok_or_else(|| invalid("top edge is required for chroma vertical prediction")),
+        3 => match (top, left, top_left) {
+            (Some(top), Some(left), Some(top_left)) => {
+                Ok(predict_chroma_intra8x8_plane(top, left, top_left))
+            }
+            _ => Err(invalid(
+                "top, left, and top-left edges are required for chroma plane prediction",
+            )),
+        },
+        _ => Err(invalid("chroma intra prediction mode is outside [0,3]")),
+    }
 }
 
 /// Interpolates an 8x8 luma block from 16 filtered top references.
@@ -2722,6 +3021,45 @@ mod tests {
         ];
         for (samples, beta, tc0, expected) in vectors {
             assert_eq!(filter_luma_weak_edge(samples, beta, tc0), expected);
+        }
+    }
+
+    #[test]
+    fn filters_chroma_weak_edges_with_chroma_style_clipping_and_preserves_side_samples() {
+        let vectors = [
+            (
+                ChromaEdgeSamples {
+                    p0: 100,
+                    p1: 98,
+                    q0: 104,
+                    q1: 105,
+                },
+                0,
+                ChromaEdgeSamples {
+                    p0: 101,
+                    p1: 98,
+                    q0: 103,
+                    q1: 105,
+                },
+            ),
+            (
+                ChromaEdgeSamples {
+                    p0: 110,
+                    p1: 110,
+                    q0: 100,
+                    q1: 100,
+                },
+                2,
+                ChromaEdgeSamples {
+                    p0: 107,
+                    p1: 110,
+                    q0: 103,
+                    q1: 100,
+                },
+            ),
+        ];
+        for (samples, tc0, expected) in vectors {
+            assert_eq!(filter_chroma_weak_edge(samples, tc0), expected);
         }
     }
 
@@ -4696,6 +5034,231 @@ mod tests {
     }
 
     #[test]
+    fn inverse_scale_chroma_dc2x2_matches_qpc_vectors() {
+        let vectors = [
+            ([32, -32, 1, -1], 0, [10, -10, 0, -1]),
+            ([1, 2, -1, -2], 5, [0, 1, -1, -2]),
+            ([1, 2, -1, -2], 6, [0, 1, -1, -2]),
+            ([1, 2, -1, -2], 39, [28, 56, -28, -56]),
+            (
+                [-(1_i64 << 15), (1_i64 << 15) - 1, 0, 0],
+                0,
+                [-10240, 10239, 0, 0],
+            ),
+        ];
+        for (transformed, qpc, expected) in vectors {
+            assert_eq!(
+                inverse_scale_chroma_dc2x2(&transformed, qpc).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_scale_chroma_dc2x2_rejects_out_of_range_values() {
+        for qpc in [-1, 40, 51] {
+            assert_eq!(
+                inverse_scale_chroma_dc2x2(&[0; 4], qpc).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+        }
+        for coefficient in [-(1_i64 << 15) - 1, 1_i64 << 15] {
+            assert_eq!(
+                inverse_scale_chroma_dc2x2(&[coefficient, 0, 0, 0], 0)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidData
+            );
+        }
+        assert_eq!(
+            inverse_scale_chroma_dc2x2(&[(1_i64 << 15) - 1, 0, 0, 0], 39)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn inverse_scale_chroma4x4_preserves_dc_and_scales_ac() {
+        let mut levels = [1_i32; 16];
+        levels[0] = 7;
+        let scaling_list = [16_u8; 16];
+        for qpc in [0, 23, 24, 39] {
+            let mut luma_levels = levels;
+            luma_levels[0] = 1;
+            let mut expected = inverse_scale_luma4x4(&luma_levels, &scaling_list, qpc).unwrap();
+            expected[0] = 7;
+            assert_eq!(
+                inverse_scale_chroma4x4(&levels, &scaling_list, qpc).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_scale_chroma4x4_applies_custom_ac_weights() {
+        let mut levels = [0_i32; 16];
+        levels[0] = 5;
+        levels[1] = -1;
+        levels[2] = 1;
+        let mut scaling_list = [16_u8; 16];
+        scaling_list[1] = 8;
+        let mut expected = inverse_scale_luma4x4(&levels, &scaling_list, 0).unwrap();
+        expected[0] = 5;
+        assert_eq!(
+            inverse_scale_chroma4x4(&levels, &scaling_list, 0).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn inverse_scale_chroma4x4_rejects_out_of_range_values() {
+        let levels = [0_i32; 16];
+        let scaling_list = [16_u8; 16];
+        for qpc in [-1, 40, 51] {
+            assert_eq!(
+                inverse_scale_chroma4x4(&levels, &scaling_list, qpc)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidData
+            );
+        }
+        for level in [-(1_i32 << 15) - 1, 1_i32 << 15] {
+            let mut invalid_levels = levels;
+            invalid_levels[1] = level;
+            assert_eq!(
+                inverse_scale_chroma4x4(&invalid_levels, &scaling_list, 0)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidData
+            );
+        }
+        let mut excessive_output = levels;
+        excessive_output[1] = (1_i32 << 15) - 1;
+        assert_eq!(
+            inverse_scale_chroma4x4(&excessive_output, &scaling_list, 39)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        let mut zero_weight = scaling_list;
+        zero_weight[1] = 0;
+        assert_eq!(
+            inverse_scale_chroma4x4(&levels, &zero_weight, 0)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn reconstruct_chroma4x4_residual_composes_scan_scaling_and_transform() {
+        let mut ac_scan_levels = [0_i32; 15];
+        ac_scan_levels[0] = 1;
+        let scaling_list = [16_u8; 16];
+        assert_eq!(
+            reconstruct_chroma4x4_residual(0, &ac_scan_levels, &scaling_list, 24).unwrap(),
+            [3, 2, -2, -3, 3, 2, -2, -3, 3, 2, -2, -3, 3, 2, -2, -3]
+        );
+        assert_eq!(
+            reconstruct_chroma4x4_residual(64, &[0; 15], &scaling_list, 0).unwrap(),
+            [1_i64; 16]
+        );
+    }
+
+    #[test]
+    fn reconstruct_chroma4x4_residual_rejects_invalid_dc_and_qpc() {
+        let scaling_list = [16_u8; 16];
+        assert_eq!(
+            reconstruct_chroma4x4_residual(1_i64 << 15, &[0; 15], &scaling_list, 0)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(
+            reconstruct_chroma4x4_residual(0, &[0; 15], &scaling_list, 40)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn assembles_chroma420_residual_macroblock_in_block_raster_order() {
+        let mut blocks = [[0_i64; 16]; 4];
+        for (block_index, block) in blocks.iter_mut().enumerate() {
+            for (sample_index, sample) in block.iter_mut().enumerate() {
+                *sample = (block_index * 16 + sample_index) as i64;
+            }
+        }
+        assert_eq!(
+            assemble_chroma420_residual_macroblock(&blocks),
+            [
+                0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23, 8, 9, 10, 11, 24, 25, 26,
+                27, 12, 13, 14, 15, 28, 29, 30, 31, 32, 33, 34, 35, 48, 49, 50, 51, 36, 37, 38, 39,
+                52, 53, 54, 55, 40, 41, 42, 43, 56, 57, 58, 59, 44, 45, 46, 47, 60, 61, 62, 63,
+            ]
+        );
+    }
+
+    #[test]
+    fn reconstructs_chroma420_prediction_plus_residual_with_clip1c() {
+        let mut prediction = [0_u8; 64];
+        prediction[..4].copy_from_slice(&[10, 250, 100, 100]);
+        let mut residual = [0_i64; 64];
+        residual[..4].copy_from_slice(&[-20, 20, -25, 25]);
+        residual[4] = i64::MAX;
+        residual[5] = i64::MIN;
+        let mut expected = [0_u8; 64];
+        expected[..5].copy_from_slice(&[0, 255, 75, 125, 255]);
+        assert_eq!(
+            reconstruct_chroma420_macroblock(&prediction, &residual),
+            expected
+        );
+    }
+
+    #[test]
+    fn derives_chroma_qpc_from_table_8_15() {
+        let qpc_from_qpi = [
+            29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+        ];
+        for qpy in 0..=51 {
+            let expected = if qpy < 30 {
+                qpy
+            } else {
+                qpc_from_qpi[(qpy - 30) as usize]
+            };
+            assert_eq!(derive_chroma_qpc(qpy, 0).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn derives_chroma_qpc_with_clipping_and_rejects_invalid_inputs() {
+        let vectors = [
+            (0, -12, 0),
+            (0, 12, 12),
+            (26, -12, 14),
+            (26, 12, 35),
+            (51, 12, 39),
+        ];
+        for (qpy, offset, expected) in vectors {
+            assert_eq!(derive_chroma_qpc(qpy, offset).unwrap(), expected);
+        }
+        for qpy in [-1, 52] {
+            assert_eq!(
+                derive_chroma_qpc(qpy, 0).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+        }
+        for offset in [-13, 13] {
+            assert_eq!(
+                derive_chroma_qpc(26, offset).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
     fn inverse_scale_8x8_matches_scaling_class_and_qp_vectors() {
         let levels = [1_i32; 64];
         let scaling_list = [16_u8; 64];
@@ -4834,6 +5397,19 @@ mod tests {
     }
 
     #[test]
+    fn inverse_transform_chroma_dc2x2_matches_hadamard_vectors() {
+        let vectors = [
+            ([7, 7, 7, 7], [28, 0, 0, 0]),
+            ([1, 0, 0, 0], [1, 1, 1, 1]),
+            ([1, 2, 3, 4], [10, -2, -4, 0]),
+            ([-1, 2, -3, 4], [2, -10, 0, 4]),
+        ];
+        for (coefficients, expected) in vectors {
+            assert_eq!(inverse_transform_chroma_dc2x2(&coefficients), expected);
+        }
+    }
+
+    #[test]
     fn inverse_transform_8x8_matches_dc_and_frequency_impulse_vectors() {
         let mut dc = [0_i64; 64];
         dc[0] = 64;
@@ -4953,6 +5529,70 @@ mod tests {
     }
 
     #[test]
+    fn predicts_chroma_plane_intra8x8_gradient_and_clipping() {
+        let top = [82, 84, 86, 88, 90, 92, 94, 96];
+        let left = [83, 86, 89, 92, 95, 98, 101, 104];
+        let mut expected = [0_u8; 64];
+        for row in 0..8 {
+            for column in 0..8 {
+                expected[row * 8 + column] = (85 + 2 * column + 3 * row) as u8;
+            }
+        }
+        assert_eq!(predict_chroma_intra8x8_plane(&top, &left, 80), expected);
+
+        assert_eq!(
+            predict_chroma_intra8x8_plane(&[255; 8], &[255; 8], 0)[63],
+            255
+        );
+        assert_eq!(predict_chroma_intra8x8_plane(&[0; 8], &[0; 8], 255)[63], 0);
+    }
+
+    #[test]
+    fn dispatches_chroma_intra8x8_modes_and_dc_fallback() {
+        let top = [82, 84, 86, 88, 90, 92, 94, 96];
+        let left = [83, 86, 89, 92, 95, 98, 101, 104];
+        let top_left = 80;
+        let expected = [
+            predict_chroma_intra8x8_dc(Some(&top), Some(&left)),
+            predict_chroma_intra8x8_horizontal(&left),
+            predict_chroma_intra8x8_vertical(&top),
+            predict_chroma_intra8x8_plane(&top, &left, top_left),
+        ];
+        for (mode, prediction) in expected.iter().enumerate() {
+            assert_eq!(
+                predict_chroma_intra8x8(mode as u8, Some(&top), Some(&left), Some(top_left))
+                    .unwrap(),
+                *prediction
+            );
+        }
+        assert_eq!(
+            predict_chroma_intra8x8(0, None, None, None).unwrap(),
+            [128_u8; 64]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_chroma_intra8x8_modes_and_missing_references() {
+        let top = [0_u8; 8];
+        let left = [0_u8; 8];
+        for (mode, top_reference, left_reference, top_left) in [
+            (1, Some(&top), None, None),
+            (2, None, Some(&left), None),
+            (3, None, Some(&left), Some(0)),
+            (3, Some(&top), None, Some(0)),
+            (3, Some(&top), Some(&left), None),
+            (4, None, None, None),
+        ] {
+            assert_eq!(
+                predict_chroma_intra8x8(mode, top_reference, left_reference, top_left)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
     fn predicts_horizontal_intra8x8_from_filtered_left_reference_samples() {
         let left = [0, 17, 63, 129, 190, 220, 254, 255];
         let mut expected = [0_u8; 64];
@@ -4977,6 +5617,49 @@ mod tests {
                 [expected; 64]
             );
         }
+    }
+
+    #[test]
+    fn predicts_chroma_dc_intra8x8_by_quadrant_and_reference_fallback() {
+        let top = [10, 20, 30, 40, 50, 60, 70, 80];
+        let left = [1, 3, 5, 7, 9, 11, 13, 15];
+        for (top_reference, left_reference, quadrants) in [
+            (Some(&top), Some(&left), [15, 65, 12, 39]),
+            (Some(&top), None, [25, 65, 25, 65]),
+            (None, Some(&left), [4, 4, 12, 12]),
+            (None, None, [128, 128, 128, 128]),
+        ] {
+            let mut expected = [0_u8; 64];
+            for row in 0..8 {
+                for column in 0..8 {
+                    expected[row * 8 + column] = quadrants[(row / 4) * 2 + column / 4];
+                }
+            }
+            assert_eq!(
+                predict_chroma_intra8x8_dc(top_reference, left_reference),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn predicts_chroma_horizontal_intra8x8_from_available_left_edge() {
+        let left = [0, 17, 63, 129, 190, 220, 254, 255];
+        let mut expected = [0_u8; 64];
+        for (row, sample) in left.iter().enumerate() {
+            expected[row * 8..row * 8 + 8].fill(*sample);
+        }
+        assert_eq!(predict_chroma_intra8x8_horizontal(&left), expected);
+    }
+
+    #[test]
+    fn predicts_chroma_vertical_intra8x8_from_available_top_edge() {
+        let top = [0, 17, 63, 129, 190, 220, 254, 255];
+        let mut expected = [0_u8; 64];
+        for row in 0..8 {
+            expected[row * 8..row * 8 + 8].copy_from_slice(&top);
+        }
+        assert_eq!(predict_chroma_intra8x8_vertical(&top), expected);
     }
 
     #[test]

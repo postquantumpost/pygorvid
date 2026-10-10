@@ -6,6 +6,7 @@ from pygorvid import (
     CABACContextModel,
     CABACError,
     CABACTerminatedError,
+    place_chroma4x4_scan_levels,
     place_luma4x4_scan_levels,
 )
 
@@ -1033,6 +1034,14 @@ def test_place_luma4x4_scan_levels_maps_all_positions_to_raster_order():
     ]
     with pytest.raises(CABACError, match="16 positions"):
         place_luma4x4_scan_levels([1, 2, 3])
+
+
+def test_place_chroma4x4_scan_levels_inserts_dc_and_maps_ac_positions():
+    assert place_chroma4x4_scan_levels(100, list(range(1, 16))) == [
+        100, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15
+    ]
+    with pytest.raises(CABACError, match="one integer DC and 15 integer AC"):
+        place_chroma4x4_scan_levels(100, [1, 2, 3])
 
 
 def test_luma4x4_residual_block_decodes_places_and_rolls_back():

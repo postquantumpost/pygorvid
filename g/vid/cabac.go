@@ -959,6 +959,14 @@ func PlaceLuma4x4ScanLevels(scanLevels [16]int32) [16]int32 {
 	return rasterLevels
 }
 
+// PlaceChroma4x4ScanLevels inserts scaled DC and scan-ordered AC levels before inverse scanning.
+func PlaceChroma4x4ScanLevels(dcLevel int32, acScanLevels [15]int32) [16]int32 {
+	var scanLevels [16]int32
+	scanLevels[0] = dcLevel
+	copy(scanLevels[1:], acScanLevels[:])
+	return PlaceLuma4x4ScanLevels(scanLevels)
+}
+
 func boolToUint32(value bool) uint32 {
 	if value {
 		return 1

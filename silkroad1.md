@@ -338,7 +338,49 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 30.1.16 [x] Derive left/top macroblock-edge eligibility from neighbor availability and disable IDC 0/1/2 in Go, Python, and Rust; suppress unavailable picture neighbors, suppress cross-slice neighbors only for IDC 2, and keep internal-edge eligibility separate.
 - 30.1.17 [x] Derive progressive-frame left/top macroblock indices and slice-boundary status from raster address, picture dimensions, and per-macroblock slice IDs in Go, Python, and Rust.
 - 30.1.18 [x] Resolve raster macroblock addresses into pixel coordinates and neighbor/slice facts on the macroblock descriptor in Go, Python, and Rust, preserving caller-supplied transform and edge-strength metadata.
+- 30.1.19 [x] Implement and vector-test the 8-bit 4:2:0 chroma weak-edge filter for bS 1-3 using chroma-style tC0+1 clipping in Go.
+- 30.1.20 [x] Port the 8-bit 4:2:0 chroma weak-edge filter to Python, matching the Go vector semantics and input validation.
+- 30.1.21 [x] Port the 8-bit 4:2:0 chroma weak-edge filter to Rust, mirroring the Go/Python clipping and sample-preservation behavior.
 - 30.2.1 [x] Implement and vector-test the 4:2:0 2x2 chroma DC inverse transform in Go; keep coefficient scaling separate.
+- 30.2.2 [x] Port the 4:2:0 2x2 chroma DC inverse transform and matching vectors to Python.
+- 30.2.3 [x] Port the 4:2:0 2x2 chroma DC inverse transform and matching vectors to Rust.
+- 30.2.4 [x] Implement and vector-test Go scaling for 8-bit 4:2:0 chroma DC transform values using QP′C.
+- 30.2.5 [x] Port 8-bit 4:2:0 chroma DC scaling and matching QP/range vectors to Python.
+- 30.2.6 [x] Port 8-bit 4:2:0 chroma DC scaling and matching QP/range vectors to Rust.
+- 30.2.7 [x] Derive 8-bit chroma QPC from QPY and the PPS component offset using Table 8-15 in Go.
+- 30.2.8 [x] Port 8-bit chroma QPC derivation and matching Table 8-15/clipping vectors to Python.
+- 30.2.9 [x] Port 8-bit chroma QPC derivation and matching Table 8-15/clipping vectors to Rust.
+- 30.2.10 [x] Implement Go 4x4 chroma residual scaling: preserve pre-scaled DC and scale AC with QP′C and the selected scaling list.
+- 30.2.11 [x] Restrict 8-bit chroma scaling QP′C to [0,39] in all languages; reject QPC 40 and test legal maximum 39.
+- 30.2.12 [x] Port 4x4 chroma residual scaling and matching DC/AC/range vectors to Python.
+- 30.2.13 [x] Port 4x4 chroma residual scaling and matching DC/AC/range vectors to Rust.
+- 30.2.14 [x] Assemble a 4x4 chroma block from scaled DC and scan-ordered AC levels, then inverse-scan to raster order in Go.
+- 30.2.15 [x] Port chroma 4x4 DC/AC scan assembly and matching raster-order vectors to Python.
+- 30.2.16 [x] Port chroma 4x4 DC/AC scan assembly and matching raster-order vectors to Rust.
+- 30.2.17 [x] Compose Go chroma 4x4 scan assembly, QPC scaling, and inverse transform into residual samples.
+- 30.2.18 [x] Port composed 4x4 chroma residual reconstruction and matching vectors to Python.
+- 30.2.19 [x] Port composed 4x4 chroma residual reconstruction and matching vectors to Rust.
+- 30.2.20 [x] Assemble four reconstructed 4x4 chroma residual blocks into an 8x8 4:2:0 macroblock residual plane in Go.
+- 30.2.21 [x] Port 8x8 4:2:0 chroma residual macroblock assembly and matching block-order vectors to Python.
+- 30.2.22 [x] Port 8x8 4:2:0 chroma residual macroblock assembly and matching block-order vectors to Rust.
+- 30.2.23 [x] Implement Go 8x8 4:2:0 Intra_Chroma_DC prediction with quadrant-specific edge fallback.
+- 30.2.24 [x] Port 8x8 4:2:0 Intra_Chroma_DC prediction and matching quadrant/fallback vectors to Python.
+- 30.2.25 [x] Port 8x8 4:2:0 Intra_Chroma_DC prediction and matching quadrant/fallback vectors to Rust.
+- 30.2.26 [x] Implement Go 8x8 4:2:0 Intra_Chroma_Horizontal prediction from the available left edge.
+- 30.2.27 [x] Port 8x8 4:2:0 Intra_Chroma_Horizontal prediction and matching left-edge vectors to Python.
+- 30.2.28 [x] Port 8x8 4:2:0 Intra_Chroma_Horizontal prediction and matching left-edge vectors to Rust.
+- 30.2.29 [x] Implement Go 8x8 4:2:0 Intra_Chroma_Vertical prediction from the available top edge.
+- 30.2.30 [x] Port 8x8 4:2:0 Intra_Chroma_Vertical prediction and matching top-edge vectors to Python.
+- 30.2.31 [x] Port 8x8 4:2:0 Intra_Chroma_Vertical prediction and matching top-edge vectors to Rust.
+- 30.2.32 [x] Implement Go 8x8 4:2:0 Intra_Chroma_Plane prediction using normative gradients, rounding, and clipping.
+- 30.2.33 [x] Port 8x8 4:2:0 Intra_Chroma_Plane prediction and matching gradient/clipping vectors to Python.
+- 30.2.34 [x] Port 8x8 4:2:0 Intra_Chroma_Plane prediction and matching gradient/clipping vectors to Rust.
+- 30.2.35 [x] Combine Go 8x8 chroma prediction and residual samples using Clip1C, with boundary vectors.
+- 30.2.36 [x] Port chroma prediction/residual addition and 8-bit Clip1C behavior to Python.
+- 30.2.37 [x] Port chroma prediction/residual addition and 8-bit Clip1C behavior to Rust.
+- 30.2.38 [x] Dispatch Go chroma intra prediction modes 0-3 and reject unavailable mode references.
+- 30.2.39 [x] Port chroma intra mode dispatch and required-reference validation to Python.
+- 30.2.40 [x] Port chroma intra mode dispatch and required-reference validation to Rust.
 
 **Decoder Contract (25.1)**
 - `Frame` is a display-order, SPS-cropped, planar 8-bit YUV 4:2:0 image. It carries width/height and tightly packed row-major Y, U, and V planes. Y contains `width * height` samples; each chroma plane contains `ceil(width/2) * ceil(height/2)` samples. No RGB or color-range conversion occurs here.
@@ -349,20 +391,20 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - Calls on one decoder are sequential; concurrent access is not promised. This contract defines API/data behavior only, not decoder algorithms or internal DPB/POC representation.
 
 **Image encoders (steps 37-47)**
-- 37.1 Freeze pixel-buffer dimensions, stride, color range, and ownership; test buffer layout.
-- 37.2 Implement YUV range conversion, chroma upsampling, matrix conversion, and rounding as separate pixel tests.
-- 39.1 Define and test the native `PNGEncoder` API before writing files.
-- 40.1 Write PNG signature/IHDR, then IDAT/IEND framing and chunk-length checks.
-- 40.2 Implement and test CRC-32 separately from Adler-32.
-- 41.1 Implement zlib header/trailer; then emit one valid uncompressed DEFLATE block.
-- 41.2 Split large images across stored blocks and add PNG scanline filters if required.
-- 42.1 Validate PNG chunks/checksums; separately test dimensions, row stride, and large output.
-- 43.1 Define `JPEGEncoder` input/quality contract and marker writer.
-- 44.1 Implement RGB-to-YCbCr; test 4:4:4 first and add 4:2:0 MCU layout if selected.
-- 45.1 Implement FDCT and verify coefficients; then quantization and zigzag ordering.
-- 45.2 Implement DC differences/Huffman coding, then AC run-length/Huffman coding.
-- 46.1 Add JPEG bit packing and byte stuffing; then complete JFIF markers and lengths.
-- 47.1 Validate baseline JPEG structure, decoded dimensions, pixel-error bounds, odd sizes, and small images.
+- 37.1 [x] Freeze pixel-buffer dimensions, stride, color range, and ownership; test buffer layout.
+- 37.2 [x] Implement YUV range conversion, chroma upsampling, matrix conversion, and rounding as separate pixel tests.
+- 39.1 [x] Define and test the native `PNGEncoder` API before writing files.
+- 40.1 [x] Write PNG signature/IHDR, then IDAT/IEND framing and chunk-length checks.
+- 40.2 [x] Implement and test CRC-32 separately from Adler-32.
+- 41.1 [x] Implement zlib header/trailer; then emit one valid uncompressed DEFLATE block.
+- 41.2 [x] Split large scanline data across stored blocks and encode RGB rows with PNG filter type 0.
+- 42.1 [x] Validate PNG chunks/checksums; separately test dimensions, row stride, and large output.
+- 43.1 [x] Define `JPEGEncoder` input/quality contract and marker writer.
+- 44.1 [x] Implement full-range JFIF RGB-to-YCbCr in 4:4:4; defer 4:2:0 MCU layout.
+- 45.1 [x] Implement the orthonormal 8x8 FDCT, quantize coefficients, and order them by JPEG zigzag scan.
+- 45.2 [x] Implement DC differences/Huffman coding, then AC run-length/Huffman coding.
+- 46.1 [x] Add JPEG bit packing and byte stuffing; then complete JFIF markers and lengths.
+- 47.1 [x] Validate baseline JPEG structure, decoded dimensions, pixel-error bounds, odd sizes, and small images.
 - Port each encoder milestone to one other language at a time using identical vectors.
 
 **Pipeline, CLI, and release (steps 48-59)**

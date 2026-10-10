@@ -800,3 +800,16 @@ def place_luma4x4_scan_levels(scan_levels: list[int]) -> list[int]:
     for scan_index, raster_index in enumerate(_LUMA4X4_SCAN_TO_RASTER):
         raster_levels[raster_index] = scan_levels[scan_index]
     return raster_levels
+
+
+def place_chroma4x4_scan_levels(dc_level: int, ac_scan_levels: list[int]) -> list[int]:
+    """Insert scaled chroma DC before inverse-scanning 15 AC levels to raster order."""
+    if (
+        not isinstance(dc_level, int)
+        or isinstance(dc_level, bool)
+        or not isinstance(ac_scan_levels, list)
+        or len(ac_scan_levels) != 15
+        or any(not isinstance(level, int) or isinstance(level, bool) for level in ac_scan_levels)
+    ):
+        raise CABACError("chroma4x4 levels require one integer DC and 15 integer AC positions")
+    return place_luma4x4_scan_levels([dc_level, *ac_scan_levels])

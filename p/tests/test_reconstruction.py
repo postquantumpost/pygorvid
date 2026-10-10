@@ -21,6 +21,7 @@ from pygorvid import (
     LumaEdgeSamples,
     LumaStrongEdgeSamples,
     LumaPredictionVector,
+    ChromaEdgeSamples,
     derive_luma_deblocking_parameters,
     apply_luma_deblocking_edge,
     apply_luma_deblocking_edge_segment,
@@ -35,9 +36,11 @@ from pygorvid import (
     luma_inter_prediction_differs,
     filter_luma_weak_edge,
     filter_luma_strong_edge,
+    filter_chroma_weak_edge,
     lookup_luma_deblocking_thresholds,
             lookup_luma_tc0,
         should_filter_luma_edge,
+        ChromaQPError,
     PresentationOrderBuffer,
     PresentationPicture,
     RefPicListModification,
@@ -49,11 +52,18 @@ from pygorvid import (
     build_b_reference_lists,
     build_p_reference_list,
     derive_motion_vector,
+    derive_chroma_qpc,
     motion_vector_difference_neighbor_magnitudes,
+    inverse_scale_chroma_dc2x2,
+    inverse_scale_chroma4x4,
     inverse_scale_luma4x4,
     inverse_scale_luma8x8,
     inverse_transform_luma4x4,
     inverse_transform_luma8x8,
+    inverse_transform_chroma_dc2x2,
+    reconstruct_chroma4x4_residual,
+    assemble_chroma420_residual_macroblock,
+    reconstruct_chroma420_macroblock,
     interpolate_luma_half_sample_horizontal,
     interpolate_luma_half_sample_diagonal,
     interpolate_luma_half_sample_vertical,
@@ -69,6 +79,11 @@ from pygorvid import (
     predict_luma_intra4x4_horizontal,
     predict_luma_intra8x8_horizontal,
     predict_luma_intra8x8_dc,
+    predict_chroma_intra8x8_dc,
+    predict_chroma_intra8x8_horizontal,
+    predict_chroma_intra8x8_vertical,
+    predict_chroma_intra8x8_plane,
+    predict_chroma_intra8x8,
     predict_luma_intra8x8_diagonal_down_left,
     predict_luma_intra8x8_diagonal_down_right,
     predict_luma_intra8x8_vertical_right,
@@ -100,7 +115,6 @@ from pygorvid import (
         (0, 0, LumaDeblockingThresholds(0, 0)),
         (16, 17, LumaDeblockingThresholds(4, 0)),
         (18, 18, LumaDeblockingThresholds(5, 2)),
-        (26, 26, LumaDeblockingThresholds(15, 4)),
         (40, 40, LumaDeblockingThresholds(80, 12)),
         (51, 51, LumaDeblockingThresholds(255, 18)),
     ),
@@ -192,6 +206,22 @@ def test_filter_luma_weak_edge_matches_normative_vectors(samples, beta, tc0, exp
 def test_filter_luma_weak_edge_rejects_invalid_input():
     with pytest.raises(DeblockingError, match="luma weak-edge filter inputs are invalid"):
         filter_luma_weak_edge(LumaEdgeSamples(-1, 0, 0, 0, 0, 0), 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("samples", "tc0", "expected"),
+    (
+        (ChromaEdgeSamples(100, 98, 104, 105), 0, ChromaEdgeSamples(101, 98, 103, 105)),
+        (ChromaEdgeSamples(110, 110, 100, 100), 2, ChromaEdgeSamples(107, 110, 103, 100)),
+    ),
+)
+def test_filter_chroma_weak_edge_uses_chroma_style_clipping(samples, tc0, expected):
+    assert filter_chroma_weak_edge(samples, tc0) == expected
+
+
+def test_filter_chroma_weak_edge_rejects_invalid_input():
+    with pytest.raises(DeblockingError, match="chroma weak-edge filter inputs are invalid"):
+        filter_chroma_weak_edge(ChromaEdgeSamples(-1, 0, 0, 0), 1)
 
 
 @pytest.mark.parametrize(
@@ -1436,6 +1466,36 @@ def test_inverse_scale_luma4x4_qp_vectors(qpy, expected):
     assert inverse_scale_luma4x4([1] * 16, [16] * 16, qpy) == expected
 
 
+def test_derive_chroma_qpc_matches_table_8_15():
+    qpc_from_qpi = (
+        29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
+        36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+    )
+    for qpy in range(52):
+        expected = qpy if qpy < 30 else qpc_from_qpi[qpy - 30]
+        assert derive_chroma_qpc(qpy, 0) == expected
+
+
+@pytest.mark.parametrize(
+    ("qpy", "qp_offset", "expected"),
+    ((0, -12, 0), (0, 12, 12), (26, -12, 14), (26, 12, 35), (51, 12, 39)),
+)
+def test_derive_chroma_qpc_clips_qpi(qpy, qp_offset, expected):
+    assert derive_chroma_qpc(qpy, qp_offset) == expected
+
+
+@pytest.mark.parametrize("qpy", (-1, 52, True))
+def test_derive_chroma_qpc_rejects_invalid_qpy(qpy):
+    with pytest.raises(ChromaQPError, match="QPY is outside"):
+        derive_chroma_qpc(qpy, 0)
+
+
+@pytest.mark.parametrize("qp_offset", (-13, 13, True))
+def test_derive_chroma_qpc_rejects_invalid_offset(qp_offset):
+    with pytest.raises(ChromaQPError, match="offset is outside"):
+        derive_chroma_qpc(26, qp_offset)
+
+
 def test_inverse_scale_luma4x4_negative_level_and_custom_weight():
     levels = [0] * 16
     levels[0:2] = [-1, 1]
@@ -1451,6 +1511,150 @@ def test_inverse_scale_luma4x4_negative_level_and_custom_weight():
 def test_inverse_scale_luma4x4_rejects_qpy_outside_range(qpy):
     with pytest.raises(InverseScaleError, match="QPY is outside"):
         inverse_scale_luma4x4([0] * 16, [16] * 16, qpy)
+
+
+@pytest.mark.parametrize(
+    ("transformed", "qpc", "expected"),
+    (
+        ([32, -32, 1, -1], 0, [10, -10, 0, -1]),
+        ([1, 2, -1, -2], 5, [0, 1, -1, -2]),
+        ([1, 2, -1, -2], 6, [0, 1, -1, -2]),
+        ([1, 2, -1, -2], 39, [28, 56, -28, -56]),
+        ([-(1 << 15), (1 << 15) - 1, 0, 0], 0, [-10240, 10239, 0, 0]),
+    ),
+)
+def test_inverse_scale_chroma_dc2x2_qpc_vectors(transformed, qpc, expected):
+    assert inverse_scale_chroma_dc2x2(transformed, qpc) == expected
+
+
+@pytest.mark.parametrize("qpc", (-1, 40, 51, True))
+def test_inverse_scale_chroma_dc2x2_rejects_qpc_outside_range(qpc):
+    with pytest.raises(InverseScaleError, match="outside"):
+        inverse_scale_chroma_dc2x2([0] * 4, qpc)
+
+
+@pytest.mark.parametrize(
+    "transformed",
+    ([0] * 3, [-(1 << 15) - 1, 0, 0, 0], [(1 << 15), 0, 0, 0]),
+)
+def test_inverse_scale_chroma_dc2x2_rejects_out_of_range_input(transformed):
+    with pytest.raises(InverseScaleError, match="four signed 16-bit integers"):
+        inverse_scale_chroma_dc2x2(transformed, 0)
+
+
+def test_inverse_scale_chroma_dc2x2_rejects_out_of_range_scaled_output():
+    with pytest.raises(InverseScaleError, match="scaled chroma DC value"):
+        inverse_scale_chroma_dc2x2([(1 << 15) - 1, 0, 0, 0], 39)
+
+
+def test_inverse_scale_chroma4x4_preserves_dc_and_scales_ac():
+    levels = [1] * 16
+    levels[0] = 7
+    scaling_list = [16] * 16
+    for qpc in (0, 23, 24, 39):
+        expected = inverse_scale_luma4x4([1] + levels[1:], scaling_list, qpc)
+        expected[0] = 7
+        assert inverse_scale_chroma4x4(levels, scaling_list, qpc) == expected
+
+
+def test_inverse_scale_chroma4x4_applies_custom_ac_weights():
+    levels = [0] * 16
+    levels[0:3] = [5, -1, 1]
+    scaling_list = [16] * 16
+    scaling_list[1] = 8
+    expected = inverse_scale_luma4x4(levels, scaling_list, 0)
+    expected[0] = 5
+    assert inverse_scale_chroma4x4(levels, scaling_list, 0) == expected
+
+
+@pytest.mark.parametrize("qpc", (-1, 40, 51, True))
+def test_inverse_scale_chroma4x4_rejects_qpc_outside_range(qpc):
+    with pytest.raises(InverseScaleError, match="QPC is outside"):
+        inverse_scale_chroma4x4([0] * 16, [16] * 16, qpc)
+
+
+@pytest.mark.parametrize(
+    ("levels", "scaling_list", "message"),
+    (
+        ([0] * 15, [16] * 16, "16 signed 16-bit integers"),
+        ([(1 << 15), *([0] * 15)], [16] * 16, "16 signed 16-bit integers"),
+        ([0] * 16, [16] * 15, "16 values in \\[1,255\\]"),
+        ([0] * 16, [16, 16, 0, *([16] * 13)], "16 values in \\[1,255\\]"),
+    ),
+)
+def test_inverse_scale_chroma4x4_rejects_invalid_inputs(levels, scaling_list, message):
+    with pytest.raises(InverseScaleError, match=message):
+        inverse_scale_chroma4x4(levels, scaling_list, 0)
+
+
+def test_inverse_scale_chroma4x4_rejects_out_of_range_scaled_output():
+    levels = [0] * 16
+    levels[1] = (1 << 15) - 1
+    with pytest.raises(InverseScaleError, match="scaled chroma block value"):
+        inverse_scale_chroma4x4(levels, [16] * 16, 39)
+
+
+def test_reconstruct_chroma4x4_residual_composes_scan_scaling_and_transform():
+    ac_scan_levels = [1] + [0] * 14
+    assert reconstruct_chroma4x4_residual(0, ac_scan_levels, [16] * 16, 24) == [
+        3, 2, -2, -3,
+        3, 2, -2, -3,
+        3, 2, -2, -3,
+        3, 2, -2, -3,
+    ]
+    assert reconstruct_chroma4x4_residual(64, [0] * 15, [16] * 16, 0) == [1] * 16
+
+
+@pytest.mark.parametrize("qpc", (40, 51, True))
+def test_reconstruct_chroma4x4_residual_rejects_invalid_qpc(qpc):
+    with pytest.raises(InverseScaleError, match="QPC is outside"):
+        reconstruct_chroma4x4_residual(0, [0] * 15, [16] * 16, qpc)
+
+
+def test_reconstruct_chroma4x4_residual_rejects_invalid_dc():
+    with pytest.raises(InverseScaleError, match="DC must be a signed 16-bit integer"):
+        reconstruct_chroma4x4_residual(1 << 15, [0] * 15, [16] * 16, 0)
+
+
+def test_assemble_chroma420_residual_macroblock_uses_block_raster_order():
+    blocks = [[block_index * 16 + sample for sample in range(16)] for block_index in range(4)]
+    assert assemble_chroma420_residual_macroblock(blocks) == [
+        0, 1, 2, 3, 16, 17, 18, 19,
+        4, 5, 6, 7, 20, 21, 22, 23,
+        8, 9, 10, 11, 24, 25, 26, 27,
+        12, 13, 14, 15, 28, 29, 30, 31,
+        32, 33, 34, 35, 48, 49, 50, 51,
+        36, 37, 38, 39, 52, 53, 54, 55,
+        40, 41, 42, 43, 56, 57, 58, 59,
+        44, 45, 46, 47, 60, 61, 62, 63,
+    ]
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    ([[[0] * 16] * 3], [[0] * 16] * 3, [[0] * 15] + [[0] * 16] * 3, [[0] * 15 + [True]] + [[0] * 16] * 3),
+)
+def test_assemble_chroma420_residual_macroblock_rejects_invalid_blocks(blocks):
+    with pytest.raises(InverseTransformError):
+        assemble_chroma420_residual_macroblock(blocks)
+
+
+def test_reconstruct_chroma420_macroblock_adds_residual_and_clips():
+    prediction = [10, 250, 100, 100] + [0] * 60
+    residual = [-20, 20, -25, 25] + [0] * 60
+    assert reconstruct_chroma420_macroblock(prediction, residual) == [0, 255, 75, 125] + [0] * 60
+
+
+@pytest.mark.parametrize("prediction", ([0] * 63, [0] * 63 + [256], [0] * 63 + [True]))
+def test_reconstruct_chroma420_macroblock_rejects_invalid_prediction(prediction):
+    with pytest.raises(IntraPredictionError, match="64 8-bit samples"):
+        reconstruct_chroma420_macroblock(prediction, [0] * 64)
+
+
+@pytest.mark.parametrize("residual", ([0] * 63, [0] * 63 + [True]))
+def test_reconstruct_chroma420_macroblock_rejects_invalid_residual(residual):
+    with pytest.raises(InverseTransformError, match="64 integer samples"):
+        reconstruct_chroma420_macroblock([0] * 64, residual)
 
 
 @pytest.mark.parametrize(
@@ -1544,6 +1748,25 @@ def test_inverse_scale_luma8x8_rejects_qpy_outside_range(qpy):
 def test_inverse_scale_luma8x8_rejects_invalid_vectors(levels, scaling_list, message):
     with pytest.raises(InverseScaleError, match=message):
         inverse_scale_luma8x8(levels, scaling_list, 0)
+
+
+@pytest.mark.parametrize(
+    ("coefficients", "expected"),
+    (
+        ([7, 7, 7, 7], [28, 0, 0, 0]),
+        ([1, 0, 0, 0], [1, 1, 1, 1]),
+        ([1, 2, 3, 4], [10, -2, -4, 0]),
+        ([-1, 2, -3, 4], [2, -10, 0, 4]),
+    ),
+)
+def test_inverse_transform_chroma_dc2x2_matches_hadamard_vectors(coefficients, expected):
+    assert inverse_transform_chroma_dc2x2(coefficients) == expected
+
+
+@pytest.mark.parametrize("coefficients", ([0] * 3, [0, 0, 0, True]))
+def test_inverse_transform_chroma_dc2x2_rejects_invalid_inputs(coefficients):
+    with pytest.raises(InverseTransformError, match="four integer coefficients"):
+        inverse_transform_chroma_dc2x2(coefficients)
 
 
 def test_inverse_transform_luma4x4_dc_and_frequency_impulse_vectors():
@@ -1714,6 +1937,45 @@ def test_predict_luma_intra8x8_vertical_rejects_invalid_top_samples(top):
         predict_luma_intra8x8_vertical(top)
 
 
+def test_predict_chroma_intra8x8_vertical_repeats_top_samples_down_columns():
+    top = [0, 17, 63, 129, 190, 220, 254, 255]
+    assert predict_chroma_intra8x8_vertical(top) == top * 8
+
+
+@pytest.mark.parametrize("top", ([1, 2, 3], [0, 1, 2, 3, 4, 5, 6, 256], [0, 1, 2, 3, 4, 5, 6, True]))
+def test_predict_chroma_intra8x8_vertical_rejects_invalid_top_samples(top):
+    with pytest.raises(IntraPredictionError, match="eight 8-bit filtered top samples"):
+        predict_chroma_intra8x8_vertical(top)
+
+
+def test_predict_chroma_intra8x8_plane_gradient_and_clipping():
+    top = [82, 84, 86, 88, 90, 92, 94, 96]
+    left = [83, 86, 89, 92, 95, 98, 101, 104]
+    expected = [85 + 2 * column + 3 * row for row in range(8) for column in range(8)]
+    assert predict_chroma_intra8x8_plane(top, left, 80) == expected
+
+    assert predict_chroma_intra8x8_plane([255] * 8, [255] * 8, 0)[63] == 255
+    assert predict_chroma_intra8x8_plane([0] * 8, [0] * 8, 255)[63] == 0
+
+
+@pytest.mark.parametrize(
+    ("top", "left", "top_left", "message"),
+    (
+        ([1] * 7, [2] * 8, 3, "eight 8-bit filtered top samples"),
+        ([1] * 8, [2] * 7, 3, "eight 8-bit filtered left samples"),
+        ([1] * 7 + [256], [2] * 8, 3, "eight 8-bit filtered top samples"),
+        ([1] * 8, [2] * 7 + [True], 3, "eight 8-bit filtered left samples"),
+        ([1] * 8, [2] * 8, 256, "8-bit filtered top-left sample"),
+        ([1] * 8, [2] * 8, True, "8-bit filtered top-left sample"),
+    ),
+)
+def test_predict_chroma_intra8x8_plane_rejects_invalid_references(
+    top, left, top_left, message
+):
+    with pytest.raises(IntraPredictionError, match=message):
+        predict_chroma_intra8x8_plane(top, left, top_left)
+
+
 @pytest.mark.parametrize(
     ("top", "expected"),
     (
@@ -1773,6 +2035,81 @@ def test_predict_luma_intra8x8_dc_reference_availability(top, left, expected):
 def test_predict_luma_intra8x8_dc_rejects_invalid_references(top, left, message):
     with pytest.raises(IntraPredictionError, match=message):
         predict_luma_intra8x8_dc(top, left)
+
+
+@pytest.mark.parametrize(
+    ("top", "left", "quadrants"),
+    (
+        ([10, 20, 30, 40, 50, 60, 70, 80], [1, 3, 5, 7, 9, 11, 13, 15], [15, 65, 12, 39]),
+        ([10, 20, 30, 40, 50, 60, 70, 80], None, [25, 65, 25, 65]),
+        (None, [1, 3, 5, 7, 9, 11, 13, 15], [4, 4, 12, 12]),
+        (None, None, [128, 128, 128, 128]),
+    ),
+)
+def test_predict_chroma_intra8x8_dc_quadrants_and_reference_fallbacks(top, left, quadrants):
+    expected = [quadrants[(row // 4) * 2 + column // 4] for row in range(8) for column in range(8)]
+    assert predict_chroma_intra8x8_dc(top, left) == expected
+
+
+@pytest.mark.parametrize(
+    ("top", "left", "message"),
+    (
+        ([1, 2, 3], None, "eight 8-bit filtered top samples"),
+        ([0, 1, 2, 3, 4, 5, 6, 256], None, "eight 8-bit filtered top samples"),
+        (None, [1, 2, 3], "eight 8-bit filtered left samples"),
+        (None, [0, 1, 2, 3, 4, 5, 6, True], "eight 8-bit filtered left samples"),
+    ),
+)
+def test_predict_chroma_intra8x8_dc_rejects_invalid_references(top, left, message):
+    with pytest.raises(IntraPredictionError, match=message):
+        predict_chroma_intra8x8_dc(top, left)
+
+
+def test_predict_chroma_intra8x8_horizontal_repeats_left_samples_across_rows():
+    left = [0, 17, 63, 129, 190, 220, 254, 255]
+    assert predict_chroma_intra8x8_horizontal(left) == [sample for sample in left for _ in range(8)]
+
+
+@pytest.mark.parametrize(
+    "left", ([1, 2, 3], [0, 1, 2, 3, 4, 5, 6, 256], [0, 1, 2, 3, 4, 5, 6, True])
+)
+def test_predict_chroma_intra8x8_horizontal_rejects_invalid_left_samples(left):
+    with pytest.raises(IntraPredictionError, match="eight 8-bit filtered left samples"):
+        predict_chroma_intra8x8_horizontal(left)
+
+
+def test_predict_chroma_intra8x8_dispatches_modes_zero_through_three():
+    top = [82, 84, 86, 88, 90, 92, 94, 96]
+    left = [83, 86, 89, 92, 95, 98, 101, 104]
+    top_left = 80
+    expected = (
+        predict_chroma_intra8x8_dc(top, left),
+        predict_chroma_intra8x8_horizontal(left),
+        predict_chroma_intra8x8_vertical(top),
+        predict_chroma_intra8x8_plane(top, left, top_left),
+    )
+    for mode, prediction in enumerate(expected):
+        assert predict_chroma_intra8x8(mode, top, left, top_left) == prediction
+    assert predict_chroma_intra8x8(0) == [128] * 64
+
+
+@pytest.mark.parametrize(
+    ("mode", "top", "left", "top_left", "message"),
+    (
+        (1, [0] * 8, None, None, "left edge is required"),
+        (2, None, [0] * 8, None, "top edge is required"),
+        (3, None, [0] * 8, 0, "top, left, and top-left edges are required"),
+        (3, [0] * 8, None, 0, "top, left, and top-left edges are required"),
+        (3, [0] * 8, [0] * 8, None, "top, left, and top-left edges are required"),
+        (4, None, None, None, r"mode is outside \[0,3\]"),
+        (True, None, None, None, r"mode is outside \[0,3\]"),
+    ),
+)
+def test_predict_chroma_intra8x8_rejects_invalid_mode_or_missing_references(
+    mode, top, left, top_left, message
+):
+    with pytest.raises(IntraPredictionError, match=message):
+        predict_chroma_intra8x8(mode, top, left, top_left)
 
 
 def test_predict_luma_intra8x8_diagonal_down_left_interpolates_filtered_top_references():

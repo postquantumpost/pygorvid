@@ -15,6 +15,8 @@ var ErrLumaDeblockingBoundaryStrength = errors.New("luma deblocking boundary str
 var ErrLumaInterPrediction = errors.New("luma inter-prediction input is invalid")
 var ErrLumaDeblockingPlaneLayout = errors.New("luma deblocking plane layout or edge coordinates are invalid")
 var ErrLumaDeblockingMacroblockAddress = errors.New("luma deblocking macroblock address or slice map is invalid")
+var ErrChromaIntraPredictionMode = errors.New("chroma intra prediction mode is outside [0,3]")
+var ErrChromaIntraPredictionReference = errors.New("required chroma intra prediction reference is unavailable")
 
 var lumaAlphaTable = [52]uint8{
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -84,6 +86,13 @@ type LumaStrongEdgeSamples struct {
 	Q3 uint8
 }
 
+type ChromaEdgeSamples struct {
+	P0 uint8
+	P1 uint8
+	Q0 uint8
+	Q1 uint8
+}
+
 func FilterLumaWeakEdge(samples LumaEdgeSamples, beta, tc0 uint8) LumaEdgeSamples {
 	ap := absLumaDifference(samples.P2, samples.P0)
 	aq := absLumaDifference(samples.Q2, samples.Q0)
@@ -110,6 +119,16 @@ func FilterLumaWeakEdge(samples LumaEdgeSamples, beta, tc0 uint8) LumaEdgeSample
 		deltaQ1 = clipLumaDeblockingDelta(deltaQ1, int(tc0))
 		filtered.Q1 = clipLumaSample(int(samples.Q1) + deltaQ1)
 	}
+	return filtered
+}
+
+func FilterChromaWeakEdge(samples ChromaEdgeSamples, tc0 uint8) ChromaEdgeSamples {
+	tc := int(tc0) + 1
+	delta := (((int(samples.Q0) - int(samples.P0)) << 2) + (int(samples.P1) - int(samples.Q1)) + 4) >> 3
+	delta = clipLumaDeblockingDelta(delta, tc)
+	filtered := samples
+	filtered.P0 = clipLumaSample(int(samples.P0) + delta)
+	filtered.Q0 = clipLumaSample(int(samples.Q0) - delta)
 	return filtered
 }
 
@@ -1383,8 +1402,13 @@ func wrapMotionVectorComponent(value int64) int32 {
 }
 
 var (
-	ErrInverseScaleQPYOutOfRange = errors.New("inverse scaling QPY is outside [0,51]")
-	ErrInverseScaleListZero      = errors.New("inverse scaling list contains zero")
+	ErrInverseScaleQPYOutOfRange      = errors.New("inverse scaling QPY is outside [0,51]")
+	ErrInverseScaleQPCOutOfRange      = errors.New("inverse scaling QPC is outside [0,39]")
+	ErrInverseScaleListZero           = errors.New("inverse scaling list contains zero")
+	ErrInverseScaleChromaDCOutOfRange = errors.New("chroma DC inverse-scaling value is outside the 8-bit 4:2:0 range")
+	ErrInverseScaleChromaBlockRange   = errors.New("chroma block inverse-scaling value is outside the 8-bit 4:2:0 range")
+	ErrChromaQPYOutOfRange            = errors.New("chroma QP luma input is outside [0,51]")
+	ErrChromaQPIndexOffsetOutOfRange  = errors.New("chroma QP index offset is outside [-12,12]")
 )
 
 var inverseScale4x4Factors = [6][3]int64{
@@ -1394,6 +1418,11 @@ var inverseScale4x4Factors = [6][3]int64{
 	{14, 18, 23},
 	{16, 20, 25},
 	{18, 23, 29},
+}
+
+var chromaQPCFromQPI = [22]uint8{
+	29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
+	36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
 }
 
 var inverseScale8x8Factors = [6][6]int64{
@@ -1437,6 +1466,121 @@ func inverseScaleLuma4x4(levels [16]int32, scalingList [16]uint8, qpy int) ([16]
 		}
 	}
 	return scaled, nil
+}
+
+func inverseScaleChromaDC2x2(transformed [4]int64, qpc int) ([4]int64, error) {
+	var scaled [4]int64
+	if qpc < 0 || qpc > 39 {
+		return scaled, ErrInverseScaleQPCOutOfRange
+	}
+	for _, coefficient := range transformed {
+		if coefficient < -(1<<15) || coefficient > (1<<15)-1 {
+			return scaled, ErrInverseScaleChromaDCOutOfRange
+		}
+	}
+	factor := inverseScale4x4Factors[qpc%6][0]
+	shift := qpc / 6
+	for index, coefficient := range transformed {
+		scaled[index] = (coefficient * factor << shift) >> 5
+		if scaled[index] < -(1<<15) || scaled[index] > (1<<15)-1 {
+			return [4]int64{}, ErrInverseScaleChromaDCOutOfRange
+		}
+	}
+	return scaled, nil
+}
+
+func inverseScaleChroma4x4(levels [16]int32, scalingList [16]uint8, qpc int) ([16]int64, error) {
+	var scaled [16]int64
+	if qpc < 0 || qpc > 39 {
+		return scaled, ErrInverseScaleQPCOutOfRange
+	}
+	for _, level := range levels {
+		if level < -(1<<15) || level > (1<<15)-1 {
+			return scaled, ErrInverseScaleChromaBlockRange
+		}
+	}
+	for _, weight := range scalingList {
+		if weight == 0 {
+			return scaled, ErrInverseScaleListZero
+		}
+	}
+
+	scaled[0] = int64(levels[0])
+	for index := 1; index < len(levels); index++ {
+		row, column := index/4, index%4
+		factorClass := row%2 + column%2
+		value := int64(levels[index]) * inverseScale4x4Factors[qpc%6][factorClass] * int64(scalingList[index])
+		if qpc >= 24 {
+			scaled[index] = value << (qpc/6 - 4)
+		} else {
+			shift := 4 - qpc/6
+			rounding := int64(1) << (shift - 1)
+			scaled[index] = (value + rounding) >> shift
+		}
+		if scaled[index] < -(1<<15) || scaled[index] > (1<<15)-1 {
+			return [16]int64{}, ErrInverseScaleChromaBlockRange
+		}
+	}
+	return scaled, nil
+}
+
+func reconstructChroma4x4Residual(dcC int64, acScanLevels [15]int32, scalingList [16]uint8, qpc int) ([16]int64, error) {
+	if qpc < 0 || qpc > 39 {
+		return [16]int64{}, ErrInverseScaleQPCOutOfRange
+	}
+	if dcC < -(1<<15) || dcC > (1<<15)-1 {
+		return [16]int64{}, ErrInverseScaleChromaBlockRange
+	}
+	levels := PlaceChroma4x4ScanLevels(int32(dcC), acScanLevels)
+	scaled, err := inverseScaleChroma4x4(levels, scalingList, qpc)
+	if err != nil {
+		return [16]int64{}, err
+	}
+	return inverseTransformLuma4x4(scaled), nil
+}
+
+func assembleChroma420ResidualMacroblock(blocks [4][16]int64) (macroblock [64]int64) {
+	for blockIndex, block := range blocks {
+		xOffset := blockIndex % 2 * 4
+		yOffset := blockIndex / 2 * 4
+		for row := 0; row < 4; row++ {
+			destination := (yOffset+row)*8 + xOffset
+			copy(macroblock[destination:destination+4], block[row*4:row*4+4])
+		}
+	}
+	return macroblock
+}
+
+func reconstructChroma420Macroblock(prediction [64]uint8, residual [64]int64) (samples [64]uint8) {
+	for index, predictedSample := range prediction {
+		value := int64(predictedSample) + residual[index]
+		if value < 0 {
+			value = 0
+		} else if value > 255 {
+			value = 255
+		}
+		samples[index] = uint8(value)
+	}
+	return samples
+}
+
+func deriveChromaQPC(qpy, qpOffset int) (int, error) {
+	if qpy < 0 || qpy > 51 {
+		return 0, ErrChromaQPYOutOfRange
+	}
+	if qpOffset < -12 || qpOffset > 12 {
+		return 0, ErrChromaQPIndexOffsetOutOfRange
+	}
+	qpi := qpy + qpOffset
+	if qpi < 0 {
+		qpi = 0
+	} else if qpi > 51 {
+		qpi = 51
+	}
+	if qpi < 30 {
+		return qpi, nil
+	}
+	return int(chromaQPCFromQPI[qpi-30]), nil
 }
 
 func inverseScaleLuma8x8(levels [64]int32, scalingList [64]uint8, qpy int) ([64]int64, error) {
@@ -1687,6 +1831,125 @@ func predictLumaIntra8x8DC(top, left *[8]uint8) (prediction [64]uint8) {
 		prediction[index] = uint8(dcValue)
 	}
 	return prediction
+}
+
+func predictChromaIntra8x8DC(top, left *[8]uint8) (prediction [64]uint8) {
+	averageEdge := func(samples *[8]uint8, offset int) int {
+		sum := 0
+		for index := offset; index < offset+4; index++ {
+			sum += int(samples[index])
+		}
+		return (sum + 2) >> 2
+	}
+	for blockRow := 0; blockRow < 2; blockRow++ {
+		for blockColumn := 0; blockColumn < 2; blockColumn++ {
+			topOffset, leftOffset := blockColumn*4, blockRow*4
+			dcValue := 128
+			switch {
+			case blockColumn == 1 && blockRow == 0:
+				if top != nil {
+					dcValue = averageEdge(top, topOffset)
+				} else if left != nil {
+					dcValue = averageEdge(left, leftOffset)
+				}
+			case blockColumn == 0 && blockRow == 1:
+				if left != nil {
+					dcValue = averageEdge(left, leftOffset)
+				} else if top != nil {
+					dcValue = averageEdge(top, topOffset)
+				}
+			default:
+				switch {
+				case top != nil && left != nil:
+					sum := 0
+					for index := 0; index < 4; index++ {
+						sum += int(top[topOffset+index]) + int(left[leftOffset+index])
+					}
+					dcValue = (sum + 4) >> 3
+				case left != nil:
+					dcValue = averageEdge(left, leftOffset)
+				case top != nil:
+					dcValue = averageEdge(top, topOffset)
+				}
+			}
+			for row := 0; row < 4; row++ {
+				for column := 0; column < 4; column++ {
+					prediction[(blockRow*4+row)*8+blockColumn*4+column] = uint8(dcValue)
+				}
+			}
+		}
+	}
+	return prediction
+}
+
+func predictChromaIntra8x8Horizontal(left [8]uint8) (prediction [64]uint8) {
+	for row, sample := range left {
+		for column := 0; column < 8; column++ {
+			prediction[row*8+column] = sample
+		}
+	}
+	return prediction
+}
+
+func predictChromaIntra8x8Vertical(top [8]uint8) (prediction [64]uint8) {
+	for row := 0; row < 8; row++ {
+		copy(prediction[row*8:row*8+8], top[:])
+	}
+	return prediction
+}
+
+func predictChromaIntra8x8Plane(top, left [8]uint8, topLeft uint8) (prediction [64]uint8) {
+	horizontalGradient := 0
+	verticalGradient := 0
+	for index := 0; index < 4; index++ {
+		topReference := int(topLeft)
+		leftReference := int(topLeft)
+		if index < 3 {
+			topReference = int(top[2-index])
+			leftReference = int(left[2-index])
+		}
+		horizontalGradient += (index + 1) * (int(top[4+index]) - topReference)
+		verticalGradient += (index + 1) * (int(left[4+index]) - leftReference)
+	}
+	a := 16 * (int(top[7]) + int(left[7]))
+	b := (34*horizontalGradient + 32) >> 6
+	c := (34*verticalGradient + 32) >> 6
+	for row := 0; row < 8; row++ {
+		for column := 0; column < 8; column++ {
+			value := (a + b*(column-3) + c*(row-3) + 16) >> 5
+			if value < 0 {
+				value = 0
+			} else if value > 255 {
+				value = 255
+			}
+			prediction[row*8+column] = uint8(value)
+		}
+	}
+	return prediction
+}
+
+func predictChromaIntra8x8(mode uint8, top, left *[8]uint8, topLeft *uint8) ([64]uint8, error) {
+	switch mode {
+	case 0:
+		return predictChromaIntra8x8DC(top, left), nil
+	case 1:
+		if left == nil {
+			return [64]uint8{}, ErrChromaIntraPredictionReference
+		}
+		return predictChromaIntra8x8Horizontal(*left), nil
+	case 2:
+		if top == nil {
+			return [64]uint8{}, ErrChromaIntraPredictionReference
+		}
+		return predictChromaIntra8x8Vertical(*top), nil
+	case 3:
+		if top == nil || left == nil || topLeft == nil {
+			return [64]uint8{}, ErrChromaIntraPredictionReference
+		}
+		return predictChromaIntra8x8Plane(*top, *left, *topLeft), nil
+	default:
+		return [64]uint8{}, ErrChromaIntraPredictionMode
+	}
 }
 
 func predictLumaIntra8x8DiagonalDownLeft(top [16]uint8) (prediction [64]uint8) {

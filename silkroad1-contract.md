@@ -60,7 +60,10 @@ Idiomatic method shapes may differ: Go may return `(sample, ok, error)`, Python 
 - Pixel origin is top-left; rows are emitted top-to-bottom.
 - Stride is exactly `3 * width`; there is no row padding.
 - Conversion honors signaled range, matrix, transfer, primaries, and chroma siting for supported inputs. Unsupported or missing required color metadata yields a clear error instead of guessed color output.
-- PNG preserves these RGB values losslessly. JPEG uses the documented baseline encoder quality and is validated with a specified pixel-error tolerance, not byte equality.
+- PNG preserves these RGB values losslessly. JPEG uses the documented baseline encoder quality and is validated with pixel-error bounds, not byte equality: at quality 75, smooth-gradient vectors require maximum per-channel error <=24 and mean <=8; the high-frequency stress vector requires maximum <=64 and mean <=20.
+- JPEG quality defaults to 75 and accepts explicit values from 1 through 100. Quantization scales the baseline luminance/chrominance tables by `5000 / quality` below 50, or `200 - 2 * quality` otherwise, rounds each table value to nearest, and clips entries to 1 through 255. Its initial RGB conversion uses full-range JFIF YCbCr with 4:4:4 sampling: Q16 coefficients are rounded to nearest with an added 32768 before shifting, and output samples are clamped to 8 bits. Chroma subsampling is not performed in this initial layout.
+- JPEG applies an orthonormal 8x8 forward DCT after subtracting 128 from each sample. Quantization divides natural-order coefficients by their nonzero table entries and rounds to nearest with ties away from zero; the resulting coefficients are ordered by the standard 64-position zigzag scan.
+- JPEG entropy coding differences each block's DC coefficient from the previous block in that component. Signed amplitudes use the category-width JPEG mapping; AC coefficients use zero-run/category symbols, with `0xF0` for each 16-zero run and `0x00` for trailing zeros. Canonical Huffman codewords are emitted most-significant bit first; byte packing and stuffing are handled by the marker/scan writer.
 
 ## Errors and Output Safety
 

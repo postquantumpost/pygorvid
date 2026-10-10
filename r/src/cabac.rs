@@ -849,6 +849,14 @@ pub fn place_luma4x4_scan_levels(scan_levels: &[i32; 16]) -> [i32; 16] {
     raster_levels
 }
 
+/// Inserts pre-scaled chroma DC before inverse-scanning the 15 AC levels.
+pub fn place_chroma4x4_scan_levels(dc_level: i32, ac_scan_levels: &[i32; 15]) -> [i32; 16] {
+    let mut scan_levels = [0_i32; 16];
+    scan_levels[0] = dc_level;
+    scan_levels[1..].copy_from_slice(ac_scan_levels);
+    place_luma4x4_scan_levels(&scan_levels)
+}
+
 fn context(field: &str, error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("CABAC {field}: {error}"))
 }
@@ -1851,6 +1859,15 @@ mod tests {
         assert_eq!(
             place_luma4x4_scan_levels(&scan_levels),
             [0, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15]
+        );
+    }
+
+    #[test]
+    fn places_chroma4x4_dc_and_ac_scan_levels_in_raster_order() {
+        let ac_scan_levels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        assert_eq!(
+            place_chroma4x4_scan_levels(100, &ac_scan_levels),
+            [100, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15]
         );
     }
 
