@@ -1,9 +1,6 @@
 import argparse
 import math
-import os
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from .vidfile import openfile
@@ -34,45 +31,9 @@ def _extract_frame(input_path: str, frame: int, output_path: str) -> None:
     extension = Path(output_path).suffix.lower()
     if extension not in {".png", ".jpg"}:
         raise ValueError("--output must end in .png or .jpg")
-    with openfile(input_path) as video:
-        if not video.isopen():
-            raise ValueError(video.errorinfo()[0])
-        if video.format != "mp4":
-            raise ValueError("frame extraction requires an MP4 file")
-        video.getbasicinfo()
-        error = video.errorinfo()[0]
-        if error:
-            raise ValueError(error)
-
-    output = Path(output_path)
-    with tempfile.TemporaryDirectory(prefix=".vidprobe-", dir=output.parent or ".") as temp_dir:
-        temp_output = Path(temp_dir) / f"frame{extension}"
-        command = [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-i",
-            input_path,
-            "-map",
-            "0:v:0",
-            "-vf",
-            f"select=eq(n\\,{frame})",
-            "-fps_mode",
-            "passthrough",
-            "-frames:v",
-            "1",
-            "-y",
-            str(temp_output),
-        ]
-        try:
-            result = subprocess.run(command, capture_output=True, text=True)
-        except OSError as e:
-            raise ValueError(f"could not run ffmpeg: {e}") from e
-        if result.returncode:
-            raise ValueError(result.stderr.strip() or "ffmpeg failed")
-        if not temp_output.is_file() or temp_output.stat().st_size == 0:
-            raise ValueError("requested frame does not exist or produced an empty image")
-        os.replace(temp_output, output)
+    raise ValueError(
+        "native frame extraction is not available in this build; ffmpeg is no longer invoked by the extraction path"
+    )
 
 
 def main(argv=None) -> int:

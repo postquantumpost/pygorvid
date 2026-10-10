@@ -19,6 +19,7 @@ Stream metadata and AVC configuration are inventoried by `scripts/inventory_stre
 | Slice types | I, P, and B | Support all three; preserve presentation order |
 | NAL unit types | 1 (non-IDR coded slice), 5 (IDR), 6 (SEI), 7 (SPS), 8 (PPS), 9 (AUD) | Parse required types; ignore or safely skip SEI/AUD when not needed |
 | Entropy coding | CABAC in every inventoried PPS | CABAC required; CAVLC is not observed |
+| Weighted prediction | `weighted_pred_flag=0` and `weighted_bipred_idc=0` in every active PPS | Not needed for the active corpus |
 | Reference/reorder metadata | `refs=1`; `has_b_frames=2` in every active video stream | Support observed reference use and up to two B-frame reordering |
 | Audio accompanying video | AAC-LC, 48 kHz, stereo in the active samples | Not decoded by frame extraction |
 
@@ -36,7 +37,7 @@ The following are not observed in the active corpus and are out of scope for the
 
 ## Still Unassessed
 
-This inventory does not yet parse every SPS/PPS/slice tool. Features such as weighted prediction, transform-size flags, scaling matrices, FMO, redundant pictures, unusual POC modes, and gaps in frame numbering remain unsupported until their presence is explicitly checked against the active bitstreams. Unknown syntax must produce a clear unsupported-feature error rather than being assumed absent.
+This inventory does not yet parse every SPS/PPS/slice tool. Features such as transform-size flags, scaling matrices, FMO, redundant pictures, unusual POC modes, and gaps in frame numbering remain unsupported until their presence is explicitly checked against the active bitstreams. Unknown syntax must produce a clear unsupported-feature error rather than being assumed absent.
 
 ## Reproducibility
 

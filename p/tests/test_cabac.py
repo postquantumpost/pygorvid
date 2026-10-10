@@ -762,6 +762,103 @@ def test_luma4x4_significance_map_truncation_is_transactional():
     assert (significant[0].state_index, significant[0].mps) == (0, False)
 
 
+def test_motion_vector_difference_context_bands_and_values():
+    for neighbor_magnitude, expected_context in (
+        (0, 0),
+        (2, 0),
+        (3, 1),
+        (32, 1),
+        (33, 2),
+        (1 << 32, 2),
+    ):
+        decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+        decoder._bits = BitReader(b"")
+        decoder._code_range = 510
+        decoder._code_offset = 0
+        decoder._terminated = False
+        contexts = [CABACContextModel(0, 63, 26) for _ in range(7)]
+
+        assert decoder.decode_motion_vector_difference(neighbor_magnitude, contexts) == 0
+        assert [context.state_index for context in contexts] == [
+            int(index == expected_context) for index in range(7)
+        ]
+
+    vectors = (
+        (
+            b"\x00",
+            0,
+            [CABACContextModel(0, 127, 26), *[CABACContextModel(0, 1, 26) for _ in range(6)]],
+            1,
+        ),
+        (
+            b"\x00",
+            253,
+            [CABACContextModel(0, 127, 26), CABACContextModel(0, 1, 26), CABACContextModel(0, 1, 26), CABACContextModel(0, 1, 26), *[CABACContextModel(0, 1, 26) for _ in range(3)]],
+            -1,
+        ),
+        (
+            b"\x00",
+            0,
+            [CABACContextModel(0, 127, 26) for _ in range(7)],
+            9,
+        ),
+        (
+            b"\x08",
+            31,
+            [CABACContextModel(0, 127, 26) for _ in range(7)],
+            10,
+        ),
+    )
+    for data, code_offset, contexts, expected in vectors:
+        decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+        decoder._bits = BitReader(data)
+        decoder._code_range = 510
+        decoder._code_offset = code_offset
+        decoder._terminated = False
+        assert decoder.decode_motion_vector_difference(0, contexts) == expected
+
+
+def test_motion_vector_difference_truncation_is_transactional():
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(b"")
+    decoder._code_range = 510
+    decoder._code_offset = 509
+    decoder._terminated = False
+    contexts = [CABACContextModel(0, 127, 26)] + [
+        CABACContextModel(0, 1, 26) for _ in range(6)
+    ]
+    with pytest.raises(CABACError, match="truncated bitstream"):
+        decoder.decode_motion_vector_difference(0, contexts)
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == (
+        510,
+        509,
+        0,
+    )
+    assert (contexts[0].state_index, contexts[0].mps) == (62, True)
+
+
+def test_motion_vector_difference_overlong_escape_is_transactional():
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(b"\xff" * 6)
+    decoder._code_range = 510
+    decoder._code_offset = 491
+    decoder._terminated = False
+    contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(7)]
+    for context in contexts:
+        context._state_index = 63
+        context._value_mps = True
+    with pytest.raises(CABACError, match="MVD exceeds the signed output range"):
+        decoder.decode_motion_vector_difference(0, contexts)
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == (
+        510,
+        491,
+        0,
+    )
+    assert [(context.state_index, context.mps) for context in contexts] == [
+        (63, True)
+    ] * 7
+
+
 def test_coeff_abs_level_minus1_decodes_zero_unit_and_escape():
     zero = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
     zero._bits = BitReader(b"")

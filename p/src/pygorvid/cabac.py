@@ -18,6 +18,7 @@ _TRANSITION_LPS = (
     33, 33, 34, 34, 35, 35, 35, 36, 36, 37, 37, 37, 38, 38, 63, 63,
 )
 _MAX_QPY = 51
+_MAX_MOTION_VECTOR_DIFFERENCE = 0x7FFFFFFF
 _COEFF_ABS_LEVEL1_CONTEXT = (1, 2, 3, 4, 0, 0, 0, 0)
 _COEFF_ABS_LEVEL_GREATER1_CONTEXT = (5, 5, 5, 5, 6, 7, 8, 9)
 _COEFF_LEVEL1_TRANSITION = (1, 2, 3, 3, 4, 5, 6, 7)
@@ -552,6 +553,80 @@ class CABACArithmeticDecoder:
         negative = self.decode_bypass_bin()
         magnitude = abs_level_minus1 + 1
         return -magnitude if negative else magnitude
+
+    def decode_motion_vector_difference(
+        self, neighbor_magnitude: int, contexts: list[CABACContextModel]
+    ) -> int:
+        """Decode one MVD component using seven contexts starting at 40 or 47."""
+        if (
+            not isinstance(neighbor_magnitude, int)
+            or isinstance(neighbor_magnitude, bool)
+            or neighbor_magnitude < 0
+        ):
+            raise CABACError("MVD neighbor magnitude must be a nonnegative integer")
+        if not isinstance(contexts, list) or len(contexts) != 7 or any(
+            not isinstance(model, CABACContextModel)
+            or not 0 <= model._state_index < 64
+            for model in contexts
+        ):
+            raise CABACError("MVD decoding requires seven valid consecutive contexts")
+        if len({id(model) for model in contexts}) != 7:
+            raise CABACError("MVD contexts must be distinct")
+
+        context_index = int(neighbor_magnitude >= 3) + int(neighbor_magnitude >= 33)
+        trial_bits = BitReader(self._bits._data)
+        trial_bits._bit_offset = self._bits._bit_offset
+        trial = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+        trial._bits = trial_bits
+        trial._code_range = self._code_range
+        trial._code_offset = self._code_offset
+        trial._terminated = self._terminated
+        trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(7)]
+        for target, source in zip(trial_contexts, contexts):
+            target._state_index = source._state_index
+            target._value_mps = source._value_mps
+
+        if not trial.decode_bin(trial_contexts[context_index]):
+            magnitude = 0
+        else:
+            magnitude = 1
+            context_index = 3
+            while magnitude < 9 and trial.decode_bin(trial_contexts[context_index]):
+                if magnitude < 4:
+                    context_index += 1
+                magnitude += 1
+
+            if magnitude >= 9:
+                suffix_length = 3
+                while trial.decode_bypass_bin():
+                    if suffix_length > 30:
+                        raise CABACError("CABAC MVD exceeds the signed output range")
+                    increment = 1 << suffix_length
+                    if magnitude > _MAX_MOTION_VECTOR_DIFFERENCE - increment:
+                        raise CABACError("CABAC MVD exceeds the signed output range")
+                    magnitude += increment
+                    suffix_length += 1
+                if suffix_length > 30:
+                    raise CABACError("CABAC MVD exceeds the signed output range")
+                for bit_index in range(suffix_length - 1, -1, -1):
+                    if trial.decode_bypass_bin():
+                        increment = 1 << bit_index
+                        if magnitude > _MAX_MOTION_VECTOR_DIFFERENCE - increment:
+                            raise CABACError("CABAC MVD exceeds the signed output range")
+                        magnitude += increment
+
+            negative = trial.decode_bypass_bin()
+            if negative:
+                magnitude = -magnitude
+
+        self._bits._bit_offset = trial._bits._bit_offset
+        self._code_range = trial._code_range
+        self._code_offset = trial._code_offset
+        self._terminated = trial._terminated
+        for target, source in zip(contexts, trial_contexts):
+            target._state_index = source._state_index
+            target._value_mps = source._value_mps
+        return magnitude
 
     def decode_luma4x4_residual_levels(
         self,

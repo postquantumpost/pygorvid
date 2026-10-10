@@ -1,7 +1,5 @@
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
+use std::path::Path;
+use std::process::exit;
 
 fn main() {
     exit(run(std::env::args().skip(1).collect()));
@@ -166,86 +164,13 @@ fn prefixed_output(output: &str, prefix: Option<&str>) -> String {
         .to_string()
 }
 
-struct TempDir(PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn create_temp_dir(parent: &Path) -> Result<TempDir, String> {
-    for suffix in 0..100 {
-        let path = parent.join(format!(".vidprobe-{}-{suffix}", std::process::id()));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(TempDir(path)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Err("could not create temporary output directory".to_string())
-}
-
-fn extract_frame(input: &str, frame: usize, output: &str) -> Result<(), String> {
-    let extension = Path::new(output)
+fn extract_frame(_input: &str, _frame: usize, output: &str) -> Result<(), String> {
+    let _extension = Path::new(output)
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase)
         .filter(|value| value == "png" || value == "jpg")
         .ok_or_else(|| "--output must end in .png or .jpg".to_string())?;
 
-    let mut video = pygorvid::open_file(input);
-    if !video.isopen() {
-        return Err(video.errorinfo().0);
-    }
-    if video.format() != "mp4" {
-        return Err("frame extraction requires an MP4 file".to_string());
-    }
-    video.getbasicinfo();
-    let error = video.errorinfo().0;
-    if !error.is_empty() {
-        return Err(error);
-    }
-
-    let output_path = Path::new(output);
-    let parent = output_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let temp_dir = create_temp_dir(parent)?;
-    let temp_output = temp_dir.0.join(format!("frame.{extension}"));
-    let filter = format!("select=eq(n\\,{frame})");
-    let result = Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-i",
-            input,
-            "-map",
-            "0:v:0",
-            "-vf",
-            &filter,
-            "-fps_mode",
-            "passthrough",
-            "-frames:v",
-            "1",
-            "-y",
-        ])
-        .arg(&temp_output)
-        .output()
-        .map_err(|error| format!("could not run ffmpeg: {error}"))?;
-    if !result.status.success() {
-        let message = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        return Err(if message.is_empty() {
-            format!("ffmpeg exited with {}", result.status)
-        } else {
-            message
-        });
-    }
-    let metadata = fs::metadata(&temp_output)
-        .map_err(|_| "requested frame does not exist or produced no image".to_string())?;
-    if metadata.len() == 0 {
-        return Err("requested frame does not exist or produced an empty image".to_string());
-    }
-    fs::rename(temp_output, output_path).map_err(|error| error.to_string())
+    Err("native frame extraction is not available in this build; ffmpeg is no longer invoked by the extraction path".to_string())
 }

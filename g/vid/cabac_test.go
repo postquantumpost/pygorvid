@@ -934,6 +934,133 @@ func TestCABACLuma4x4SignificanceMapTruncationIsTransactional(t *testing.T) {
 	}
 }
 
+func TestCABACMotionVectorDifferenceValuesAndContextBands(t *testing.T) {
+	for _, test := range []struct {
+		neighborMagnitude uint64
+		wantContext       int
+	}{
+		{neighborMagnitude: 0, wantContext: 0},
+		{neighborMagnitude: 2, wantContext: 0},
+		{neighborMagnitude: 3, wantContext: 1},
+		{neighborMagnitude: 32, wantContext: 1},
+		{neighborMagnitude: 33, wantContext: 2},
+		{neighborMagnitude: 1 << 32, wantContext: 2},
+	} {
+		decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+		var contexts [7]CABACContextModel
+		for index := range contexts {
+			contexts[index] = CABACContextModel{stateIndex: 0}
+		}
+		if got, err := decoder.DecodeMotionVectorDifference(test.neighborMagnitude, &contexts); err != nil || got != 0 {
+			t.Fatalf("zero MVD with neighbor magnitude %d = %d, %v; want 0, nil", test.neighborMagnitude, got, err)
+		}
+		for index, context := range contexts {
+			wantState := uint8(0)
+			if index == test.wantContext {
+				wantState = 1
+			}
+			if context.StateIndex() != wantState {
+				t.Errorf("neighbor magnitude %d updated context %d to %d; want context %d only", test.neighborMagnitude, index, context.StateIndex(), test.wantContext)
+			}
+		}
+	}
+
+	for _, test := range []struct {
+		name       string
+		data       []byte
+		codeOffset uint32
+		contexts   [7]CABACContextModel
+		want       int32
+	}{
+		{
+			name: "unit positive",
+			data: []byte{0},
+			contexts: [7]CABACContextModel{
+				{stateIndex: 62, valueMPS: true}, {}, {},
+				{stateIndex: 62}, {}, {}, {},
+			},
+			want: 1,
+		},
+		{
+			name:       "unit negative",
+			data:       []byte{0},
+			codeOffset: 253,
+			contexts: [7]CABACContextModel{
+				{stateIndex: 62, valueMPS: true}, {}, {},
+				{stateIndex: 62}, {}, {}, {},
+			},
+			want: -1,
+		},
+		{
+			name: "bypass escape boundary",
+			data: []byte{0},
+			contexts: [7]CABACContextModel{
+				{stateIndex: 62, valueMPS: true}, {}, {},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+			},
+			want: 9,
+		},
+		{
+			name:       "bypass suffix bit",
+			data:       []byte{0x08},
+			codeOffset: 31,
+			contexts: [7]CABACContextModel{
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+				{stateIndex: 62, valueMPS: true},
+			},
+			want: 10,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decoder := &CABACArithmeticDecoder{bits: NewBitReader(test.data), codeRange: 510, codeOffset: test.codeOffset}
+			contexts := test.contexts
+			got, err := decoder.DecodeMotionVectorDifference(0, &contexts)
+			if err != nil || got != test.want {
+				t.Fatalf("MVD = %d, %v; want %d, nil", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestCABACMotionVectorDifferenceOverlongEscapeIsTransactional(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}), codeRange: 510, codeOffset: 491}
+	var contexts [7]CABACContextModel
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63, valueMPS: true}
+	}
+	if _, err := decoder.DecodeMotionVectorDifference(0, &contexts); !errors.Is(err, ErrCABACMotionVectorDifferenceOutOfRange) {
+		t.Fatalf("overlong MVD error = %v; want signed output range", err)
+	}
+	if decoder.CodeRange() != 510 || decoder.CodeOffset() != 491 || decoder.bits.bitOffset != 0 {
+		t.Fatalf("overlong MVD changed decoder state")
+	}
+	for index, context := range contexts {
+		if context.StateIndex() != 63 || !context.MPS() {
+			t.Fatalf("overlong MVD changed context %d", index)
+		}
+	}
+}
+
+func TestCABACMotionVectorDifferenceTruncationIsTransactional(t *testing.T) {
+	decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510, codeOffset: 509}
+	var contexts [7]CABACContextModel
+	contexts[0] = CABACContextModel{stateIndex: 62, valueMPS: true}
+	if _, err := decoder.DecodeMotionVectorDifference(0, &contexts); !errors.Is(err, ErrBitstreamExhausted) {
+		t.Fatalf("truncated MVD error = %v; want truncated bitstream", err)
+	}
+	if decoder.CodeRange() != 510 || decoder.CodeOffset() != 509 || decoder.bits.bitOffset != 0 || contexts[0].StateIndex() != 62 || !contexts[0].MPS() {
+		t.Fatalf("truncated MVD changed decoder or context state")
+	}
+}
+
 func TestCABACCoeffAbsLevelMinus1Values(t *testing.T) {
 	zeroDecoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
 	zeroFirst, zeroGreater := &CABACContextModel{stateIndex: 62}, &CABACContextModel{stateIndex: 62}

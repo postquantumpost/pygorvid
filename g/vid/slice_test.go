@@ -430,6 +430,9 @@ func TestParsedSPSPPSAndSliceMetadataForEveryEligibleInput(t *testing.T) {
 		if pps.SequenceParameterSetID != sps.ID || !pps.EntropyCodingMode || pps.NumSliceGroupsMinus1 != 0 {
 			t.Fatalf("%s parsed unsupported/mismatched PPS metadata: %+v", relativePath, pps)
 		}
+		if pps.WeightedPred || pps.WeightedBipredIDC != 0 {
+			t.Fatalf("%s uses unsupported weighted prediction: weighted_pred_flag=%t weighted_bipred_idc=%d", relativePath, pps.WeightedPred, pps.WeightedBipredIDC)
+		}
 
 		sliceCount := 0
 		for {

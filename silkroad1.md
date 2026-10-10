@@ -176,7 +176,16 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 27.1 Implement intra 4x4 modes by mode family; test each edge-neighbor case.
 - 27.2 Add 8x8 luma modes, then 16x16 luma and chroma modes as separate tasks.
 - 28.1 Parse motion data and derive vectors; test vector prediction independently.
+- 28.1.1 [x] Implement the common A/B/C motion-vector predictor, top-left fallback, reference-index selection, and component median in Go, Python, and Rust.
+- 28.1.2 [x] Add decoded motion-vector differences to predictors with signed 16-bit component wrapping in Go, Python, and Rust.
+- 28.1.3 [x] Apply the 16x8 and 8x16 partition-specific motion-vector reference-match rules before median prediction in Go, Python, and Rust.
+- 28.1.4 [x] Combine partition-aware prediction with decoded differences and signed component wrapping in Go, Python, and Rust.
+- 28.1.5 [x] Decode one CABAC MVD component using the neighbor-magnitude context band, bounded `k=3` bypass escape, and sign bin transactionally in Go, Python, and Rust. The ITU PDF endpoint was unavailable during this check; context bands and escape flow were cross-checked against FFmpeg `libavcodec/h264_cabac.c` (`decode_cabac_mb_mvd`), without code reuse.
+- 28.1.6 [x] Derive horizontal and vertical MVD neighbor magnitudes by summing absolute left/top components, with absent neighbors as zero, in Go, Python, and Rust.
 - 28.2 Build reference lists and test short/long-term indexing.
+- 28.2.1 [x] Build the initial progressive-frame P reference list with wrapped descending short-term PicNum and ascending long-term frame index in Go, Python, and Rust.
+- 28.2.2 [x] Build progressive-frame B list0/list1 by POC partition order, append long-term references by index, and swap identical lists in Go, Python, and Rust; the FFmpeg reference source was checked for equal-POC handling and the identical-list swap because the ITU PDF endpoint was unavailable.
+- 28.2.3 [x] Apply parsed frame-coded `ref_pic_list_modification` commands for wrapped short-term PicNum and long-term indices, preserving insertion order and rejecting missing targets in Go, Python, and Rust. The FFmpeg reference source was checked for predictor update and duplicate-removal behavior because the ITU PDF endpoint was unavailable.
 - 28.3 Add fractional-pixel interpolation, then weighting if the corpus uses it.
 - 29.1 Store decoded reference pictures; separately implement POC calculation and output reordering.
 - 30.1 Implement luma deblocking; add chroma deblocking only after luma vectors pass.
@@ -255,6 +264,81 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 27.2.25 [x] Implement and vector-test Go Intra_8x8_Horizontal_Up as the transpose of Vertical_Left.
 - 27.2.26 [x] Port Intra_8x8_Horizontal_Up prediction and matching vector to Python.
 - 27.2.27 [x] Port Intra_8x8_Horizontal_Up prediction and matching vector to Rust.
+- 27.2.28 [x] Implement and vector-test Go Intra_8x8_Plane gradients, rounding, and clipping.
+- 27.2.29 [x] Port Intra_8x8_Plane prediction and matching vectors to Python.
+- 27.2.30 [x] Port Intra_8x8_Plane prediction and matching vectors to Rust.
+- 27.3.1 [x] Implement and vector-test Go Intra_16x16_Vertical from 16 filtered top samples.
+- 27.3.2 [x] Port Intra_16x16_Vertical prediction and matching vector to Python.
+- 27.3.3 [x] Port Intra_16x16_Vertical prediction and matching vector to Rust.
+- 27.3.4 [x] Implement and vector-test Go Intra_16x16_Horizontal from 16 filtered left samples.
+- 27.3.5 [x] Port Intra_16x16_Horizontal prediction and matching vector to Python.
+- 27.3.6 [x] Port Intra_16x16_Horizontal prediction and matching vector to Rust.
+- 27.3.7 [x] Implement and vector-test Go Intra_16x16_DC for both, one, or neither available filtered edge.
+- 27.3.8 [x] Port Intra_16x16_DC prediction and matching vectors to Python.
+- 27.3.9 [x] Port Intra_16x16_DC prediction and matching vectors to Rust.
+- 27.3.10 [x] Implement and vector-test Go Intra_16x16_Plane gradients, rounding, and clipping.
+- 27.3.11 [x] Port Intra_16x16_Plane prediction and matching vectors to Python.
+- 27.3.12 [x] Port Intra_16x16_Plane prediction and matching vectors to Rust.
+- 28.3.1 [x] Implement and vector-test the normative horizontal six-tap luma half-sample filter in Go, including rounding and clipping.
+- 28.3.2 [x] Port the horizontal six-tap luma half-sample filter and matching vectors to Python.
+- 28.3.3 [x] Port the horizontal six-tap luma half-sample filter and matching vectors to Rust.
+- 28.3.4 [x] Implement and vector-test the normative vertical six-tap luma half-sample filter in Go, including rounding and clipping.
+- 28.3.5 [x] Port the vertical six-tap luma half-sample filter and matching vectors to Python.
+- 28.3.6 [x] Port the vertical six-tap luma half-sample filter and matching vectors to Rust.
+- 28.3.7 [x] Implement and vector-test diagonal luma half-sample position j in Go using unrounded, unclipped two-pass filtering.
+- 28.3.8 [x] Port diagonal luma half-sample position j and matching vectors to Python.
+- 28.3.9 [x] Port diagonal luma half-sample position j and matching vectors to Rust.
+- 28.3.10 [x] Implement and vector-test upward-rounded quarter-sample averaging in Go.
+- 28.3.11 [x] Port upward-rounded quarter-sample averaging and matching vectors to Python.
+- 28.3.12 [x] Port upward-rounded quarter-sample averaging and matching vectors to Rust.
+- 28.3.13 [x] Implement and vector-test the two quarter-sample positions surrounding one half-sample in Go.
+- 28.3.14 [x] Port quarter-sample pair interpolation and matching vectors to Python.
+- 28.3.15 [x] Port quarter-sample pair interpolation and matching vectors to Rust.
+- 28.3.16 [x] Implement and vector-test diagonal quarter-sample positions e, g, p, and r in Go.
+- 28.3.17 [x] Port diagonal quarter-sample positions and matching vectors to Python.
+- 28.3.18 [x] Port diagonal quarter-sample positions and matching vectors to Rust.
+- 28.3.19 [x] Implement and vector-test axial quarter-sample positions a, c, d, and n in Go.
+- 28.3.20 [x] Port axial quarter-sample positions and matching vectors to Python.
+- 28.3.21 [x] Port axial quarter-sample positions and matching vectors to Rust.
+- 28.3.22 [x] Implement and vector-test quarter-sample positions f, i, k, and q around diagonal half-sample j in Go.
+- 28.3.23 [x] Port f/i/k/q quarter-sample mapping and matching vectors to Python.
+- 28.3.24 [x] Port f/i/k/q quarter-sample mapping and matching vectors to Rust.
+- 28.3.25 [x] Implement and vector-test Table 8-12 luma fractional-sample selection in Go, indexed by xFracL then yFracL.
+- 28.3.26 [x] Port luma fractional-sample selection and matching vectors to Python.
+- 28.3.27 [x] Port luma fractional-sample selection and matching vectors to Rust.
+- 28.3.28 [x] Implement and vector-test Go assembly of the 4x4 quarter-sample grid from a 6x6 integer neighborhood.
+- 28.3.29 [x] Port quarter-sample grid assembly and matching vectors to Python.
+- 28.3.30 [x] Port quarter-sample grid assembly and matching vectors to Rust.
+- 28.3.31 [x] Implement and vector-test Go gathering of the 6x6 luma reference neighborhood with stride-aware edge clipping.
+- 28.3.32 [x] Port luma neighborhood gathering and matching boundary vectors to Python.
+- 28.3.33 [x] Port luma neighborhood gathering and matching boundary vectors to Rust.
+- 28.3.34 [x] Implement and vector-test Go fractional luma interpolation from a reference plane through Table 8-12 selection.
+- 28.3.35 [x] Port complete fractional luma sample selection and matching vectors to Python.
+- 28.3.36 [x] Port complete fractional luma sample selection and matching vectors to Rust.
+- 28.3.37 [x] Verify weighted prediction is disabled in every active PPS before omitting weighted sample tables.
+- 29.1.1 [x] Store owned decoded YUV 4:2:0 reference pictures by identifier in Go, Python, and Rust; keep POC calculation and output reordering separate.
+- 29.1.2 [x] Calculate progressive-frame POC type 0 with LSB wrap handling and reference-state updates in Go, Python, and Rust; leave POC types 1/2 and display reordering separate.
+- 29.1.3 [x] Calculate progressive-frame POC types 1 and 2 with frame-number wrap, type-1 cycle offsets, and reference-state updates in Go, Python, and Rust; leave display reordering separate.
+- 29.1.4 [x] Buffer decoded progressive frames by POC with a configurable reorder holdback, stable equal-POC ordering, owned planes, and explicit draining in Go, Python, and Rust.
+- 30.1.1 [x] Derive `FilterOffsetA/B` from the slice offsets and `indexA/indexB` from the rounded average `qPav = (qPp + qPq + 1) >> 1` for the two macroblocks across each edge; do not use one `SliceQPY` as `qPav`.
+- 30.1.2 [x] Look up the Table 8-16 alpha-prime/beta-prime values from clipped indices in Go, Python, and Rust; these equal alpha/beta for the supported 8-bit luma path, while other bit depths require the specified scaling; keep sample-edge filtering separate.
+- 30.1.3 [x] Derive `filterSamplesFlag` for luma edges from nonzero boundary strength and strict alpha/beta sample-difference tests in Go, Python, and Rust; keep sample updates and strong/weak filtering separate.
+- 30.1.4 [x] Look up Table 8-17 `t′C0` for luma weak edges (`bS` 1–3) by `indexA` in Go, Python, and Rust; apply bit-depth scaling and sample updates separately.
+- 30.1.5 [x] Apply the 8-bit luma weak-edge `p0/q0/p1/q1` updates from clause 8.7.2.3 using caller-supplied `beta` and `tC0`, preserving `p2/q2`; keep strong-edge filtering separate.
+- 30.1.6 [x] Apply the 8-bit luma bS=4 strong-edge equations from clause 8.7.2.4 with independent p/q-side strong tests and fallback updates in Go, Python, and Rust.
+- 30.1.7 [x] Coordinate one luma edge in Go, Python, and Rust: honor disable IDC 0/1/2, skip only slice-boundary edges for IDC 2, apply the alpha/beta eligibility test, and select weak or strong filtering by bS.
+- 30.1.8 [x] Derive progressive-frame luma `bS` from macroblock-edge/intra status, coefficient presence, and the caller's inter-prediction comparison in Go, Python, and Rust; leave reference/MV comparison and field/MBAFF cases separate.
+- 30.1.9 [x] Compare up to two per-block reference-picture/MV pairs for progressive luma edges in Go, Python, and Rust; ignore list order, treat reference mismatch or component differences of at least four quarter-luma samples as different, and reject larger prediction sets.
+- 30.1.10 [x] Compose the progressive luma boundary-strength priority with reference/MV comparison so one helper derives `bS` directly from edge facts and prediction pairs in Go, Python, and Rust.
+- 30.1.11 [x] Correct IDC 2 gating in Go, Python, and Rust: suppress edges coinciding with slice boundaries while continuing to filter external macroblock edges inside a slice.
+- 30.1.12 [x] Apply one four-sample luma edge segment in sample order through the shared edge filter in Go, Python, and Rust; return no partial result if filtering fails.
+- 30.1.13 [x] Gather, filter, and scatter one stride-aware vertical or horizontal luma edge segment in Go, Python, and Rust; preserve outer taps and row padding, and leave the plane unchanged on invalid bounds or filter errors.
+- 30.1.14 [x] Filter a 16-luma-sample macroblock edge as four ordered 4-sample segments with independent boundary strengths in Go, Python, and Rust; prevalidate all strengths so an invalid later segment cannot leave partial plane updates.
+- 30.1.15 [x] Orchestrate one luma macroblock pass in Go, Python, and Rust: filter eligible left and vertical internal edges before the top and horizontal internal edges, omit internal 4/12 edges for 8x8 transforms, and validate all active edge inputs before mutation.
+- 30.1.16 [x] Derive left/top macroblock-edge eligibility from neighbor availability and disable IDC 0/1/2 in Go, Python, and Rust; suppress unavailable picture neighbors, suppress cross-slice neighbors only for IDC 2, and keep internal-edge eligibility separate.
+- 30.1.17 [x] Derive progressive-frame left/top macroblock indices and slice-boundary status from raster address, picture dimensions, and per-macroblock slice IDs in Go, Python, and Rust.
+- 30.1.18 [x] Resolve raster macroblock addresses into pixel coordinates and neighbor/slice facts on the macroblock descriptor in Go, Python, and Rust, preserving caller-supplied transform and edge-strength metadata.
+- 30.2.1 [x] Implement and vector-test the 4:2:0 2x2 chroma DC inverse transform in Go; keep coefficient scaling separate.
 
 **Decoder Contract (25.1)**
 - `Frame` is a display-order, SPS-cropped, planar 8-bit YUV 4:2:0 image. It carries width/height and tightly packed row-major Y, U, and V planes. Y contains `width * height` samples; each chroma plane contains `ceil(width/2) * ceil(height/2)` samples. No RGB or color-range conversion occurs here.

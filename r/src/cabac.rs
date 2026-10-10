@@ -4,6 +4,7 @@ use crate::BitReader;
 
 const INITIAL_RANGE: u32 = 510;
 const MAX_QPY: u32 = 51;
+const MAX_MOTION_VECTOR_DIFFERENCE: u32 = i32::MAX as u32;
 const MAX_COEFF_LEVEL_PREFIX: u32 = 23;
 const COEFF_ABS_LEVEL1_CONTEXT: [usize; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
 const COEFF_ABS_LEVEL_GREATER1_CONTEXT: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
@@ -593,6 +594,83 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let negative = self.decode_bypass_bin()?;
         let magnitude = (abs_level_minus1 + 1) as i32;
         Ok(if negative { -magnitude } else { magnitude })
+    }
+
+    /// Decodes one MVD component from seven consecutive contexts starting at 40 or 47.
+    /// `neighbor_magnitude` is the sum of the absolute left/top MVD components.
+    pub fn decode_motion_vector_difference(
+        &mut self,
+        neighbor_magnitude: u64,
+        contexts: &mut [CabacContextModel; 7],
+    ) -> io::Result<i32> {
+        if contexts.iter().any(|context| context.state_index >= 64) {
+            return Err(invalid("MVD context state index is outside [0,63]"));
+        }
+        let mut context_index =
+            usize::from(neighbor_magnitude >= 3) + usize::from(neighbor_magnitude >= 33);
+        let mut trial = Self {
+            bits: self.bits.clone(),
+            code_range: self.code_range,
+            code_offset: self.code_offset,
+            terminated: self.terminated,
+        };
+        let mut trial_contexts = *contexts;
+        let greater_than_zero = trial.decode_bin(&mut trial_contexts[context_index])?;
+        let signed_magnitude = if !greater_than_zero {
+            0
+        } else {
+            let mut magnitude = 1_u32;
+            context_index = 3;
+            while magnitude < 9 {
+                if !trial.decode_bin(&mut trial_contexts[context_index])? {
+                    break;
+                }
+                if magnitude < 4 {
+                    context_index += 1;
+                }
+                magnitude += 1;
+            }
+
+            if magnitude >= 9 {
+                let mut suffix_length = 3_u32;
+                while trial.decode_bypass_bin()? {
+                    if suffix_length > 30 {
+                        return Err(invalid("CABAC MVD exceeds the signed output range"));
+                    }
+                    let increment = 1_u32 << suffix_length;
+                    if magnitude > MAX_MOTION_VECTOR_DIFFERENCE - increment {
+                        return Err(invalid("CABAC MVD exceeds the signed output range"));
+                    }
+                    magnitude += increment;
+                    suffix_length += 1;
+                }
+                if suffix_length > 30 {
+                    return Err(invalid("CABAC MVD exceeds the signed output range"));
+                }
+                for bit_index in (0..suffix_length).rev() {
+                    if trial.decode_bypass_bin()? {
+                        let increment = 1_u32 << bit_index;
+                        if magnitude > MAX_MOTION_VECTOR_DIFFERENCE - increment {
+                            return Err(invalid("CABAC MVD exceeds the signed output range"));
+                        }
+                        magnitude += increment;
+                    }
+                }
+            }
+
+            if trial.decode_bypass_bin()? {
+                -(magnitude as i32)
+            } else {
+                magnitude as i32
+            }
+        };
+
+        self.bits = trial.bits;
+        self.code_range = trial.code_range;
+        self.code_offset = trial.code_offset;
+        self.terminated = trial.terminated;
+        *contexts = trial_contexts;
+        Ok(signed_magnitude)
     }
 
     /// Decodes signed levels for a frame-scan luma 4x4 significance map.
@@ -1441,6 +1519,165 @@ mod tests {
             (significant[0].state_index(), significant[0].mps()),
             (0, false)
         );
+    }
+
+    #[test]
+    fn decodes_motion_vector_difference_context_bands_and_values() {
+        for (neighbor_magnitude, expected_context) in
+            [(0, 0), (2, 0), (3, 1), (32, 1), (33, 2), (1_u64 << 32, 2)]
+        {
+            let mut decoder = decoder_with_state(&[], 510, 0);
+            let mut contexts = [CabacContextModel {
+                state_index: 0,
+                value_mps: false,
+            }; 7];
+            assert_eq!(
+                decoder
+                    .decode_motion_vector_difference(neighbor_magnitude, &mut contexts)
+                    .unwrap(),
+                0
+            );
+            for (index, context) in contexts.iter().enumerate() {
+                assert_eq!(
+                    context.state_index(),
+                    usize::from(index == expected_context) as u8
+                );
+            }
+        }
+
+        let vectors = [
+            (
+                0,
+                [
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: true,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                ],
+                1,
+            ),
+            (
+                253,
+                [
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: true,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                    CabacContextModel {
+                        state_index: 62,
+                        value_mps: false,
+                    },
+                ],
+                -1,
+            ),
+            (
+                0,
+                [CabacContextModel {
+                    state_index: 62,
+                    value_mps: true,
+                }; 7],
+                9,
+            ),
+            (
+                31,
+                [CabacContextModel {
+                    state_index: 62,
+                    value_mps: true,
+                }; 7],
+                10,
+            ),
+        ];
+        for (code_offset, mut contexts, expected) in vectors {
+            let data = if expected == 10 { [0x08] } else { [0x00] };
+            let mut decoder = decoder_with_state(&data, 510, code_offset);
+            assert_eq!(
+                decoder
+                    .decode_motion_vector_difference(0, &mut contexts)
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_motion_vector_difference_preserves_decoder_and_contexts() {
+        let mut decoder = decoder_with_state(&[], 510, 509);
+        let mut contexts = [CabacContextModel {
+            state_index: 62,
+            value_mps: true,
+        }; 7];
+        assert_eq!(
+            decoder
+                .decode_motion_vector_difference(0, &mut contexts)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnexpectedEof
+        );
+        assert_eq!((decoder.code_range(), decoder.code_offset()), (510, 509));
+        assert_eq!((contexts[0].state_index(), contexts[0].mps()), (62, true));
+    }
+
+    #[test]
+    fn overlong_motion_vector_difference_escape_is_transactional() {
+        let data = [0xff; 6];
+        let mut decoder = decoder_with_state(&data, 510, 491);
+        let mut contexts = [CabacContextModel {
+            state_index: 63,
+            value_mps: true,
+        }; 7];
+        assert!(decoder
+            .decode_motion_vector_difference(0, &mut contexts)
+            .unwrap_err()
+            .to_string()
+            .contains("MVD exceeds the signed output range"));
+        assert_eq!((decoder.code_range(), decoder.code_offset()), (510, 491));
+        assert!(contexts
+            .iter()
+            .all(|context| context.state_index() == 63 && context.mps()));
     }
 
     #[test]

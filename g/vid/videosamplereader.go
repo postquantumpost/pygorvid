@@ -42,6 +42,7 @@ type sampleLocation struct {
 // VideoSampleReader owns the MP4 file used to read samples from its first AVC video track.
 type VideoSampleReader struct {
 	file          *os.File
+	path          string
 	configuration AVCConfiguration
 	samples       []sampleLocation
 	nextIndex     int
@@ -58,6 +59,7 @@ func OpenVideoSampleReader(path string) (*VideoSampleReader, error) {
 		file.Close()
 		return nil, err
 	}
+	reader.path = path
 	return reader, nil
 }
 

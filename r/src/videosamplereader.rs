@@ -28,6 +28,7 @@ struct SampleLocation {
 
 pub struct VideoSampleReader {
     file: Option<File>,
+    path: Option<std::path::PathBuf>,
     configuration: AvcConfiguration,
     samples: Vec<SampleLocation>,
     next_index: usize,
@@ -36,7 +37,8 @@ pub struct VideoSampleReader {
 impl VideoSampleReader {
     /// Opens `path` and prepares sample locations for its first AVC video track.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let mut file = File::open(path)?;
+        let path_buf = path.as_ref().to_path_buf();
+        let mut file = File::open(&path_buf)?;
         let file_size = file.metadata()?.len();
         let boxes = read_boxes(&mut file, 0, file_size)?;
         let track = find(&boxes, &[b"moov", b"trak"])
@@ -170,10 +172,15 @@ impl VideoSampleReader {
 
         Ok(Self {
             file: Some(file),
+            path: Some(path_buf),
             configuration: avc_configuration,
             samples,
             next_index: 0,
         })
+    }
+
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
     }
 
     pub fn configuration(&self) -> &AvcConfiguration {

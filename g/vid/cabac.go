@@ -22,8 +22,11 @@ var (
 	ErrCABACTerminated           = errors.New("CABAC decoder is already terminated")
 )
 
+var ErrCABACMotionVectorDifferenceOutOfRange = errors.New("CABAC motion-vector difference exceeds the signed output range")
+
 const cabacInitialRange uint32 = 510
 const cabacMaxQPY uint32 = 51
+const cabacMaxMotionVectorDifference uint32 = uint32(^uint32(0) >> 1)
 
 var cabacCoeffAbsLevel1Context = [8]uint8{1, 2, 3, 4, 0, 0, 0, 0}
 var cabacCoeffAbsLevelGreater1Context = [8]uint8{5, 5, 5, 5, 6, 7, 8, 9}
@@ -762,6 +765,105 @@ func (decoder *CABACArithmeticDecoder) DecodeCoeffSign(absLevelMinus1 uint32) (i
 		return -magnitude, nil
 	}
 	return magnitude, nil
+}
+
+// DecodeMotionVectorDifference decodes one component using seven caller-selected consecutive contexts.
+// neighborMagnitude sums absolute left/top MVD components; contexts start at 40 horizontally or 47 vertically.
+func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifference(neighborMagnitude uint64, contexts *[7]CABACContextModel) (int32, error) {
+	if contexts == nil {
+		return 0, ErrCABACContextState
+	}
+	for index := range contexts {
+		if contexts[index].stateIndex >= 64 {
+			return 0, ErrCABACContextState
+		}
+	}
+
+	contextIndex := 0
+	if neighborMagnitude >= 3 {
+		contextIndex++
+	}
+	if neighborMagnitude >= 33 {
+		contextIndex++
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	greaterThanZero, err := trial.DecodeBin(&trialContexts[contextIndex])
+	if err != nil {
+		return 0, err
+	}
+	if !greaterThanZero {
+		decoder.commitTrial(&trial, &readerCopy)
+		*contexts = trialContexts
+		return 0, nil
+	}
+
+	absolute := uint32(1)
+	contextIndex = 3
+	for absolute < 9 {
+		greater, err := trial.DecodeBin(&trialContexts[contextIndex])
+		if err != nil {
+			return 0, err
+		}
+		if !greater {
+			break
+		}
+		if absolute < 4 {
+			contextIndex++
+		}
+		absolute++
+	}
+	if absolute >= 9 {
+		k := uint32(3)
+		for {
+			more, err := trial.DecodeBypassBin()
+			if err != nil {
+				return 0, err
+			}
+			if !more {
+				break
+			}
+			if k > 30 {
+				return 0, ErrCABACMotionVectorDifferenceOutOfRange
+			}
+			increment := uint32(1) << k
+			if absolute > cabacMaxMotionVectorDifference-increment {
+				return 0, ErrCABACMotionVectorDifferenceOutOfRange
+			}
+			absolute += increment
+			k++
+		}
+		if k > 30 {
+			return 0, ErrCABACMotionVectorDifferenceOutOfRange
+		}
+		for k > 0 {
+			k--
+			bit, err := trial.DecodeBypassBin()
+			if err != nil {
+				return 0, err
+			}
+			if bit {
+				increment := uint32(1) << k
+				if absolute > cabacMaxMotionVectorDifference-increment {
+					return 0, ErrCABACMotionVectorDifferenceOutOfRange
+				}
+				absolute += increment
+			}
+		}
+	}
+	negative, err := trial.DecodeBypassBin()
+	if err != nil {
+		return 0, err
+	}
+	result := int32(absolute)
+	if negative {
+		result = -result
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
 }
 
 // DecodeLuma4x4ResidualLevels decodes signed levels in reverse scan order using contexts 227-236.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -153,34 +152,5 @@ func extractFrame(input string, frame int, output string) error {
 	if extension != ".png" && extension != ".jpg" {
 		return errors.New("--output must end in .png or .jpg")
 	}
-	v := vid.OpenFile(input)
-	if !v.IsOpen() {
-		return errors.New(v.ErrorInfo())
-	}
-	defer v.Close()
-	if v.Format != "mp4" {
-		return errors.New("frame extraction requires an MP4 file")
-	}
-	v.GetBasicInfo()
-	if err := v.ErrorInfo(); err != "" {
-		return errors.New(err)
-	}
-	tempDir, err := os.MkdirTemp(filepath.Dir(output), ".vidprobe-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tempDir)
-	tempOutput := filepath.Join(tempDir, "frame"+extension)
-	filter := fmt.Sprintf("select=eq(n\\,%d)", frame)
-	cmd := exec.Command("ffmpeg", "-v", "error", "-i", input,
-		"-map", "0:v:0", "-vf", filter, "-fps_mode", "passthrough",
-		"-frames:v", "1", "-y", tempOutput)
-	if result, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ffmpeg: %w: %s", err, strings.TrimSpace(string(result)))
-	}
-	info, err := os.Stat(tempOutput)
-	if err != nil || info.Size() == 0 {
-		return errors.New("requested frame does not exist or produced an empty image")
-	}
-	return os.Rename(tempOutput, output)
+	return errors.New("native frame extraction is not available in this build; ffmpeg is no longer invoked by the extraction path")
 }
