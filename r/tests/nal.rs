@@ -1,4 +1,4 @@
-use pygorvid::{ebsp_to_rbsp, parse_nal_header};
+use pygorvid::{ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals};
 use std::io::ErrorKind;
 
 #[test]
@@ -17,6 +17,50 @@ fn parses_nal_header_fields() {
     assert_eq!(
         parse_nal_header(&[0xe5]).unwrap_err().kind(),
         ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn splits_length_prefixed_nals_for_configured_widths() {
+    for length_size in [1, 2, 4] {
+        let expected = [vec![0x65, 0xaa], vec![0x41, 0xbb, 0xcc]];
+        let mut sample = Vec::new();
+        for nal in &expected {
+            let prefix = (nal.len() as u32).to_be_bytes();
+            sample.extend_from_slice(&prefix[4 - length_size..]);
+            sample.extend_from_slice(nal);
+        }
+        assert_eq!(
+            split_length_prefixed_nals(&sample, length_size).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_length_prefixed_nal_boundaries() {
+    for (sample, length_size, expected_kind, message) in [
+        (
+            &[0][..],
+            2,
+            ErrorKind::UnexpectedEof,
+            "truncated NAL length prefix",
+        ),
+        (&[0, 0][..], 2, ErrorKind::InvalidData, "zero length"),
+        (
+            &[0, 2, 0x65][..],
+            2,
+            ErrorKind::UnexpectedEof,
+            "NAL unit is truncated",
+        ),
+    ] {
+        let error = split_length_prefixed_nals(sample, length_size).unwrap_err();
+        assert_eq!(error.kind(), expected_kind);
+        assert!(error.to_string().contains(message));
+    }
+    assert_eq!(
+        split_length_prefixed_nals(&[], 3).unwrap_err().kind(),
+        ErrorKind::InvalidInput
     );
 }
 

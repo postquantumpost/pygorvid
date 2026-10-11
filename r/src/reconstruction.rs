@@ -1286,6 +1286,13 @@ impl PresentationOrderBuffer {
 pub struct DecodedReferencePicture {
     pub reference: ReferencePicture,
     pub frame: Yuv420Frame,
+    pub motion_field: Vec<(usize, [ColocatedMotionFact; 16])>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ColocatedMotionFact {
+    pub reference_index: i32,
+    pub motion_vector: MotionVector,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1295,6 +1302,15 @@ pub struct ReferencePictureBuffer {
 
 impl ReferencePictureBuffer {
     pub fn store(&mut self, reference: ReferencePicture, frame: &Yuv420Frame) -> io::Result<()> {
+        self.store_with_motion_field(reference, frame, Vec::new())
+    }
+
+    pub fn store_with_motion_field(
+        &mut self,
+        reference: ReferencePicture,
+        frame: &Yuv420Frame,
+        mut motion_field: Vec<(usize, [ColocatedMotionFact; 16])>,
+    ) -> io::Result<()> {
         let chroma_width = frame.width / 2 + frame.width % 2;
         let chroma_height = frame.height / 2 + frame.height % 2;
         if !valid_yuv_plane(&frame.y, frame.width, frame.height, frame.y_stride)
@@ -1306,9 +1322,17 @@ impl ReferencePictureBuffer {
                 "reference picture frame layout is invalid or truncated",
             ));
         }
+        motion_field.sort_by_key(|(address, _)| *address);
+        if motion_field.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "reference picture motion field contains duplicate macroblock addresses",
+            ));
+        }
         let stored = DecodedReferencePicture {
             reference,
             frame: frame.clone(),
+            motion_field,
         };
         if let Some(existing) = self
             .pictures
@@ -1320,6 +1344,22 @@ impl ReferencePictureBuffer {
             self.pictures.push(stored);
         }
         Ok(())
+    }
+
+    pub fn colocated_motion_facts(
+        &self,
+        identifier: u32,
+        macroblock_address: usize,
+    ) -> Option<[ColocatedMotionFact; 16]> {
+        let picture = self
+            .pictures
+            .iter()
+            .find(|picture| picture.reference.identifier == identifier)?;
+        picture
+            .motion_field
+            .binary_search_by_key(&macroblock_address, |(address, _)| *address)
+            .ok()
+            .map(|index| picture.motion_field[index].1)
     }
 
     pub fn get(&self, identifier: u32) -> Option<DecodedReferencePicture> {
@@ -1340,6 +1380,10 @@ impl ReferencePictureBuffer {
         } else {
             false
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.pictures.clear();
     }
 
     pub fn references(&self) -> Vec<ReferencePicture> {
@@ -1531,6 +1575,44 @@ pub fn interpolate_luma_fractional_sample(
         gather_luma_quarter_sample_neighborhood(plane, width, height, stride, x_int, y_int)?;
     let grid = interpolate_luma_quarter_sample_grid(&neighborhood);
     select_luma_fractional_sample(&grid, x_frac_l, y_frac_l)
+}
+
+/// Applies the H.264 clause 8.4.2.2.2 4:2:0 chroma bilinear interpolation equation.
+pub fn interpolate_chroma_fractional_sample(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    x_int: isize,
+    y_int: isize,
+    x_frac_c: u8,
+    y_frac_c: u8,
+) -> io::Result<u8> {
+    if x_frac_c > 7 || y_frac_c > 7 {
+        return Err(invalid("chroma fractional-sample offset is outside [0,7]"));
+    }
+    if width == 0 || height == 0 || stride < width || plane.len() < (height - 1) * stride + width {
+        return Err(invalid(
+            "chroma reference plane layout is invalid or truncated",
+        ));
+    }
+    let x0 = clip_luma_reference_coordinate(x_int, 0, width);
+    let x1 = clip_luma_reference_coordinate(x_int, 1, width);
+    let y0 = clip_luma_reference_coordinate(y_int, 0, height);
+    let y1 = clip_luma_reference_coordinate(y_int, 1, height);
+    let a = u32::from(plane[y0 * stride + x0]);
+    let b = u32::from(plane[y0 * stride + x1]);
+    let c = u32::from(plane[y1 * stride + x0]);
+    let d = u32::from(plane[y1 * stride + x1]);
+    let x_frac = u32::from(x_frac_c);
+    let y_frac = u32::from(y_frac_c);
+    let value = ((8 - x_frac) * (8 - y_frac) * a
+        + x_frac * (8 - y_frac) * b
+        + (8 - x_frac) * y_frac * c
+        + x_frac * y_frac * d
+        + 32)
+        >> 6;
+    Ok(value as u8)
 }
 
 fn clip_luma_reference_coordinate(origin: isize, offset: isize, limit: usize) -> usize {
@@ -1908,7 +1990,7 @@ pub fn inverse_scale_chroma_dc2x2(transformed: &[i64; 4], qpc: i32) -> io::Resul
         ));
     }
 
-    let factor = INVERSE_SCALE_4X4_FACTORS[(qpc % 6) as usize][0];
+    let factor = INVERSE_SCALE_4X4_FACTORS[(qpc % 6) as usize][0] * 16;
     let shift = qpc / 6;
     let mut scaled = [0_i64; 4];
     for (index, coefficient) in transformed.iter().enumerate() {
@@ -2052,10 +2134,10 @@ pub fn inverse_scale_luma8x8(
         let value = i64::from(levels[index])
             * INVERSE_SCALE_8X8_FACTORS[(qpy % 6) as usize][factor_class]
             * i64::from(scaling_list[index]);
-        scaled[index] = if qpy >= 24 {
-            value << (qpy / 6 - 4)
+        scaled[index] = if qpy >= 36 {
+            value << (qpy / 6 - 6)
         } else {
-            let shift = 4 - qpy / 6;
+            let shift = 6 - qpy / 6;
             let rounding = 1_i64 << (shift - 1);
             (value + rounding) >> shift
         };
@@ -2715,7 +2797,7 @@ pub fn predict_luma_intra4x4_diagonal_down_right(
     let mut prediction = [0_u8; 16];
     for row in 0..4 {
         for column in 0..4 {
-            let position = column as i32 - row as i32;
+            let position = column as i32 - row as i32 - 1;
             let value = (reference_at(position - 1)
                 + 2 * reference_at(position)
                 + reference_at(position + 1)
@@ -2747,20 +2829,20 @@ pub fn predict_luma_intra4x4_vertical_right(
             let phase = 2 * column as i32 - row as i32;
             let value = if phase >= 0 && phase % 2 == 0 {
                 let center = phase / 2;
+                (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
+            } else if phase >= 0 {
+                let center = (phase - 1) / 2;
                 (top_reference_at(center - 1)
                     + 2 * top_reference_at(center)
                     + top_reference_at(center + 1)
                     + 2)
                     >> 2
-            } else if phase >= 0 {
-                let center = (phase - 1) / 2;
-                (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
             } else if phase == -1 {
-                (u16::from(left[0]) + u16::from(top_left) + 1) >> 1
-            } else if phase == -2 {
                 (u16::from(left[0]) + 2 * u16::from(top_left) + u16::from(top[0]) + 2) >> 2
+            } else if phase == -2 {
+                (u16::from(left[1]) + 2 * u16::from(left[0]) + u16::from(top_left) + 2) >> 2
             } else {
-                (u16::from(left[0]) + u16::from(left[1]) + 1) >> 1
+                (u16::from(left[2]) + 2 * u16::from(left[1]) + u16::from(left[0]) + 2) >> 2
             };
             prediction[row * 4 + column] = value as u8;
         }
@@ -2813,18 +2895,16 @@ pub fn predict_luma_intra4x4_vertical_left(top: &[u8; 8]) -> [u8; 16] {
 /// Interpolates a 4x4 luma block using alternating left-reference phases.
 pub fn predict_luma_intra4x4_horizontal_up(left: &[u8; 8]) -> [u8; 16] {
     let mut prediction = [0_u8; 16];
+    let reference_at = |position: usize| u16::from(left[position.min(3)]);
     for row in 0..4 {
         for column in 0..4 {
             let phase = 2 * row + column;
             let value = if phase % 2 == 0 {
                 let center = phase / 2;
-                (u16::from(left[center]) + u16::from(left[center + 1]) + 1) >> 1
+                (reference_at(center) + reference_at(center + 1) + 1) >> 1
             } else {
                 let center = (phase - 1) / 2;
-                (u16::from(left[center])
-                    + 2 * u16::from(left[center + 1])
-                    + u16::from(left[center + 2])
-                    + 2)
+                (reference_at(center) + 2 * reference_at(center + 1) + reference_at(center + 2) + 2)
                     >> 2
             };
             prediction[row * 4 + column] = value as u8;
@@ -2851,28 +2931,80 @@ pub fn reconstruct_luma_intra4x4_macroblock(
     let block_x = [0, 4, 0, 4, 8, 12, 8, 12, 0, 4, 0, 4, 8, 12, 8, 12];
     let block_y = [0, 0, 4, 4, 0, 0, 4, 4, 8, 8, 12, 12, 8, 8, 12, 12];
     let mut macroblock = [0_u8; 256];
+    let mut written = [false; 256];
     for (block_index, block) in blocks.iter().enumerate() {
-        let top4 = [block.top[0], block.top[1], block.top[2], block.top[3]];
-        let left4 = [block.left[0], block.left[1], block.left[2], block.left[3]];
+        let origin_x = block_x[block_index];
+        let origin_y = block_y[block_index];
+        let mut top = block.top;
+        let mut left = block.left;
+        let mut top_left = block.top_left;
+        let mut top_available = block.top_available;
+        let mut left_available = block.left_available;
+        let mut top_left_available = block.top_left_available;
+        if !top_available && origin_y > 0 {
+            let mut last_sample = None;
+            let mut primary_samples_available = true;
+            for (offset, sample) in top.iter_mut().enumerate() {
+                let column = origin_x + offset;
+                if column < 16 && written[(origin_y - 1) * 16 + column] {
+                    *sample = macroblock[(origin_y - 1) * 16 + column];
+                    last_sample = Some(*sample);
+                } else if offset >= 4 {
+                    if let Some(last_sample) = last_sample {
+                        *sample = last_sample;
+                    }
+                } else {
+                    primary_samples_available = false;
+                }
+            }
+            top_available = primary_samples_available;
+        }
+        if !left_available && origin_x > 0 {
+            let mut last_sample = None;
+            let mut primary_samples_available = true;
+            for (offset, sample) in left.iter_mut().enumerate() {
+                let row = origin_y + offset;
+                if row < 16 && written[row * 16 + origin_x - 1] {
+                    *sample = macroblock[row * 16 + origin_x - 1];
+                    last_sample = Some(*sample);
+                } else if offset >= 4 {
+                    if let Some(last_sample) = last_sample {
+                        *sample = last_sample;
+                    }
+                } else {
+                    primary_samples_available = false;
+                }
+            }
+            left_available = primary_samples_available;
+        }
+        if !top_left_available && origin_x > 0 && origin_y > 0 {
+            let top_left_index = (origin_y - 1) * 16 + origin_x - 1;
+            if written[top_left_index] {
+                top_left = macroblock[top_left_index];
+                top_left_available = true;
+            }
+        }
+        let top4 = [top[0], top[1], top[2], top[3]];
+        let left4 = [left[0], left[1], left[2], left[3]];
         let prediction = match block.mode {
-            0 if block.top_available => predict_luma_intra4x4_vertical(&top4),
-            1 if block.left_available => predict_luma_intra4x4_horizontal(&left4),
+            0 if top_available => predict_luma_intra4x4_vertical(&top4),
+            1 if left_available => predict_luma_intra4x4_horizontal(&left4),
             2 => predict_luma_intra4x4_dc(
-                block.top_available.then_some(&top4),
-                block.left_available.then_some(&left4),
+                top_available.then_some(&top4),
+                left_available.then_some(&left4),
             ),
-            3 if block.top_available => predict_luma_intra4x4_diagonal_down_left(&block.top),
-            4 if block.top_available && block.left_available && block.top_left_available => {
-                predict_luma_intra4x4_diagonal_down_right(&block.top, &left4, block.top_left)
+            3 if top_available => predict_luma_intra4x4_diagonal_down_left(&top),
+            4 if top_available && left_available && top_left_available => {
+                predict_luma_intra4x4_diagonal_down_right(&top, &left4, top_left)
             }
-            5 if block.top_available && block.left_available && block.top_left_available => {
-                predict_luma_intra4x4_vertical_right(&block.top, &left4, block.top_left)
+            5 if top_available && left_available && top_left_available => {
+                predict_luma_intra4x4_vertical_right(&top, &left4, top_left)
             }
-            6 if block.top_available && block.left_available && block.top_left_available => {
-                predict_luma_intra4x4_horizontal_down(&top4, &left4, block.top_left)
+            6 if top_available && left_available && top_left_available => {
+                predict_luma_intra4x4_horizontal_down(&top4, &left4, top_left)
             }
-            7 if block.top_available => predict_luma_intra4x4_vertical_left(&block.top),
-            8 if block.left_available => predict_luma_intra4x4_horizontal_up(&block.left),
+            7 if top_available => predict_luma_intra4x4_vertical_left(&top),
+            8 if left_available => predict_luma_intra4x4_horizontal_up(&left),
             _ => return Err(invalid("luma Intra_4x4 macroblock input is invalid")),
         };
         for row in 0..4 {
@@ -2889,6 +3021,7 @@ pub fn reconstruct_luma_intra4x4_macroblock(
                 };
                 macroblock[(block_y[block_index] + row) * 16 + block_x[block_index] + column] =
                     sample;
+                written[(origin_y + row) * 16 + origin_x + column] = true;
             }
         }
     }
@@ -2905,6 +3038,7 @@ pub struct LumaIntra8x8Block {
     pub left_available: bool,
     pub top_left_available: bool,
     pub residual: [i64; 64],
+    pub references_filtered: bool,
 }
 
 impl Default for LumaIntra8x8Block {
@@ -2918,57 +3052,159 @@ impl Default for LumaIntra8x8Block {
             left_available: false,
             top_left_available: false,
             residual: [0; 64],
+            references_filtered: true,
         }
     }
+}
+
+fn filter_luma_intra8x8_reference_samples(
+    top: &[u8; 16],
+    top_available: bool,
+    left: &[u8; 16],
+    left_available: bool,
+    top_left: u8,
+    top_left_available: bool,
+) -> ([u8; 16], [u8; 16], u8) {
+    let mut filtered_top = *top;
+    let mut filtered_left = *left;
+    if top_available {
+        filtered_top[0] = if top_left_available {
+            (u16::from(top_left) + 2 * u16::from(top[0]) + u16::from(top[1]) + 2) >> 2
+        } else {
+            (3 * u16::from(top[0]) + u16::from(top[1]) + 2) >> 2
+        } as u8;
+        for index in 1..15 {
+            filtered_top[index] = ((u16::from(top[index - 1])
+                + 2 * u16::from(top[index])
+                + u16::from(top[index + 1])
+                + 2)
+                >> 2) as u8;
+        }
+        filtered_top[15] = ((u16::from(top[14]) + 3 * u16::from(top[15]) + 2) >> 2) as u8;
+    }
+    if left_available {
+        filtered_left[0] = if top_left_available {
+            (u16::from(top_left) + 2 * u16::from(left[0]) + u16::from(left[1]) + 2) >> 2
+        } else {
+            (3 * u16::from(left[0]) + u16::from(left[1]) + 2) >> 2
+        } as u8;
+        for index in 1..7 {
+            filtered_left[index] = ((u16::from(left[index - 1])
+                + 2 * u16::from(left[index])
+                + u16::from(left[index + 1])
+                + 2)
+                >> 2) as u8;
+        }
+        filtered_left[7] = ((u16::from(left[6]) + 3 * u16::from(left[7]) + 2) >> 2) as u8;
+        let final_left_sample = filtered_left[7];
+        filtered_left[8..].fill(final_left_sample);
+    }
+    let filtered_top_left = if !top_left_available {
+        top_left
+    } else if top_available && left_available {
+        ((u16::from(top[0]) + 2 * u16::from(top_left) + u16::from(left[0]) + 2) >> 2) as u8
+    } else if top_available {
+        ((3 * u16::from(top_left) + u16::from(top[0]) + 2) >> 2) as u8
+    } else if left_available {
+        ((3 * u16::from(top_left) + u16::from(left[0]) + 2) >> 2) as u8
+    } else {
+        top_left
+    };
+    (filtered_top, filtered_left, filtered_top_left)
 }
 
 pub fn reconstruct_luma_intra8x8_macroblock(
     blocks: &[LumaIntra8x8Block; 4],
 ) -> io::Result<[u8; 256]> {
     let mut macroblock = [0_u8; 256];
+    let mut written = [false; 256];
     for (block_index, block) in blocks.iter().enumerate() {
+        let origin_x = (block_index % 2) * 8;
+        let origin_y = (block_index / 2) * 8;
+        let mut top = block.top;
+        let mut left = block.left;
+        let mut top_left = block.top_left;
+        let mut top_available = block.top_available;
+        let mut left_available = block.left_available;
+        let mut top_left_available = block.top_left_available;
+        if !block.references_filtered {
+            if !top_available && origin_y > 0 {
+                let mut last_sample = None;
+                let mut primary_samples_available = true;
+                for (offset, sample) in top.iter_mut().enumerate() {
+                    let column = origin_x + offset;
+                    if column < 16 && written[(origin_y - 1) * 16 + column] {
+                        *sample = macroblock[(origin_y - 1) * 16 + column];
+                        last_sample = Some(*sample);
+                    } else if offset >= 8 {
+                        if let Some(last_sample) = last_sample {
+                            *sample = last_sample;
+                        }
+                    } else {
+                        primary_samples_available = false;
+                    }
+                }
+                top_available = primary_samples_available;
+            }
+            if !left_available && origin_x > 0 {
+                let mut last_sample = None;
+                let mut primary_samples_available = true;
+                for offset in 0..8 {
+                    let row = origin_y + offset;
+                    if row < 16 && written[row * 16 + origin_x - 1] {
+                        left[offset] = macroblock[row * 16 + origin_x - 1];
+                        last_sample = Some(left[offset]);
+                    } else {
+                        primary_samples_available = false;
+                    }
+                }
+                left_available = primary_samples_available;
+                if left_available {
+                    left[8..].fill(last_sample.unwrap_or_default());
+                }
+            }
+            if !top_left_available && origin_x > 0 && origin_y > 0 {
+                let top_left_index = (origin_y - 1) * 16 + origin_x - 1;
+                if written[top_left_index] {
+                    top_left = macroblock[top_left_index];
+                    top_left_available = true;
+                }
+            }
+            (top, left, top_left) = filter_luma_intra8x8_reference_samples(
+                &top,
+                top_available,
+                &left,
+                left_available,
+                top_left,
+                top_left_available,
+            );
+        }
         let top8 = [
-            block.top[0],
-            block.top[1],
-            block.top[2],
-            block.top[3],
-            block.top[4],
-            block.top[5],
-            block.top[6],
-            block.top[7],
+            top[0], top[1], top[2], top[3], top[4], top[5], top[6], top[7],
         ];
         let left8 = [
-            block.left[0],
-            block.left[1],
-            block.left[2],
-            block.left[3],
-            block.left[4],
-            block.left[5],
-            block.left[6],
-            block.left[7],
+            left[0], left[1], left[2], left[3], left[4], left[5], left[6], left[7],
         ];
         let prediction = match block.mode {
-            0 if block.top_available => predict_luma_intra8x8_vertical(&top8),
-            1 if block.left_available => predict_luma_intra8x8_horizontal(&left8),
+            0 if top_available => predict_luma_intra8x8_vertical(&top8),
+            1 if left_available => predict_luma_intra8x8_horizontal(&left8),
             2 => predict_luma_intra8x8_dc(
-                block.top_available.then_some(&top8),
-                block.left_available.then_some(&left8),
+                top_available.then_some(&top8),
+                left_available.then_some(&left8),
             ),
-            3 if block.top_available => predict_luma_intra8x8_diagonal_down_left(&block.top),
-            4 if block.top_available && block.left_available && block.top_left_available => {
-                predict_luma_intra8x8_diagonal_down_right(&block.top, &left8, block.top_left)
+            3 if top_available => predict_luma_intra8x8_diagonal_down_left(&top),
+            4 if top_available && left_available && top_left_available => {
+                predict_luma_intra8x8_diagonal_down_right(&top, &left8, top_left)
             }
-            5 if block.top_available && block.left_available && block.top_left_available => {
-                predict_luma_intra8x8_vertical_right(&block.top, &left8, block.top_left)
+            5 if top_available && left_available && top_left_available => {
+                predict_luma_intra8x8_vertical_right(&top, &left8, top_left)
             }
-            6 if block.top_available && block.left_available && block.top_left_available => {
-                predict_luma_intra8x8_horizontal_down(&top8, &block.left, block.top_left)
+            6 if top_available && left_available && top_left_available => {
+                predict_luma_intra8x8_horizontal_down(&top8, &left, top_left)
             }
-            7 if block.top_available => predict_luma_intra8x8_vertical_left(&block.top),
-            8 if block.left_available => predict_luma_intra8x8_horizontal_up(&block.left),
-            9 if block.top_available && block.left_available => {
-                predict_luma_intra8x8_plane(&block.top, &block.left)
-            }
+            7 if top_available => predict_luma_intra8x8_vertical_left(&top),
+            8 if left_available => predict_luma_intra8x8_horizontal_up(&left),
+            9 if top_available && left_available => predict_luma_intra8x8_plane(&top, &left),
             _ => return Err(invalid("luma Intra_8x8 macroblock input is invalid")),
         };
         let origin_x = (block_index % 2) * 8;
@@ -2986,6 +3222,7 @@ pub fn reconstruct_luma_intra8x8_macroblock(
                     (predicted + residual) as u8
                 };
                 macroblock[(origin_y + row) * 16 + origin_x + column] = sample;
+                written[(origin_y + row) * 16 + origin_x + column] = true;
             }
         }
     }
@@ -3021,7 +3258,7 @@ fn inverse_transform_8x8_line(coefficients: [i64; 8]) -> [i64; 8] {
     let a7 = coefficients[3] + coefficients[5] + coefficients[1] + (coefficients[1] >> 1);
     let b1 = a1 + (a7 >> 2);
     let b3 = a3 + (a5 >> 2);
-    let b5 = a5 - (a3 >> 2);
+    let b5 = (a3 >> 2) - a5;
     let b7 = a7 - (a1 >> 2);
 
     [
@@ -4663,7 +4900,7 @@ mod tests {
                 .store(replacement, &invalid_frame)
                 .unwrap_err()
                 .kind(),
-            ErrorKind::InvalidInput
+            ErrorKind::InvalidData
         );
     }
 
@@ -4752,6 +4989,33 @@ mod tests {
         assert_eq!(
             interpolate_luma_quarter_sample_around_j(10, 21, 30, 40, 50),
             [20, 26, 35, 40]
+        );
+    }
+
+    #[test]
+    fn interpolates_chroma_fractional_sample_with_bilinear_equation() {
+        let plane = [0, 64, 128, 255];
+        assert_eq!(
+            interpolate_chroma_fractional_sample(&plane, 2, 2, 2, 0, 0, 0, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            interpolate_chroma_fractional_sample(&plane, 2, 2, 2, 0, 0, 4, 4).unwrap(),
+            112
+        );
+        assert_eq!(
+            interpolate_chroma_fractional_sample(&plane, 2, 2, 2, 0, 0, 7, 7).unwrap(),
+            216
+        );
+        assert_eq!(
+            interpolate_chroma_fractional_sample(&plane, 2, 2, 2, -1, -1, 0, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            interpolate_chroma_fractional_sample(&plane, 2, 2, 2, 0, 0, 8, 0)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
         );
     }
 
@@ -5458,15 +5722,11 @@ mod tests {
     #[test]
     fn inverse_scale_chroma_dc2x2_matches_qpc_vectors() {
         let vectors = [
-            ([32, -32, 1, -1], 0, [10, -10, 0, -1]),
-            ([1, 2, -1, -2], 5, [0, 1, -1, -2]),
-            ([1, 2, -1, -2], 6, [0, 1, -1, -2]),
-            ([1, 2, -1, -2], 39, [28, 56, -28, -56]),
-            (
-                [-(1_i64 << 15), (1_i64 << 15) - 1, 0, 0],
-                0,
-                [-10240, 10239, 0, 0],
-            ),
+            ([32, -32, 1, -1], 0, [160, -160, 5, -5]),
+            ([1, 2, -1, -2], 5, [9, 18, -9, -18]),
+            ([1, 2, -1, -2], 6, [10, 20, -10, -20]),
+            ([1, 2, -1, -2], 39, [448, 896, -448, -896]),
+            ([-6553, 6553, 0, 0], 0, [-32765, 32765, 0, 0]),
         ];
         for (transformed, qpc, expected) in vectors {
             assert_eq!(
@@ -5762,7 +6022,7 @@ mod tests {
         for (qpy, expected) in vectors {
             assert_eq!(
                 inverse_scale_luma8x8(&levels, &scaling_list, qpy).unwrap(),
-                expected
+                expected.map(|value| (value + 2) / 4)
             );
         }
     }
@@ -5777,7 +6037,7 @@ mod tests {
 
         let scaled = inverse_scale_luma8x8(&levels, &scaling_list, 0).unwrap();
 
-        assert_eq!((scaled[0], scaled[1]), (-20, 10));
+        assert_eq!((scaled[0], scaled[1]), (-5, 2));
     }
 
     #[test]
@@ -5897,7 +6157,7 @@ mod tests {
         dc[0] = 64;
         assert_eq!(inverse_transform_luma8x8(&dc), [1_i64; 64]);
 
-        let frequency = [2, -1, 1, 0, 0, -1, 1, -1];
+        let frequency = [2, 1, 1, 0, 0, -1, -1, -1];
         let mut horizontal_frequency = [0_i64; 64];
         horizontal_frequency[1] = 64;
         let mut expected_horizontal = [0_i64; 64];
@@ -6346,7 +6606,7 @@ mod tests {
         let left = [60, 100, 140, 180];
         assert_eq!(
             predict_luma_intra4x4_diagonal_down_right(&top, &left, 30),
-            [28, 45, 80, 120, 35, 28, 45, 80, 63, 35, 28, 45, 100, 63, 35, 28]
+            [35, 28, 45, 80, 63, 35, 28, 45, 100, 63, 35, 28, 140, 100, 63, 35]
         );
     }
 
@@ -6356,7 +6616,7 @@ mod tests {
         let left = [60, 100, 140, 180];
         assert_eq!(
             predict_luma_intra4x4_vertical_right(&top, &left, 30),
-            [28, 45, 80, 120, 45, 25, 30, 60, 35, 28, 45, 80, 80, 45, 25, 30]
+            [25, 30, 60, 100, 35, 28, 45, 80, 63, 25, 30, 60, 100, 35, 28, 45]
         );
     }
 
@@ -6366,7 +6626,7 @@ mod tests {
         let left = [60, 100, 140, 180];
         assert_eq!(
             predict_luma_intra4x4_horizontal_down(&top, &left, 30),
-            [63, 25, 35, 30, 100, 45, 63, 25, 140, 80, 100, 45, 170, 120, 140, 80]
+            [45, 35, 28, 45, 80, 63, 45, 35, 120, 100, 80, 63, 160, 140, 120, 100]
         );
     }
 
@@ -6384,7 +6644,7 @@ mod tests {
         let left = [10, 20, 30, 40, 50, 60, 70, 80];
         assert_eq!(
             predict_luma_intra4x4_horizontal_up(&left),
-            [15, 20, 25, 30, 25, 30, 35, 40, 35, 40, 45, 50, 45, 50, 55, 60]
+            [15, 20, 25, 30, 25, 30, 35, 38, 35, 38, 40, 40, 40, 40, 40, 40]
         );
     }
 
@@ -6415,10 +6675,54 @@ mod tests {
         assert_eq!(macroblock[4 * 16], 65);
         assert_eq!(macroblock[4 * 16 + 4], 20);
 
-        blocks[7].top_available = false;
+        blocks[0].top_available = false;
         assert!(reconstruct_luma_intra4x4_macroblock(&blocks).is_err());
-        blocks[7].top_available = true;
+        blocks[0].top_available = true;
         blocks[9].mode = 9;
         assert!(reconstruct_luma_intra4x4_macroblock(&blocks).is_err());
+    }
+
+    #[test]
+    fn reconstructs_luma_intra4x4_from_internal_left_samples() {
+        let mut blocks = [LumaIntra4x4Block::default(); 16];
+        for block in &mut blocks {
+            block.mode = 2;
+        }
+        blocks[0].mode = 0;
+        blocks[0].top_available = true;
+        blocks[0].top[..8].copy_from_slice(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        blocks[1].mode = 1;
+
+        let macroblock = reconstruct_luma_intra4x4_macroblock(&blocks).unwrap();
+
+        assert_eq!(&macroblock[..4], &[10, 20, 30, 40]);
+        for row in 0..4 {
+            assert_eq!(&macroblock[row * 16 + 4..row * 16 + 8], &[40; 4]);
+        }
+    }
+
+    #[test]
+    fn reconstructs_luma_intra8x8_filters_raw_edges_and_gathers_internal_left() {
+        let mut blocks = [LumaIntra8x8Block::default(); 4];
+        for block in &mut blocks {
+            block.mode = 2;
+            block.references_filtered = false;
+        }
+        blocks[0].mode = 1;
+        blocks[0].left_available = true;
+        blocks[0].left[..8].copy_from_slice(&[10, 30, 50, 70, 90, 110, 130, 150]);
+        blocks[0].left[8..].fill(150);
+        blocks[1].mode = 1;
+
+        let macroblock = reconstruct_luma_intra8x8_macroblock(&blocks).unwrap();
+
+        assert_eq!(
+            std::array::from_fn::<_, 8, _>(|row| macroblock[row * 16]),
+            [15, 30, 50, 70, 90, 110, 130, 145]
+        );
+        assert_eq!(
+            std::array::from_fn::<_, 8, _>(|row| macroblock[row * 16 + 8]),
+            [19, 31, 50, 70, 90, 110, 129, 141]
+        );
     }
 }

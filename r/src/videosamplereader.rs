@@ -5,6 +5,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::mp4boxes::{find, read_boxes, AvcConfiguration, Mp4Box};
+use crate::nal::split_length_prefixed_nals;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressedSample {
@@ -191,6 +192,27 @@ impl VideoSampleReader {
         self.samples.len()
     }
 
+    pub fn presentation_sample_index(&self, presentation_index: usize) -> io::Result<usize> {
+        if presentation_index >= self.samples.len() {
+            return Err(invalid("presentation frame index is out of range"));
+        }
+        let mut display_order: Vec<usize> = (0..self.samples.len()).collect();
+        display_order.sort_by_key(|index| (self.samples[*index].pts_ticks, *index));
+        Ok(display_order[presentation_index])
+    }
+
+    pub fn presentation_index_for_sample_index(&self, sample_index: usize) -> io::Result<usize> {
+        if sample_index >= self.samples.len() {
+            return Err(invalid("sample index is out of range"));
+        }
+        let mut display_order: Vec<usize> = (0..self.samples.len()).collect();
+        display_order.sort_by_key(|index| (self.samples[*index].pts_ticks, *index));
+        display_order
+            .iter()
+            .position(|index| *index == sample_index)
+            .ok_or_else(|| invalid("sample index is absent from presentation order"))
+    }
+
     pub fn first_sync_sample_index(&self) -> Option<u64> {
         self.samples
             .iter()
@@ -209,7 +231,7 @@ impl VideoSampleReader {
         file.seek(SeekFrom::Start(location.offset))?;
         let mut data = vec![0u8; location.size as usize];
         file.read_exact(&mut data)?;
-        validate_length_prefixed_nals(&data)
+        validate_length_prefixed_nals(&data, usize::from(self.configuration.nal_length_size))
             .map_err(|error| invalid(format!("sample {index}: {error}")))?;
         Ok(CompressedSample {
             index: index as u64,
@@ -399,21 +421,6 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn validate_length_prefixed_nals(data: &[u8]) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < data.len() {
-        if data.len() - offset < 4 {
-            return Err(invalid("truncated NAL length prefix"));
-        }
-        let nal_size = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        offset += 4;
-        if nal_size == 0 {
-            return Err(invalid("NAL unit has zero length"));
-        }
-        if nal_size > data.len() - offset {
-            return Err(invalid("NAL unit is truncated"));
-        }
-        offset += nal_size;
-    }
-    Ok(())
+fn validate_length_prefixed_nals(data: &[u8], length_size: usize) -> io::Result<()> {
+    split_length_prefixed_nals(data, length_size).map(|_| ())
 }

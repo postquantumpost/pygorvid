@@ -422,7 +422,7 @@ func TestCABACContextTransitionsMatchStandardVectors(t *testing.T) {
 		0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
 		13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
 		24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
-		33, 33, 34, 34, 35, 35, 35, 36, 36, 37, 37, 37, 38, 38, 63, 63,
+		33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
 	}
 	for stateIndex, expected := range lpsTransitions {
 		model := &CABACContextModel{stateIndex: uint8(stateIndex), valueMPS: false}
@@ -1154,9 +1154,9 @@ func TestCABACDecodeIntra16x16LumaDCPredictAndReconstruct(t *testing.T) {
 	for index := range contexts {
 		contexts[index] = CABACContextModel{stateIndex: 63}
 	}
-	contexts[96].valueMPS = true
-	contexts[134].valueMPS = true
-	contexts[195].valueMPS = true
+	contexts[88].valueMPS = true
+	contexts[105].valueMPS = true
+	contexts[166].valueMPS = true
 	top := [16]uint8{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
 	scalingList := [16]uint8{16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16}
 	result, err := decoder.DecodeIntra16x16LumaMacroblock(1, &contexts, 51, scalingList, &top, nil, 0, false, CABACIntra16x16EdgeState{}, CABACIntra16x16EdgeState{})
@@ -1177,7 +1177,7 @@ func TestCABACDecodeIntra16x16LumaACResiduals(t *testing.T) {
 	for index := range contexts {
 		contexts[index] = CABACContextModel{stateIndex: 63}
 	}
-	for _, index := range []int{92, 96, 120, 134, 166, 181} {
+	for _, index := range []int{88, 92, 105, 120, 166, 181} {
 		contexts[index].valueMPS = true
 	}
 	top := [16]uint8{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
@@ -3034,5 +3034,93 @@ func TestCABACDecodeIIntraMacroblockBuilderFailureRollsBack(t *testing.T) {
 	}
 	if contexts != originalContexts || decoder.CodeRange() != originalRange || decoder.CodeOffset() != originalOffset || decoder.bits.bitOffset != originalBitOffset {
 		t.Fatal("builder rejection committed CABAC decoder or context state")
+	}
+}
+
+func TestCABACDecodePSkipMacroblockCopiesZeroMotionReference(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[11].valueMPS = true
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	var y [256]uint8
+	for row := 0; row < 16; row++ {
+		for column := 0; column < 16; column++ {
+			y[row*16+column] = uint8(row*16 + column)
+		}
+	}
+	var cb, cr [64]uint8
+	for index := range cb {
+		cb[index], cr[index] = uint8(index+32), uint8(200-index)
+	}
+	reference := Yuv420Frame{Width: 16, Height: 16, YStride: 16, UStride: 8, VStride: 8, Y: y[:], U: cb[:], V: cr[:]}
+	builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	result, err := decoder.DecodePSkipMacroblock(CABACPSkipMacroblockInput{SliceType: 0, ReferenceFrame: reference}, &contexts, builder, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Skipped || result.ReferenceIdx != 0 || result.MotionVector != (MotionVector{}) || result.Luma != y || result.Cb != cb || result.Cr != cr {
+		t.Fatalf("P_Skip result = %+v", result)
+	}
+	frame, err := builder.Finish()
+	if err != nil || !bytes.Equal(frame.Y, y[:]) || !bytes.Equal(frame.U, cb[:]) || !bytes.Equal(frame.V, cr[:]) {
+		t.Fatalf("P_Skip frame differs from reference: %v", err)
+	}
+}
+
+func TestCABACDecodePSkipMacroblockPredictsNonzeroNeighborMotion(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	for index := 11; index < 14; index++ {
+		contexts[index].valueMPS = true
+	}
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	plane := make([]uint8, 256)
+	for index := range plane {
+		plane[index] = uint8(index)
+	}
+	chroma := make([]uint8, 64)
+	for index := range chroma {
+		chroma[index] = uint8(index * 2)
+	}
+	reference := Yuv420Frame{Width: 16, Height: 16, YStride: 16, UStride: 8, VStride: 8, Y: plane, U: chroma, V: chroma}
+	candidate := MotionVectorCandidate{Available: true, RefIdx: 1, Vector: MotionVector{X: 4, Y: -8}}
+	input := CABACPSkipMacroblockInput{
+		SliceType: 0, LeftAvailable: true, TopAvailable: true,
+		Left: candidate, Top: candidate, TopRight: candidate, TopLeft: candidate,
+		ReferenceFrame: reference,
+	}
+	builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	result, err := decoder.DecodePSkipMacroblock(input, &contexts, builder, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Skipped || result.MotionVector != candidate.Vector {
+		t.Fatalf("P_Skip derived MV = %+v; want %+v", result.MotionVector, candidate.Vector)
+	}
+}
+
+func TestCABACDecodePSkipMacroblockBuilderFailureRollsBack(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	contexts[11].valueMPS = true
+	originalContexts := contexts
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	originalRange, originalOffset, originalBitOffset := decoder.CodeRange(), decoder.CodeOffset(), decoder.bits.bitOffset
+	builder, _ := NewYuv420FrameBuilder(1, 1, 0, 0, 0, 0)
+	if err := builder.PlaceMacroblock(0, [256]uint8{}, [64]uint8{}, [64]uint8{}); err != nil {
+		t.Fatal(err)
+	}
+	reference := Yuv420Frame{Width: 16, Height: 16, YStride: 16, UStride: 8, VStride: 8, Y: make([]uint8, 256), U: make([]uint8, 64), V: make([]uint8, 64)}
+	if _, err := decoder.DecodePSkipMacroblock(CABACPSkipMacroblockInput{SliceType: 0, ReferenceFrame: reference}, &contexts, builder, 0); !errors.Is(err, ErrYuv420MacroblockAssembly) {
+		t.Fatalf("P_Skip placement error = %v; want assembly error", err)
+	}
+	if contexts != originalContexts || decoder.CodeRange() != originalRange || decoder.CodeOffset() != originalOffset || decoder.bits.bitOffset != originalBitOffset {
+		t.Fatal("failed P_Skip placement committed decoder or context state")
 	}
 }

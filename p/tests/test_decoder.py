@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 
 import pytest
@@ -13,6 +14,7 @@ from pygorvid import (
     VideoSampleReader,
     Yuv420Frame,
 )
+from pygorvid.reconstruction import Yuv420FrameBuilder
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "testdata" / "h264" / "high42-1080p.mp4"
@@ -48,9 +50,14 @@ def test_h264_decoder_rejects_out_of_range_frame_requests():
         decoder.decode_frame(0)
 
 
-def test_h264_decoder_contract_marks_frame_decode_as_unimplemented():
-    decoder = H264Decoder(type("Reader", (), {"sample_count": 1})())
-    with pytest.raises(DecoderError, match="not implemented"):
+def test_h264_decoder_requires_avc_configuration_for_uncached_decode():
+    reader = type(
+        "Reader",
+        (),
+        {"sample_count": 1, "presentation_sample_index": lambda self, index: 0},
+    )()
+    decoder = H264Decoder(reader)
+    with pytest.raises(DecoderError, match="AVC configuration"):
         decoder.decode_frame(0)
 
 
@@ -113,17 +120,251 @@ def test_h264_decoder_tracks_first_sync_index_and_reference_validation():
         reader.close()
 
 
+def test_decoder_parses_dependency_slice_headers_without_advancing_reader():
+    reader = VideoSampleReader(FIXTURE)
+    try:
+        decoder = H264Decoder(reader)
+        pictures = decoder.dependency_slice_pictures(0)
+        assert pictures
+        assert pictures[0]
+        assert pictures[0][0].sample_index == 0
+        assert pictures[0][0].header.idr
+        assert pictures[0][0].header.first_macroblock_in_slice == 0
+        assert reader._next_index == 0
+    finally:
+        reader.close()
+
+
+def test_decoder_builds_next_real_idr_macroblock_input_from_history():
+    from dataclasses import replace
+    from pygorvid import CABACIIntraMacroblockInput
+
+    class StopAfterProviderBuild(Exception):
+        pass
+
+    reader = VideoSampleReader(FIXTURE)
+    try:
+        decoder = H264Decoder(reader)
+        dependency_slice = decoder.dependency_slice_pictures(0)[0][0]
+        configuration = reader.configuration
+        from pygorvid import parse_sps
+
+        sps = parse_sps(configuration.sequence_parameter_sets[0])
+        builder = Yuv420FrameBuilder(
+            sps.coded_width // 16,
+            sps.coded_height // 16,
+            sps.frame_crop_left,
+            sps.frame_crop_top,
+            sps.frame_crop_right,
+            sps.frame_crop_bottom,
+        )
+        addresses = []
+
+        def input_provider(address, history):
+            addresses.append((address, len(history)))
+            macroblock_input = decoder.macroblock_input_from_history(
+                dependency_slice, address, history
+            )
+            assert isinstance(macroblock_input, CABACIIntraMacroblockInput)
+            assert macroblock_input.top_luma_cbp == 15
+            if address == 0:
+                assert macroblock_input.left_luma_cbp == 15
+            if address == 1:
+                assert history[0].macroblock.luma[0] == 29
+                assert macroblock_input.left_available
+                assert not macroblock_input.top_available
+                assert macroblock_input.left_luma_cbp == history[0].macroblock.coded_block_pattern_luma
+                assert macroblock_input.chroma_references[0].left_available
+                assert not macroblock_input.chroma_references[0].top_available
+                assert macroblock_input.luma_8x8_blocks[0].references_filtered is False
+                pcm_history = (
+                    replace(history[0], macroblock=replace(history[0].macroblock, macroblock_type=25)),
+                )
+                pcm_input = decoder.macroblock_input_from_history(
+                    dependency_slice, address, pcm_history
+                )
+                assert pcm_input.left_luma_cbp == 15
+                assert pcm_input.left_chroma_cbp == 2
+                assert pcm_input.top_chroma_cbp == 0
+            if address == 2:
+                assert history[1].macroblock.luma[0] == 29
+                assert history[1].macroblock.chroma_prediction_mode == 0
+                raise StopAfterProviderBuild
+            return macroblock_input
+
+        with pytest.raises(StopAfterProviderBuild):
+            decoder.decode_dependency_slice_data(dependency_slice, builder, input_provider)
+        assert addresses == [(0, 0), (1, 1), (2, 2)]
+        assert builder._written[0]
+        assert builder._written[1]
+    finally:
+        reader.close()
+
+
+def test_decoder_reconstructs_complete_idr_row_against_unfiltered_reference():
+    from pygorvid import parse_sps
+
+    class RowComplete(Exception):
+        pass
+
+    reader = VideoSampleReader(FIXTURE)
+    try:
+        decoder = H264Decoder(reader)
+        dependency_slice = decoder.dependency_slice_pictures(0)[0][0]
+        sps = parse_sps(reader.configuration.sequence_parameter_sets[0])
+        width_in_mbs = sps.coded_width // 16
+        builder = Yuv420FrameBuilder(width_in_mbs, 1)
+
+        def provider(address, history):
+            if address == width_in_mbs:
+                assert len(history) == width_in_mbs
+                raise RowComplete
+            return decoder.macroblock_input_from_history(dependency_slice, address, history)
+
+        with pytest.raises(RowComplete):
+            decoder.decode_dependency_slice_data(dependency_slice, builder, provider)
+        frame = builder.finish()
+        assert (frame.width, frame.height) == (1920, 16)
+        expected = (
+            "6f2f099fd78cb515e8b82e994953dbec014464e8d299b1ccf2f63d8e622fa718",
+            "4f425df0e64a24976cde5df7c46a7616d620347a1113e2c207cf2c3d8095e65c",
+            "91bb129b4f34b17ddbcf034994f5ccd66f97925754c2fa5ca5e20915236ca8d4",
+        )
+        assert tuple(hashlib.sha256(plane).hexdigest() for plane in (frame.y, frame.u, frame.v)) == expected
+        assert reader._next_index == 0
+    finally:
+        reader.close()
+
+
+def test_decoder_assembles_complete_native_idr_against_unfiltered_reference():
+    reader = VideoSampleReader(FIXTURE)
+    try:
+        decoder = H264Decoder(reader)
+        frame = decoder.decode_frame(0)
+        assert (frame.width, frame.height) == (1920, 1080)
+        expected = (
+            "c0c5e21d3b83efdd7dddabbf2d512f25db7c7d21153cf4d6260ba43853a40643",
+            "e7c2b2fca087820ecf5798e9744b61284c395acb164f3bb03af9c8d05ab445c0",
+            "9a7422ce1ec42db3856d7e08f7d86c4271975790a18efaccaca89876e5c39f9d",
+        )
+        assert tuple(hashlib.sha256(plane).hexdigest() for plane in (frame.y, frame.u, frame.v)) == expected
+        assert decoder.decode_frame(0) == frame
+        assert reader._next_index == 0
+    finally:
+        reader.close()
+
+
+def test_decoder_builds_p_and_spatial_b_macroblock_inputs_from_reference_state():
+    from pygorvid.cabac import (
+        CABACInterMacroblockPartition,
+        CABACInterMacroblockResult,
+        CABACPBMacroblockLayerResult,
+        CABACSliceMacroblockResult,
+    )
+    from pygorvid import CABACPBMacroblockLayerInput
+    from pygorvid import parse_sps
+
+    reader = VideoSampleReader(FIXTURE)
+    try:
+        decoder = H264Decoder(reader)
+        pictures = decoder.dependency_slice_pictures(1)
+        p_slice = pictures[1][0]
+        b_slice = pictures[2][0]
+        sps = parse_sps(reader.configuration.sequence_parameter_sets[0])
+        frame = Yuv420Frame(
+            sps.width,
+            sps.height,
+            sps.width,
+            (sps.width + 1) // 2,
+            (sps.width + 1) // 2,
+            bytes(sps.width * sps.height),
+            bytes(((sps.width + 1) // 2) * ((sps.height + 1) // 2)),
+            bytes(((sps.width + 1) // 2) * ((sps.height + 1) // 2)),
+        )
+        decoder.store_reference_picture(ReferencePicture(10, 0, 0), frame)
+
+        p_input = decoder.macroblock_input_from_history(p_slice, 0, ())
+        assert isinstance(p_input, CABACPBMacroblockLayerInput)
+        assert p_input.residual_input.left_luma_cbp == 15
+        assert p_input.residual_input.top_luma_cbp == 15
+        assert p_input.residual_input.left_chroma_cbp == 0
+        assert p_input.residual_input.top_chroma_cbp == 0
+        assert len(p_input.inter_input.reference_lists[0]) == 1
+        assert p_input.inter_input.reference_lists[0][0].frame == frame
+        assert len(p_input.inter_input.partition_neighbors) == 16
+        assert p_input.b_skip_input is None
+
+        colocated_macroblock = CABACInterMacroblockResult(
+            macroblock_type=2,
+            sub_macroblock_types=(),
+            partitions=(
+                CABACInterMacroblockPartition(
+                    0,
+                    0,
+                    8,
+                    16,
+                    (True, False),
+                    (0, -1),
+                    ((0, 1), (0, 0)),
+                ),
+                CABACInterMacroblockPartition(
+                    8,
+                    0,
+                    8,
+                    16,
+                    (True, False),
+                    (0, -1),
+                    ((4, 0), (0, 0)),
+                ),
+            ),
+            luma=(0,) * 256,
+            cb=(0,) * 64,
+            cr=(0,) * 64,
+        )
+        colocated_history = (
+            CABACSliceMacroblockResult(
+                0, CABACPBMacroblockLayerResult(False, colocated_macroblock)
+            ),
+        )
+        next_p_input = decoder.macroblock_input_from_history(p_slice, 1, colocated_history)
+        assert next_p_input.residual_input.left_luma_cbp == 0
+        assert next_p_input.residual_input.top_luma_cbp == 15
+        decoder.store_reference_picture(
+            ReferencePicture(11, 1, 6), frame, colocated_history
+        )
+        b_input = decoder.macroblock_input_from_history(b_slice, 0, ())
+        assert isinstance(b_input, CABACPBMacroblockLayerInput)
+        assert b_input.residual_input.left_luma_cbp == 15
+        assert b_input.residual_input.top_luma_cbp == 15
+        assert len(b_input.inter_input.reference_lists[0]) == 1
+        assert len(b_input.inter_input.reference_lists[1]) == 1
+        assert b_input.inter_input.reference_lists[0][0].picture_order_count == 0
+        assert b_input.inter_input.reference_lists[1][0].picture_order_count == 6
+        assert b_input.b_skip_input is not None
+        assert b_input.b_skip_input.direct_spatial
+        assert b_input.b_skip_input.colocated_reference_index == 0
+        assert b_input.b_skip_input.colocated_motion_vector == (0, 1)
+        assert b_input.b_skip_input.colocated_motion_field[0].vector.y == 1
+        assert b_input.b_skip_input.colocated_motion_field[3].vector.x == 4
+    finally:
+        reader.close()
+
+
 @pytest.mark.parametrize("frame_index", [0, 1, 3])
 def test_h264_decoder_does_not_invoke_runtime_subprocesses(monkeypatch, frame_index):
     def reject_subprocess(*args, **kwargs):
         raise AssertionError("decoder invoked a runtime subprocess")
 
     monkeypatch.setattr(subprocess, "check_output", reject_subprocess)
+    monkeypatch.setattr(subprocess, "run", reject_subprocess)
     reader = VideoSampleReader(FIXTURE)
     try:
         decoder = H264Decoder(reader)
-        with pytest.raises(DecoderError, match="native decode does not invoke"):
-            decoder.decode_frame(frame_index)
-        assert decoder.reference_picture_buffer.references() == ()
+        try:
+            frame = decoder.decode_frame(frame_index)
+        except DecoderError as error:
+            assert "ffmpeg" not in str(error).lower()
+        else:
+            assert frame.width > 0 and frame.height > 0
     finally:
         reader.close()

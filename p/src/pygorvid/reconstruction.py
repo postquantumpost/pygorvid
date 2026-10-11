@@ -856,6 +856,12 @@ class MotionVectorCandidate:
 
 
 @dataclass(frozen=True)
+class ColocatedMotionFact:
+    reference_index: int
+    vector: MotionVector
+
+
+@dataclass(frozen=True)
 class ReferencePicture:
     identifier: int
     frame_num: int = 0
@@ -1278,8 +1284,14 @@ class DecodedReferencePicture:
 class ReferencePictureBuffer:
     def __init__(self) -> None:
         self._pictures: dict[int, DecodedReferencePicture] = {}
+        self._motion_fields: dict[int, dict[int, tuple[ColocatedMotionFact, ...]]] = {}
 
-    def store(self, reference: ReferencePicture, frame: Yuv420Frame) -> None:
+    def store(
+        self,
+        reference: ReferencePicture,
+        frame: Yuv420Frame,
+        motion_field: Optional[dict[int, Sequence[ColocatedMotionFact]]] = None,
+    ) -> None:
         chroma_width = frame.width // 2 + frame.width % 2
         chroma_height = frame.height // 2 + frame.height % 2
         if not (
@@ -1288,6 +1300,18 @@ class ReferencePictureBuffer:
             and _valid_yuv_plane(frame.v, chroma_width, chroma_height, frame.v_stride)
         ):
             raise InterPredictionError("reference picture frame layout is invalid or truncated")
+        owned_motion_field: dict[int, tuple[ColocatedMotionFact, ...]] = {}
+        if motion_field is not None:
+            for address, facts in motion_field.items():
+                if (
+                    not isinstance(address, int)
+                    or isinstance(address, bool)
+                    or address < 0
+                    or len(facts) != 16
+                    or any(not isinstance(fact, ColocatedMotionFact) for fact in facts)
+                ):
+                    raise InterPredictionError("reference picture motion field is invalid")
+                owned_motion_field[address] = tuple(facts)
         owned_frame = Yuv420Frame(
             width=frame.width,
             height=frame.height,
@@ -1299,12 +1323,24 @@ class ReferencePictureBuffer:
             v=bytes(frame.v),
         )
         self._pictures[reference.identifier] = DecodedReferencePicture(reference, owned_frame)
+        self._motion_fields[reference.identifier] = owned_motion_field
 
     def get(self, identifier: int) -> Optional[DecodedReferencePicture]:
         return self._pictures.get(identifier)
 
+    def colocated_motion_facts(
+        self, identifier: int, macroblock_address: int
+    ) -> Optional[tuple[ColocatedMotionFact, ...]]:
+        return self._motion_fields.get(identifier, {}).get(macroblock_address)
+
     def remove(self, identifier: int) -> bool:
-        return self._pictures.pop(identifier, None) is not None
+        removed = self._pictures.pop(identifier, None) is not None
+        self._motion_fields.pop(identifier, None)
+        return removed
+
+    def clear(self) -> None:
+        self._pictures.clear()
+        self._motion_fields.clear()
 
     def references(self) -> tuple[ReferencePicture, ...]:
         return tuple(picture.reference for picture in self._pictures.values())
@@ -1548,6 +1584,46 @@ def interpolate_luma_fractional_sample(
     )
     grid = interpolate_luma_quarter_sample_grid(neighborhood)
     return select_luma_fractional_sample(grid, x_frac_l, y_frac_l)
+
+
+def interpolate_chroma_fractional_sample(
+    plane: Sequence[int],
+    width: int,
+    height: int,
+    stride: int,
+    x_int: int,
+    y_int: int,
+    x_frac_c: int,
+    y_frac_c: int,
+) -> int:
+    """Interpolate one 4:2:0 chroma sample using the clause 8.4.2.2.2 bilinear equation."""
+    values = (width, height, stride, x_int, y_int, x_frac_c, y_frac_c)
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in values):
+        raise InterPredictionError("chroma interpolation geometry must be integers")
+    if not 0 <= x_frac_c <= 7 or not 0 <= y_frac_c <= 7:
+        raise InterPredictionError("chroma fractional-sample offset is outside [0,7]")
+    if width <= 0 or height <= 0 or stride < width or len(plane) < (height - 1) * stride + width:
+        raise InterPredictionError("chroma reference plane layout is invalid or truncated")
+    x0 = min(max(x_int, 0), width - 1)
+    x1 = min(max(x_int + 1, 0), width - 1)
+    y0 = min(max(y_int, 0), height - 1)
+    y1 = min(max(y_int + 1, 0), height - 1)
+    samples = (
+        plane[y0 * stride + x0],
+        plane[y0 * stride + x1],
+        plane[y1 * stride + x0],
+        plane[y1 * stride + x1],
+    )
+    if any(not isinstance(sample, int) or isinstance(sample, bool) or not 0 <= sample <= 255 for sample in samples):
+        raise InterPredictionError("chroma reference plane must contain 8-bit samples")
+    a, b, c, d = samples
+    return (
+        (8 - x_frac_c) * (8 - y_frac_c) * a
+        + x_frac_c * (8 - y_frac_c) * b
+        + (8 - x_frac_c) * y_frac_c * c
+        + x_frac_c * y_frac_c * d
+        + 32
+    ) >> 6
 
 
 def build_p_reference_list(
@@ -1891,7 +1967,7 @@ def inverse_scale_luma4x4(
 
 
 def inverse_scale_chroma_dc2x2(transformed: Sequence[int], qpc: int) -> list[int]:
-    """Scale 4:2:0 chroma DC values for an 8-bit QP-prime C."""
+    """Scale 4:2:0 chroma DC values with the supported flat scaling list."""
     if not isinstance(qpc, int) or isinstance(qpc, bool) or not 0 <= qpc <= 39:
         raise InverseScaleError("inverse scaling QPC is outside [0,39]")
     if len(transformed) != 4 or any(
@@ -1902,7 +1978,7 @@ def inverse_scale_chroma_dc2x2(transformed: Sequence[int], qpc: int) -> list[int
     ):
         raise InverseScaleError("chroma DC values must contain four signed 16-bit integers")
 
-    factor = _INVERSE_SCALE_4X4_FACTORS[qpc % 6][0]
+    factor = _INVERSE_SCALE_4X4_FACTORS[qpc % 6][0] * 16
     shift = qpc // 6
     scaled = [(coefficient * factor << shift) >> 5 for coefficient in transformed]
     if any(not -(1 << 15) <= coefficient < (1 << 15) for coefficient in scaled):
@@ -2073,10 +2149,10 @@ def inverse_scale_luma8x8(
     for index, (level, weight) in enumerate(zip(levels, scaling_list)):
         factor_class = _INVERSE_SCALE_8X8_CLASSES[index]
         value = level * _INVERSE_SCALE_8X8_FACTORS[qpy % 6][factor_class] * weight
-        if qpy >= 24:
-            scaled.append(value << (qpy // 6 - 4))
+        if qpy >= 36:
+            scaled.append(value << (qpy // 6 - 6))
         else:
-            shift = 4 - qpy // 6
+            shift = 6 - qpy // 6
             rounding = 1 << (shift - 1)
             scaled.append((value + rounding) >> shift)
     return scaled
@@ -2767,7 +2843,7 @@ def predict_luma_intra4x4_diagonal_down_right(
     prediction = [0] * 16
     for row in range(4):
         for column in range(4):
-            position = column - row
+            position = column - row - 1
             prediction[row * 4 + column] = (
                 reference_at(position - 1)
                 + 2 * reference_at(position)
@@ -2808,21 +2884,21 @@ def predict_luma_intra4x4_vertical_right(
             phase = 2 * column - row
             if phase >= 0 and phase % 2 == 0:
                 center = phase // 2
+                value = (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
+            elif phase >= 0:
+                center = (phase - 1) // 2
                 value = (
                     top_reference_at(center - 1)
                     + 2 * top_reference_at(center)
                     + top_reference_at(center + 1)
                     + 2
                 ) >> 2
-            elif phase >= 0:
-                center = (phase - 1) // 2
-                value = (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
             elif phase == -1:
-                value = (left[0] + top_left + 1) >> 1
-            elif phase == -2:
                 value = (left[0] + 2 * top_left + top[0] + 2) >> 2
+            elif phase == -2:
+                value = (left[1] + 2 * left[0] + top_left + 2) >> 2
             else:
-                value = (left[0] + left[1] + 1) >> 1
+                value = (left[2] + 2 * left[1] + left[0] + 2) >> 2
             prediction[row * 4 + column] = value
     return prediction
 
@@ -2891,16 +2967,19 @@ def predict_luma_intra4x4_horizontal_up(left: Sequence[int]) -> list[int]:
     ):
         raise IntraPredictionError("horizontal-up 4x4 prediction requires eight 8-bit left samples")
 
+    def reference_at(position: int) -> int:
+        return left[min(position, 3)]
+
     prediction = [0] * 16
     for row in range(4):
         for column in range(4):
             phase = 2 * row + column
             if phase % 2 == 0:
                 center = phase // 2
-                value = (left[center] + left[center + 1] + 1) >> 1
+                value = (reference_at(center) + reference_at(center + 1) + 1) >> 1
             else:
                 center = (phase - 1) // 2
-                value = (left[center] + 2 * left[center + 1] + left[center + 2] + 2) >> 2
+                value = (reference_at(center) + 2 * reference_at(center + 1) + reference_at(center + 2) + 2) >> 2
             prediction[row * 4 + column] = value
     return prediction
 
@@ -2921,6 +3000,7 @@ class LumaIntra8x8Block:
     top: Optional[Sequence[int]] = None
     left: Optional[Sequence[int]] = None
     top_left: Optional[int] = None
+    references_filtered: bool = True
 
 
 def reconstruct_luma_intra4x4_macroblock(
@@ -2932,6 +3012,7 @@ def reconstruct_luma_intra4x4_macroblock(
     block_x = (0, 4, 0, 4, 8, 12, 8, 12, 0, 4, 0, 4, 8, 12, 8, 12)
     block_y = (0, 0, 4, 4, 0, 0, 4, 4, 8, 8, 12, 12, 8, 8, 12, 12)
     macroblock = [0] * 256
+    written = bytearray(256)
     for block_index, block in enumerate(blocks):
         if not isinstance(block, LumaIntra4x4Block):
             raise IntraPredictionError("Intra_4x4 macroblock contains an invalid block")
@@ -2943,10 +3024,43 @@ def reconstruct_luma_intra4x4_macroblock(
             or any(not isinstance(value, int) or isinstance(value, bool) for value in block.residual)
         ):
             raise IntraPredictionError("Intra_4x4 macroblock block syntax is invalid")
+        origin_x, origin_y = block_x[block_index], block_y[block_index]
         mode = block.mode
         top = block.top
         left = block.left
         top_left = block.top_left
+        if top is None and origin_y > 0:
+            gathered_top = []
+            top_available = True
+            for offset in range(8):
+                column = origin_x + offset
+                if column < 16 and written[(origin_y - 1) * 16 + column]:
+                    gathered_top.append(macroblock[(origin_y - 1) * 16 + column])
+                elif offset >= 4 and gathered_top:
+                    gathered_top.append(gathered_top[-1])
+                else:
+                    top_available = False
+                    gathered_top.append(0)
+            if top_available:
+                top = gathered_top
+        if left is None and origin_x > 0:
+            gathered_left = []
+            left_available = True
+            for offset in range(8):
+                row = origin_y + offset
+                if row < 16 and written[row * 16 + origin_x - 1]:
+                    gathered_left.append(macroblock[row * 16 + origin_x - 1])
+                elif offset >= 4 and gathered_left:
+                    gathered_left.append(gathered_left[-1])
+                else:
+                    left_available = False
+                    gathered_left.append(0)
+            if left_available:
+                left = gathered_left
+        if top_left is None and origin_x > 0 and origin_y > 0:
+            top_left_index = (origin_y - 1) * 16 + origin_x - 1
+            if written[top_left_index]:
+                top_left = macroblock[top_left_index]
         if mode == 0:
             if top is None:
                 raise IntraPredictionError("top references are required for Intra_4x4_Vertical")
@@ -2985,7 +3099,6 @@ def reconstruct_luma_intra4x4_macroblock(
                 raise IntraPredictionError("left references are required for Intra_4x4_HU")
             prediction = predict_luma_intra4x4_horizontal_up(left[:8])
 
-        origin_x, origin_y = block_x[block_index], block_y[block_index]
         for row in range(4):
             for column in range(4):
                 sample_index = row * 4 + column
@@ -2998,6 +3111,7 @@ def reconstruct_luma_intra4x4_macroblock(
                 else:
                     sample = predicted + residual
                 macroblock[(origin_y + row) * 16 + origin_x + column] = sample
+                written[(origin_y + row) * 16 + origin_x + column] = 1
     return macroblock
 
 
@@ -3006,11 +3120,12 @@ def reconstruct_luma_intra8x8_macroblock(
 ) -> list[int]:
     """Reconstruct four syntax-order 8x8 luma blocks into one raster macroblock.
 
-    Top and left references are expected to be gathered and filtered already.
+    References are prefiltered by default; set references_filtered=False to pass raw edges.
     """
     if len(blocks) != 4:
         raise IntraPredictionError("Intra_8x8 macroblock requires four decoded blocks")
     macroblock = [0] * 256
+    written = bytearray(256)
     for block_index, block in enumerate(blocks):
         if not isinstance(block, LumaIntra8x8Block):
             raise IntraPredictionError("Intra_8x8 macroblock contains an invalid block")
@@ -3022,7 +3137,44 @@ def reconstruct_luma_intra8x8_macroblock(
             or any(not isinstance(value, int) or isinstance(value, bool) for value in block.residual)
         ):
             raise IntraPredictionError("Intra_8x8 macroblock block syntax is invalid")
+        if not isinstance(block.references_filtered, bool):
+            raise IntraPredictionError("Intra_8x8 reference filter flag must be boolean")
+        origin_x, origin_y = (block_index % 2) * 8, (block_index // 2) * 8
         top, left, top_left = block.top, block.left, block.top_left
+        if not block.references_filtered:
+            if top is None and origin_y > 0:
+                gathered_top = []
+                primary_available = True
+                for offset in range(16):
+                    column = origin_x + offset
+                    if column < 16 and written[(origin_y - 1) * 16 + column]:
+                        gathered_top.append(macroblock[(origin_y - 1) * 16 + column])
+                    elif offset >= 8 and gathered_top:
+                        gathered_top.append(gathered_top[-1])
+                    else:
+                        primary_available = False
+                        gathered_top.append(0)
+                if primary_available:
+                    top = gathered_top
+            if left is None and origin_x > 0:
+                gathered_left = []
+                primary_available = True
+                for offset in range(8):
+                    row = origin_y + offset
+                    if row < 16 and written[row * 16 + origin_x - 1]:
+                        gathered_left.append(macroblock[row * 16 + origin_x - 1])
+                    else:
+                        primary_available = False
+                        gathered_left.append(0)
+                if primary_available:
+                    left = gathered_left + [gathered_left[-1]] * 8
+            if top_left is None and origin_x > 0 and origin_y > 0:
+                top_left_index = (origin_y - 1) * 16 + origin_x - 1
+                if written[top_left_index]:
+                    top_left = macroblock[top_left_index]
+            top, left, top_left = filter_luma_intra8x8_reference_samples(
+                top, left, top_left
+            )
         mode = block.mode
         if mode == 0:
             if top is None:
@@ -3065,13 +3217,71 @@ def reconstruct_luma_intra8x8_macroblock(
             if top is None or left is None:
                 raise IntraPredictionError("top and left references are required for Intra_8x8_Plane")
             prediction = predict_luma_intra8x8_plane(top[:16], left[:16])
-        origin_x, origin_y = (block_index % 2) * 8, (block_index // 2) * 8
         for row in range(8):
             for column in range(8):
                 index = row * 8 + column
                 sample = prediction[index] + block.residual[index]
                 macroblock[(origin_y + row) * 16 + origin_x + column] = min(255, max(0, sample))
+                written[(origin_y + row) * 16 + origin_x + column] = 1
     return macroblock
+
+
+def filter_luma_intra8x8_reference_samples(
+    top: Optional[Sequence[int]],
+    left: Optional[Sequence[int]],
+    top_left: Optional[int],
+) -> tuple[Optional[list[int]], Optional[list[int]], Optional[int]]:
+    """Apply the H.264 Intra_8x8 reference filter to available raw edges."""
+    for name, samples, expected in (("top", top, 16), ("left", left, 16)):
+        if samples is not None and (
+            len(samples) != expected
+            or any(
+                not isinstance(sample, int)
+                or isinstance(sample, bool)
+                or not 0 <= sample <= 255
+                for sample in samples
+            )
+        ):
+            raise IntraPredictionError(f"Intra_8x8 raw {name} references must contain 16 8-bit samples")
+    if top_left is not None and (
+        not isinstance(top_left, int)
+        or isinstance(top_left, bool)
+        or not 0 <= top_left <= 255
+    ):
+        raise IntraPredictionError("Intra_8x8 top-left reference must be an 8-bit sample")
+
+    filtered_top = None
+    if top is not None:
+        filtered_top = [0] * 16
+        if top_left is None:
+            filtered_top[0] = (3 * top[0] + top[1] + 2) >> 2
+        else:
+            filtered_top[0] = (top_left + 2 * top[0] + top[1] + 2) >> 2
+        for index in range(1, 15):
+            filtered_top[index] = (top[index - 1] + 2 * top[index] + top[index + 1] + 2) >> 2
+        filtered_top[15] = (top[14] + 3 * top[15] + 2) >> 2
+
+    filtered_left = None
+    if left is not None:
+        filtered_left = list(left)
+        if top_left is None:
+            filtered_left[0] = (3 * left[0] + left[1] + 2) >> 2
+        else:
+            filtered_left[0] = (top_left + 2 * left[0] + left[1] + 2) >> 2
+        for index in range(1, 7):
+            filtered_left[index] = (left[index - 1] + 2 * left[index] + left[index + 1] + 2) >> 2
+        filtered_left[7] = (left[6] + 3 * left[7] + 2) >> 2
+        filtered_left[8:] = [filtered_left[7]] * 8
+
+    filtered_top_left = top_left
+    if top_left is not None:
+        if top is not None and left is not None:
+            filtered_top_left = (top[0] + 2 * top_left + left[0] + 2) >> 2
+        elif top is not None:
+            filtered_top_left = (3 * top_left + top[0] + 2) >> 2
+        elif left is not None:
+            filtered_top_left = (3 * top_left + left[0] + 2) >> 2
+    return filtered_top, filtered_left, filtered_top_left
 
 
 def inverse_transform_luma4x4(coefficients: Sequence[int]) -> list[int]:
@@ -3176,7 +3386,7 @@ def _inverse_transform_8x8_line(coefficients: Sequence[int]) -> list[int]:
     a7 = coefficients[3] + coefficients[5] + coefficients[1] + (coefficients[1] >> 1)
     b1 = a1 + (a7 >> 2)
     b3 = a3 + (a5 >> 2)
-    b5 = a5 - (a3 >> 2)
+    b5 = (a3 >> 2) - a5
     b7 = a7 - (a1 >> 2)
 
     return [

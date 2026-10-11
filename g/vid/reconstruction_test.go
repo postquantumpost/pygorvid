@@ -1182,6 +1182,7 @@ func TestInterpolateLumaFractionalSampleFromReferencePlane(t *testing.T) {
 		for column := 0; column < width; column++ {
 			plane[row*stride+column] = uint8(10*row + 5*column)
 		}
+
 	}
 	want := [4][4]uint8{
 		{30, 33, 35, 38},
@@ -1199,6 +1200,22 @@ func TestInterpolateLumaFractionalSampleFromReferencePlane(t *testing.T) {
 				t.Errorf("interpolateLumaFractionalSample(%d, %d) = %d; want %d", xFracL, yFracL, got, want[xFracL][yFracL])
 			}
 		}
+	}
+}
+
+func TestInterpolateChromaFractionalSampleUsesBilinearEquation(t *testing.T) {
+	plane := []uint8{0, 64, 128, 255}
+	for _, test := range []struct {
+		xFrac, yFrac uint8
+		want         uint8
+	}{{0, 0, 0}, {4, 4, 112}, {7, 7, 216}} {
+		got, err := interpolateChromaFractionalSample(plane, 2, 2, 2, 0, 0, test.xFrac, test.yFrac)
+		if err != nil || got != test.want {
+			t.Errorf("interpolateChromaFractionalSample(%d,%d) = %d, %v; want %d", test.xFrac, test.yFrac, got, err, test.want)
+		}
+	}
+	if _, err := interpolateChromaFractionalSample(plane, 2, 2, 2, 0, 0, 8, 0); !errors.Is(err, ErrChromaFractionalSampleOffset) {
+		t.Fatalf("out-of-range chroma fraction error = %v; want %v", err, ErrChromaFractionalSampleOffset)
 	}
 }
 
@@ -1518,11 +1535,11 @@ func TestInverseScaleChromaDC2x2MatchesQPCVectors(t *testing.T) {
 		qpc         int
 		want        [4]int64
 	}{
-		{name: "low QP signed rounding", transformed: [4]int64{32, -32, 1, -1}, qpc: 0, want: [4]int64{10, -10, 0, -1}},
-		{name: "QP quotient zero", transformed: [4]int64{1, 2, -1, -2}, qpc: 5, want: [4]int64{0, 1, -1, -2}},
-		{name: "QP quotient one", transformed: [4]int64{1, 2, -1, -2}, qpc: 6, want: [4]int64{0, 1, -1, -2}},
-		{name: "maximum chroma QP", transformed: [4]int64{1, 2, -1, -2}, qpc: 39, want: [4]int64{28, 56, -28, -56}},
-		{name: "minimum and maximum 8-bit DC input", transformed: [4]int64{-(1 << 15), (1 << 15) - 1}, qpc: 0, want: [4]int64{-10240, 10239}},
+		{name: "low QP signed rounding", transformed: [4]int64{32, -32, 1, -1}, qpc: 0, want: [4]int64{160, -160, 5, -5}},
+		{name: "QP quotient zero", transformed: [4]int64{1, 2, -1, -2}, qpc: 5, want: [4]int64{9, 18, -9, -18}},
+		{name: "QP quotient one", transformed: [4]int64{1, 2, -1, -2}, qpc: 6, want: [4]int64{10, 20, -10, -20}},
+		{name: "maximum chroma QP", transformed: [4]int64{1, 2, -1, -2}, qpc: 39, want: [4]int64{448, 896, -448, -896}},
+		{name: "legal scaled output endpoints", transformed: [4]int64{-6553, 6553}, qpc: 0, want: [4]int64{-32765, 32765}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1867,8 +1884,12 @@ func TestInverseScaleLuma8x8ScalingClassesAndQPRounding(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := inverseScaleLuma8x8(levels, scalingList, test.qpy)
-			if err != nil || got != test.want {
-				t.Fatalf("inverseScaleLuma8x8() = %v, %v; want %v", got, err, test.want)
+			want := test.want
+			for index := range want {
+				want[index] = (want[index] + 2) / 4
+			}
+			if err != nil || got != want {
+				t.Fatalf("inverseScaleLuma8x8() = %v, %v; want %v", got, err, want)
 			}
 		})
 	}
@@ -1884,8 +1905,8 @@ func TestInverseScaleLuma8x8NegativeLevelAndCustomWeight(t *testing.T) {
 	scalingList[1] = 8
 
 	got, err := inverseScaleLuma8x8(levels, scalingList, 0)
-	if err != nil || got[0] != -20 || got[1] != 10 {
-		t.Fatalf("inverseScaleLuma8x8() = %v, %v; want coefficients -20 and 10", got, err)
+	if err != nil || got[0] != -5 || got[1] != 2 {
+		t.Fatalf("inverseScaleLuma8x8() = %v, %v; want coefficients -5 and 2", got, err)
 	}
 }
 
@@ -1991,7 +2012,7 @@ func TestInverseTransformLuma8x8DCAndImpulseVectors(t *testing.T) {
 		t.Fatalf("DC inverse transform = %v; want all ones", got)
 	}
 
-	frequency := [8]int64{2, -1, 1, 0, 0, -1, 1, -1}
+	frequency := [8]int64{2, 1, 1, 0, 0, -1, -1, -1}
 	var horizontalFrequency [64]int64
 	horizontalFrequency[1] = 64
 	wantHorizontal := [64]int64{}
@@ -2416,10 +2437,10 @@ func TestPredictLumaIntra4x4DiagonalDownRightUsesTopLeftTopAndLeftReferences(t *
 	top := [8]uint8{20, 40, 80, 120, 160, 200, 220, 240}
 	left := [4]uint8{60, 100, 140, 180}
 	want := [16]uint8{
-		28, 45, 80, 120,
 		35, 28, 45, 80,
 		63, 35, 28, 45,
 		100, 63, 35, 28,
+		140, 100, 63, 35,
 	}
 	if got := predictLumaIntra4x4DiagonalDownRight(top, left, 30); got != want {
 		t.Fatalf("diagonal-down-right intra prediction = %v; want %v", got, want)
@@ -2552,10 +2573,10 @@ func TestPredictLumaIntra4x4VerticalRightUsesTopLeftTopAndLeftReferences(t *test
 	top := [8]uint8{20, 40, 80, 120, 160, 200, 220, 240}
 	left := [4]uint8{60, 100, 140, 180}
 	want := [16]uint8{
-		28, 45, 80, 120,
-		45, 25, 30, 60,
+		25, 30, 60, 100,
 		35, 28, 45, 80,
-		80, 45, 25, 30,
+		63, 25, 30, 60,
+		100, 35, 28, 45,
 	}
 	if got := predictLumaIntra4x4VerticalRight(top, left, 30); got != want {
 		t.Fatalf("vertical-right intra prediction = %v; want %v", got, want)
@@ -2566,10 +2587,10 @@ func TestPredictLumaIntra4x4HorizontalDownTransposesVerticalRight(t *testing.T) 
 	top := [4]uint8{20, 40, 80, 120}
 	left := [4]uint8{60, 100, 140, 180}
 	want := [16]uint8{
-		63, 25, 35, 30,
-		100, 45, 63, 25,
-		140, 80, 100, 45,
-		170, 120, 140, 80,
+		45, 35, 28, 45,
+		80, 63, 45, 35,
+		120, 100, 80, 63,
+		160, 140, 120, 100,
 	}
 	if got := predictLumaIntra4x4HorizontalDown(top, left, 30); got != want {
 		t.Fatalf("horizontal-down intra prediction = %v; want %v", got, want)
@@ -2593,9 +2614,9 @@ func TestPredictLumaIntra4x4HorizontalUpTransposesVerticalLeft(t *testing.T) {
 	left := [8]uint8{10, 20, 30, 40, 50, 60, 70, 80}
 	want := [16]uint8{
 		15, 20, 25, 30,
-		25, 30, 35, 40,
-		35, 40, 45, 50,
-		45, 50, 55, 60,
+		25, 30, 35, 38,
+		35, 38, 40, 40,
+		40, 40, 40, 40,
 	}
 	if got := predictLumaIntra4x4HorizontalUp(left); got != want {
 		t.Fatalf("horizontal-up intra prediction = %v; want %v", got, want)

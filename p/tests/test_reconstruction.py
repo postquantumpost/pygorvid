@@ -22,6 +22,7 @@ from pygorvid import (
     LumaStrongEdgeSamples,
     LumaPredictionVector,
     LumaIntra4x4Block,
+    LumaIntra8x8Block,
     ChromaEdgeSamples,
     derive_luma_deblocking_parameters,
     apply_luma_deblocking_edge,
@@ -67,6 +68,7 @@ from pygorvid import (
     assemble_chroma420_residual_macroblock,
     reconstruct_chroma420_macroblock,
     reconstruct_luma_intra4x4_macroblock,
+    reconstruct_luma_intra8x8_macroblock,
     interpolate_luma_half_sample_horizontal,
     interpolate_luma_half_sample_diagonal,
     interpolate_luma_half_sample_vertical,
@@ -78,6 +80,7 @@ from pygorvid import (
     interpolate_luma_quarter_sample_grid,
     select_luma_fractional_sample,
     gather_luma_quarter_sample_neighborhood,
+    interpolate_chroma_fractional_sample,
         interpolate_luma_fractional_sample,
     predict_luma_intra4x4_horizontal,
     predict_luma_intra8x8_horizontal,
@@ -1182,6 +1185,16 @@ def test_gather_luma_quarter_sample_neighborhood_rejects_noninteger_coordinates(
         gather_luma_quarter_sample_neighborhood([0] * 4, 2, 2, 2, True, 0)
 
 
+def test_interpolate_chroma_fractional_sample_uses_bilinear_equation():
+    plane = (0, 64, 128, 255)
+    assert interpolate_chroma_fractional_sample(plane, 2, 2, 2, 0, 0, 0, 0) == 0
+    assert interpolate_chroma_fractional_sample(plane, 2, 2, 2, 0, 0, 4, 4) == 112
+    assert interpolate_chroma_fractional_sample(plane, 2, 2, 2, 0, 0, 7, 7) == 216
+    assert interpolate_chroma_fractional_sample(plane, 2, 2, 2, -1, -1, 0, 0) == 0
+    with pytest.raises(InterPredictionError, match=r"offset is outside \[0,7\]"):
+        interpolate_chroma_fractional_sample(plane, 2, 2, 2, 0, 0, 8, 0)
+
+
 def test_interpolate_luma_fractional_sample_selects_all_table_8_12_positions():
     width = height = stride = 6
     plane = [10 * row + 5 * column for row in range(height) for column in range(width)]
@@ -1519,11 +1532,11 @@ def test_inverse_scale_luma4x4_rejects_qpy_outside_range(qpy):
 @pytest.mark.parametrize(
     ("transformed", "qpc", "expected"),
     (
-        ([32, -32, 1, -1], 0, [10, -10, 0, -1]),
-        ([1, 2, -1, -2], 5, [0, 1, -1, -2]),
-        ([1, 2, -1, -2], 6, [0, 1, -1, -2]),
-        ([1, 2, -1, -2], 39, [28, 56, -28, -56]),
-        ([-(1 << 15), (1 << 15) - 1, 0, 0], 0, [-10240, 10239, 0, 0]),
+        ([32, -32, 1, -1], 0, [160, -160, 5, -5]),
+        ([1, 2, -1, -2], 5, [9, 18, -9, -18]),
+        ([1, 2, -1, -2], 6, [10, 20, -10, -20]),
+        ([1, 2, -1, -2], 39, [448, 896, -448, -896]),
+        ([-6553, 6553, 0, 0], 0, [-32765, 32765, 0, 0]),
     ),
 )
 def test_inverse_scale_chroma_dc2x2_qpc_vectors(transformed, qpc, expected):
@@ -1665,13 +1678,40 @@ def test_reconstruct_luma_intra4x4_macroblock_dispatches_and_places_scan_blocks(
     assert macroblock[4 * 16 + 4] == 20
 
     missing_reference = list(blocks)
-    missing_reference[7] = LumaIntra4x4Block(0)
+    missing_reference[0] = LumaIntra4x4Block(0)
     with pytest.raises(IntraPredictionError, match="top references"):
         reconstruct_luma_intra4x4_macroblock(missing_reference)
     invalid_mode = list(blocks)
     invalid_mode[9] = LumaIntra4x4Block(9)
     with pytest.raises(IntraPredictionError, match="syntax is invalid"):
         reconstruct_luma_intra4x4_macroblock(invalid_mode)
+
+
+def test_reconstruct_luma_intra4x4_gathers_internal_left_references():
+    blocks = [LumaIntra4x4Block(2) for _ in range(16)]
+    blocks[0] = LumaIntra4x4Block(0, top=(10, 20, 30, 40, 50, 60, 70, 80))
+    blocks[1] = LumaIntra4x4Block(1)
+
+    macroblock = reconstruct_luma_intra4x4_macroblock(blocks)
+
+    assert macroblock[:4] == [10, 20, 30, 40]
+    assert all(macroblock[row * 16 + 4 : row * 16 + 8] == [40] * 4 for row in range(4))
+
+
+def test_reconstruct_luma_intra8x8_filters_raw_edges_and_gathers_internal_left():
+    blocks = [LumaIntra8x8Block(2, references_filtered=False) for _ in range(4)]
+    left = (10, 30, 50, 70, 90, 110, 130, 150) + (150,) * 8
+    blocks[0] = LumaIntra8x8Block(
+        1,
+        left=left,
+        references_filtered=False,
+    )
+    blocks[1] = LumaIntra8x8Block(1, references_filtered=False)
+
+    macroblock = reconstruct_luma_intra8x8_macroblock(blocks)
+
+    assert [macroblock[row * 16] for row in range(8)] == [15, 30, 50, 70, 90, 110, 130, 145]
+    assert [macroblock[row * 16 + 8] for row in range(8)] == [19, 31, 50, 70, 90, 110, 129, 141]
 
 
 def test_yuv420_frame_builder_places_cropped_raster_macroblocks():
@@ -1780,7 +1820,9 @@ def test_inverse_scale_luma4x4_rejects_invalid_vectors(levels, scaling_list, mes
     ),
 )
 def test_inverse_scale_luma8x8_scaling_classes_and_qp_vectors(qpy, expected):
-    assert inverse_scale_luma8x8([1] * 64, [16] * 64, qpy) == expected
+    assert inverse_scale_luma8x8([1] * 64, [16] * 64, qpy) == [
+        (value + 2) // 4 for value in expected
+    ]
 
 
 def test_inverse_scale_luma8x8_negative_level_and_custom_weight():
@@ -1791,7 +1833,7 @@ def test_inverse_scale_luma8x8_negative_level_and_custom_weight():
 
     scaled = inverse_scale_luma8x8(levels, scaling_list, 0)
 
-    assert (scaled[0], scaled[1]) == (-20, 10)
+    assert (scaled[0], scaled[1]) == (-5, 2)
 
 
 @pytest.mark.parametrize("qpy", (-1, 52))
@@ -1869,7 +1911,7 @@ def test_inverse_transform_luma8x8_dc_and_frequency_impulse_vectors():
     dc_coefficients = [64] + [0] * 63
     assert inverse_transform_luma8x8(dc_coefficients) == [1] * 64
 
-    frequency = [2, -1, 1, 0, 0, -1, 1, -1]
+    frequency = [2, 1, 1, 0, 0, -1, -1, -1]
     horizontal_frequency = [0] * 64
     horizontal_frequency[1] = 64
     assert inverse_transform_luma8x8(horizontal_frequency) == frequency * 8
@@ -2450,10 +2492,10 @@ def test_predict_luma_intra4x4_diagonal_down_right_uses_all_reference_regions():
         [60, 100, 140, 180],
         30,
     ) == [
-        28, 45, 80, 120,
         35, 28, 45, 80,
         63, 35, 28, 45,
         100, 63, 35, 28,
+        140, 100, 63, 35,
     ]
 
 
@@ -2479,10 +2521,10 @@ def test_predict_luma_intra4x4_vertical_right_uses_all_reference_regions():
         [60, 100, 140, 180],
         30,
     ) == [
-        28, 45, 80, 120,
-        45, 25, 30, 60,
+        25, 30, 60, 100,
         35, 28, 45, 80,
-        80, 45, 25, 30,
+        63, 25, 30, 60,
+        100, 35, 28, 45,
     ]
 
 
@@ -2508,10 +2550,10 @@ def test_predict_luma_intra4x4_horizontal_down_transposes_vertical_right():
         [60, 100, 140, 180],
         30,
     ) == [
-        63, 25, 35, 30,
-        100, 45, 63, 25,
-        140, 80, 100, 45,
-        170, 120, 140, 80,
+        45, 35, 28, 45,
+        80, 63, 45, 35,
+        120, 100, 80, 63,
+        160, 140, 120, 100,
     ]
 
 
@@ -2556,9 +2598,9 @@ def test_predict_luma_intra4x4_horizontal_up_transposes_vertical_left():
         [10, 20, 30, 40, 50, 60, 70, 80]
     ) == [
         15, 20, 25, 30,
-        25, 30, 35, 40,
-        35, 40, 45, 50,
-        45, 50, 55, 60,
+        25, 30, 35, 38,
+        35, 38, 40, 40,
+        40, 40, 40, 40,
     ]
 
 

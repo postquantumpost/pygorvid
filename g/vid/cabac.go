@@ -73,7 +73,7 @@ var cabacTransitionLPS = [64]uint8{
 	0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
 	13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
 	24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
-	33, 33, 34, 34, 35, 35, 35, 36, 36, 37, 37, 37, 38, 38, 63, 63,
+	33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
 }
 
 // CABACContextModel stores pStateIdx and valMPS for one syntax context.
@@ -467,6 +467,113 @@ type CABACInterNeighbor struct {
 	ReferenceIndex         uint8
 	MotionVectorDifference [2]int32
 	IsField                bool
+}
+
+type CABACPSkipMacroblockInput struct {
+	SliceType      uint8
+	MacroblockX    int
+	MacroblockY    int
+	LeftAvailable  bool
+	LeftSkipped    bool
+	TopAvailable   bool
+	TopSkipped     bool
+	Left           MotionVectorCandidate
+	Top            MotionVectorCandidate
+	TopRight       MotionVectorCandidate
+	TopLeft        MotionVectorCandidate
+	ReferenceFrame Yuv420Frame
+}
+
+type CABACPSkipMacroblockResult struct {
+	Skipped      bool
+	ReferenceIdx int32
+	MotionVector MotionVector
+	Luma         [256]uint8
+	Cb           [64]uint8
+	Cr           [64]uint8
+}
+
+// DecodePSkipMacroblock decodes mb_skip_flag and reconstructs a skipped P macroblock.
+// Neighbor motion facts and the selected RefPicList0[0] frame are supplied by the caller.
+func (decoder *CABACArithmeticDecoder) DecodePSkipMacroblock(input CABACPSkipMacroblockInput, contexts *[CABACContextCount]CABACContextModel, builder *Yuv420FrameBuilder, address int) (CABACPSkipMacroblockResult, error) {
+	var result CABACPSkipMacroblockResult
+	if decoder == nil || decoder.bits == nil || contexts == nil || builder == nil {
+		return result, ErrCABACContextState
+	}
+	if input.MacroblockX < 0 || input.MacroblockY < 0 {
+		return result, ErrYuv420MacroblockAssembly
+	}
+	readerCopy := *decoder.bits
+	trial := *decoder
+	trial.bits = &readerCopy
+	trialContexts := *contexts
+	var skipContexts [3]CABACContextModel
+	copy(skipContexts[:], trialContexts[11:14])
+	skipped, err := trial.DecodeMBSkipFlag(input.SliceType, &skipContexts, input.LeftAvailable, input.LeftSkipped, input.TopAvailable, input.TopSkipped)
+	if err != nil {
+		return result, err
+	}
+	copy(trialContexts[11:14], skipContexts[:])
+	if !skipped {
+		result.ReferenceIdx = -1
+		decoder.commitTrial(&trial, &readerCopy)
+		*contexts = trialContexts
+		return result, nil
+	}
+	result.Skipped = true
+	result.ReferenceIdx = 0
+	if input.Left.Available && input.Top.Available &&
+		!(input.Left.RefIdx == 0 && input.Left.Vector == (MotionVector{})) &&
+		!(input.Top.RefIdx == 0 && input.Top.Vector == (MotionVector{})) {
+		result.MotionVector = PredictMotionVector(0, input.Left, input.Top, input.TopRight, input.TopLeft)
+	}
+	refY, err := input.ReferenceFrame.LumaPlaneBytes()
+	if err != nil {
+		return CABACPSkipMacroblockResult{}, err
+	}
+	refCb, err := input.ReferenceFrame.UPlaneBytes()
+	if err != nil {
+		return CABACPSkipMacroblockResult{}, err
+	}
+	refCr, err := input.ReferenceFrame.VPlaneBytes()
+	if err != nil {
+		return CABACPSkipMacroblockResult{}, err
+	}
+	mbX, mbY := input.MacroblockX, input.MacroblockY
+	motionX, motionY := int(result.MotionVector.X), int(result.MotionVector.Y)
+	for row := 0; row < 16; row++ {
+		for column := 0; column < 16; column++ {
+			result.Luma[row*16+column], err = interpolateLumaFractionalSample(
+				refY, input.ReferenceFrame.Width, input.ReferenceFrame.Height, input.ReferenceFrame.Width,
+				mbX*16+column+(motionX>>2), mbY*16+row+(motionY>>2), uint8(motionX&3), uint8(motionY&3),
+			)
+			if err != nil {
+				return CABACPSkipMacroblockResult{}, err
+			}
+		}
+	}
+	chromaWidth, chromaHeight := (input.ReferenceFrame.Width+1)/2, (input.ReferenceFrame.Height+1)/2
+	for row := 0; row < 8; row++ {
+		for column := 0; column < 8; column++ {
+			index := row*8 + column
+			xInt := mbX*8 + column + (motionX >> 3)
+			yInt := mbY*8 + row + (motionY >> 3)
+			result.Cb[index], err = interpolateChromaFractionalSample(refCb, chromaWidth, chromaHeight, chromaWidth, xInt, yInt, uint8(motionX&7), uint8(motionY&7))
+			if err != nil {
+				return CABACPSkipMacroblockResult{}, err
+			}
+			result.Cr[index], err = interpolateChromaFractionalSample(refCr, chromaWidth, chromaHeight, chromaWidth, xInt, yInt, uint8(motionX&7), uint8(motionY&7))
+			if err != nil {
+				return CABACPSkipMacroblockResult{}, err
+			}
+		}
+	}
+	if err := builder.PlaceMacroblock(address, result.Luma, result.Cb, result.Cr); err != nil {
+		return CABACPSkipMacroblockResult{}, err
+	}
+	decoder.commitTrial(&trial, &readerCopy)
+	*contexts = trialContexts
+	return result, nil
 }
 
 // DeriveCABACReferenceIndexContextIncrement derives ctxIdxInc 0-3 for ref_idx_lX.
@@ -1041,7 +1148,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra16x16LumaMacroblock(mbType uin
 
 	dcCondLeft := DeriveCABACCodedBlockFlagCondTerm(leftEdge.Available, true, leftEdge.IsIPCM, leftEdge.DCTransformBlockAvailable, leftEdge.DCTransformBlockCoded)
 	dcCondTop := DeriveCABACCodedBlockFlagCondTerm(topEdge.Available, true, topEdge.IsIPCM, topEdge.DCTransformBlockAvailable, topEdge.DCTransformBlockCoded)
-	dcScanLevels, dcCoded, err := trial.DecodeResidualBlock(2, dcCondLeft, dcCondTop, &trialContexts)
+	dcScanLevels, dcCoded, err := trial.DecodeResidualBlock(0, dcCondLeft, dcCondTop, &trialContexts)
 	if err != nil {
 		return Intra16x16LumaMacroblockResult{}, err
 	}
@@ -1136,6 +1243,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 		copy(trialContexts[64:68], modeContexts[:])
 	}
 	result.PredictionMode = mode
+	var componentDCSamples [2][4]int64
 	for component := 0; component < 2; component++ {
 		qpc, err := deriveChromaQPC(qpy, qpOffsets[component])
 		if err != nil {
@@ -1143,7 +1251,6 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 		}
 		result.QPC[component] = qpc
 		var dcLevels [4]int32
-		var dcSamples [4]int64
 		if codedBlockPatternChroma != 0 {
 			dcCoded, topCoded := chromaDCCondTerms(leftEdges[component], topEdges[component])
 			decoded, coded, err := trial.DecodeResidualBlock(3, dcCoded, topCoded, &trialContexts)
@@ -1154,12 +1261,17 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 				result.DCCoded[component] = true
 				copy(dcLevels[:], decoded[:4])
 				transformed := inverseTransformChromaDC2x2(dcLevels)
-				dcSamples, err = inverseScaleChromaDC2x2(transformed, qpc)
+				componentDCSamples[component], err = inverseScaleChromaDC2x2(transformed, qpc)
 				if err != nil {
 					return IntraChroma420MacroblockResult{}, err
 				}
 			}
 		}
+	}
+	for component := 0; component < 2; component++ {
+		qpc := result.QPC[component]
+		dcSamples := componentDCSamples[component]
+		var err error
 		var residualBlocks [4][16]int64
 		var acCodedFlags [4]bool
 		for blockIndex := 0; blockIndex < 4; blockIndex++ {

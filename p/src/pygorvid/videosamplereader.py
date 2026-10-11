@@ -19,6 +19,7 @@ from .mp4boxes import (
     find,
     read_boxes,
 )
+from .nal import NALUnitError, split_length_prefixed_nals
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,32 @@ class VideoSampleReader:
                 return index
         return None
 
+    def presentation_sample_index(self, presentation_index: int) -> int:
+        if (
+            not isinstance(presentation_index, int)
+            or isinstance(presentation_index, bool)
+            or not 0 <= presentation_index < len(self._samples)
+        ):
+            raise IndexError("presentation frame index is out of range")
+        display_order = sorted(
+            range(len(self._samples)),
+            key=lambda index: (self._samples[index].pts_ticks, index),
+        )
+        return display_order[presentation_index]
+
+    def presentation_index_for_sample_index(self, sample_index: int) -> int:
+        if (
+            not isinstance(sample_index, int)
+            or isinstance(sample_index, bool)
+            or not 0 <= sample_index < len(self._samples)
+        ):
+            raise IndexError("sample index is out of range")
+        display_order = sorted(
+            range(len(self._samples)),
+            key=lambda index: (self._samples[index].pts_ticks, index),
+        )
+        return display_order.index(sample_index)
+
     def sample_at(self, index: int) -> CompressedSample:
         if (
             not isinstance(index, int)
@@ -260,8 +287,10 @@ class VideoSampleReader:
         data = self._file.read(location.size)
         if len(data) != location.size:
             raise Mp4FormatError("truncated MP4 sample data")
+        if self.configuration is None:
+            raise Mp4FormatError("AVC configuration is unavailable")
         try:
-            _validate_length_prefixed_nals(data)
+            _validate_length_prefixed_nals(data, self.configuration.nal_length_size)
         except Mp4FormatError as error:
             raise Mp4FormatError(f"sample {index}: {error}") from error
         return CompressedSample(
@@ -340,15 +369,8 @@ class VideoSampleReader:
         self.close()
 
 
-def _validate_length_prefixed_nals(data: bytes) -> None:
-    offset = 0
-    while offset < len(data):
-        if len(data) - offset < 4:
-            raise Mp4FormatError("truncated NAL length prefix")
-        nal_size = int.from_bytes(data[offset : offset + 4], "big")
-        offset += 4
-        if nal_size == 0:
-            raise Mp4FormatError("NAL unit has zero length")
-        if nal_size > len(data) - offset:
-            raise Mp4FormatError("NAL unit is truncated")
-        offset += nal_size
+def _validate_length_prefixed_nals(data: bytes, length_size: int = 4) -> None:
+    try:
+        split_length_prefixed_nals(data, length_size)
+    except NALUnitError as error:
+        raise Mp4FormatError(str(error)) from error

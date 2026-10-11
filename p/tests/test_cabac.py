@@ -8,12 +8,37 @@ from pygorvid import (
     CABACChroma420References,
     CABACChroma420EdgeState,
     CABACIIntraMacroblockInput,
+    CABACIIntraMacroblockResult,
+    CABACPSkipMacroblockInput,
+    CABACPSkipMacroblockResult,
+    CABACBReferencePicture,
+    CABACBDirectMacroblockInput,
+    CABACBDirectMacroblockResult,
+    CABACInterListNeighbors,
+    CABACInterPartitionNeighbors,
+    CABACInterMacroblockInput,
+    CABACInterMacroblockPartition,
+    CABACInterMacroblockResult,
+    CABACInterMacroblockNeighborState,
+    CABACInterMacroblockResidualInput,
+    CABACPBMacroblockLayerInput,
+    CABACPBMacroblockLayerResult,
+    CABACSliceNeighborIndices,
+    CABACSliceMacroblockResult,
+    CABACMacroblockEdgeSamples,
+    CABACMacroblockNeighborCodedState,
+    MotionVector,
+    MotionVectorCandidate,
     CABACIntra4x4EdgeState,
     CABACIntra16x16EdgeState,
     CABACInterNeighbor,
     CABACTerminatedError,
     derive_cabac_mvd_context_increment,
     derive_cabac_reference_index_context_increment,
+    derive_cabac_slice_neighbor_indices,
+    derive_cabac_macroblock_edge_samples,
+    derive_cabac_macroblock_neighbor_coded_state,
+    derive_cabac_inter_macroblock_neighbor_state_from_history,
     derive_coded_block_flag_cond_term,
     initialize_i_intra_chroma_pred_mode_contexts,
     initialize_i_intra4x4_pred_mode_contexts,
@@ -34,6 +59,7 @@ from pygorvid import (
     place_luma4x4_scan_levels,
     residual_context_bases,
     Yuv420FrameBuilder,
+    Yuv420Frame,
 )
 from pygorvid.cabac import _RANGE_LPS, derive_intra4x4_predicted_mode
 
@@ -472,7 +498,7 @@ def test_context_transitions_match_standard_vectors():
         0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
         13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
         24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
-        33, 33, 34, 34, 35, 35, 35, 36, 36, 37, 37, 37, 38, 38, 63, 63,
+        33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
     )
     for state_index, expected_state in enumerate(lps_transitions):
         model = CABACContextModel.__new__(CABACContextModel)
@@ -962,6 +988,27 @@ def test_intra_nxn_8x8_luma_modes_and_transform_flag():
     assert result.residuals == ((0,) * 64,) * 4
 
 
+def test_intra_chroma420_residual_order_decodes_both_dc_blocks_before_ac(monkeypatch):
+    from pygorvid.cabac import CABACChroma420References, CABACChroma420EdgeState
+
+    categories = []
+
+    def residual_block(self, category, cond_left, cond_top, contexts):
+        categories.append(category)
+        return [0] * 16, False
+
+    monkeypatch.setattr(CABACArithmeticDecoder, "decode_residual_block", residual_block)
+    decoder = CABACArithmeticDecoder(bytes(128))
+    decoder.decode_intra_chroma420_macroblock(
+        initialize_slice_contexts(2, 0, 26), 0, True, 0, False, False, False,
+        2, 26, (0, 0), ((16,) * 16,) * 2,
+        (CABACChroma420References(),) * 2,
+        (CABACChroma420EdgeState(),) * 2,
+        (CABACChroma420EdgeState(),) * 2,
+    )
+    assert categories == [3, 3] + [4] * 8
+
+
 def test_intra_chroma420_macroblock_decodes_dc_and_ac_cbp_for_both_components():
     for coded_block_pattern_chroma in (1, 2):
         decoder = CABACArithmeticDecoder(bytes(128))
@@ -1110,6 +1157,8 @@ def test_i16x16_dispatch_derives_chroma_cbp_but_decodes_chroma_mode():
     assert result.coded_block_pattern_chroma == 2
     assert result.qpy == 26
     assert result.luma == (90,) * 256
+    assert isinstance(result.luma_dc_coded, bool)
+    assert len(result.luma_ac_coded_block_flags) == 16
     assert builder.finish().u == bytes((128,)) * 64
 
 
@@ -1186,6 +1235,834 @@ def test_i_intra_macroblock_builder_failure_rolls_back_cabac_state():
     assert _states(contexts) == original_contexts
 
 
+def test_p_skip_macroblock_copies_zero_motion_reference():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[11]._value_mps = True
+    y_plane = bytes(range(256))
+    cb_plane = bytes(range(64))
+    cr_plane = bytes(reversed(range(64)))
+    reference = Yuv420Frame(16, 16, 16, 8, 8, y_plane, cb_plane, cr_plane)
+    builder = Yuv420FrameBuilder(1, 1)
+    result = decoder.decode_p_skip_macroblock(
+        CABACPSkipMacroblockInput(slice_type=0, reference_frame=reference),
+        contexts,
+        builder,
+        0,
+    )
+    assert result.skipped
+    assert result.reference_index == 0
+    assert result.motion_vector == (0, 0)
+    assert result.luma == tuple(y_plane)
+    assert result.cb == tuple(cb_plane)
+    assert result.cr == tuple(cr_plane)
+    frame = builder.finish()
+    assert frame.y == y_plane and frame.u == cb_plane and frame.v == cr_plane
+
+
+def test_p_skip_macroblock_predicts_nonzero_neighbor_motion():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    for index in range(11, 14):
+        contexts[index]._value_mps = True
+    y_plane = bytes(range(256))
+    chroma = bytes(index * 2 for index in range(64))
+    reference = Yuv420Frame(16, 16, 16, 8, 8, y_plane, chroma, chroma)
+    candidate = MotionVectorCandidate(1, MotionVector(4, -8))
+    input = CABACPSkipMacroblockInput(
+        slice_type=0,
+        left_available=True,
+        top_available=True,
+        left_candidate=candidate,
+        top_candidate=candidate,
+        top_right_candidate=candidate,
+        top_left_candidate=candidate,
+        reference_frame=reference,
+    )
+    result = decoder.decode_p_skip_macroblock(
+        input, contexts, Yuv420FrameBuilder(1, 1), 0
+    )
+    assert result.skipped
+    assert result.motion_vector == (4, -8)
+
+
+def test_p_skip_macroblock_builder_failure_rolls_back_cabac_state():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[11]._value_mps = True
+    original_contexts = _states(contexts)
+    original_decoder = (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset)
+    builder = Yuv420FrameBuilder(1, 1)
+    builder.place_macroblock(0, bytes(256), bytes(64), bytes(64))
+    reference = Yuv420Frame(16, 16, 16, 8, 8, bytes(256), bytes(64), bytes(64))
+    with pytest.raises(ValueError, match="invalid or duplicated"):
+        decoder.decode_p_skip_macroblock(
+            CABACPSkipMacroblockInput(slice_type=0, reference_frame=reference),
+            contexts,
+            builder,
+            0,
+        )
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == original_decoder
+    assert _states(contexts) == original_contexts
+
+
+def test_b_direct_spatial_uses_single_active_prediction_list():
+    decoder = CABACArithmeticDecoder(bytes(128))
+
+    def reference(value, poc):
+        frame = Yuv420Frame(
+            16, 16, 16, 8, 8, bytes([value]) * 256, bytes([value]) * 64, bytes([value]) * 64
+        )
+        return CABACBReferencePicture(frame, poc)
+
+    candidate = MotionVectorCandidate(1, MotionVector(0, 0))
+    input = CABACBDirectMacroblockInput(
+        list0_references=(reference(10, 0), reference(30, 1)),
+        list1_references=(reference(90, 2),),
+        left_l0_candidate=candidate,
+        top_l0_candidate=candidate,
+        top_right_l0_candidate=candidate,
+        colocated_reference_index=1,
+    )
+    result = decoder.decode_b_direct_macroblock(input, Yuv420FrameBuilder(1, 1), 0)
+    assert result.reference_indices == (1, -1)
+    assert result.prediction_flags == (True, False)
+    assert result.motion_vectors == ((0, 0), (0, 0))
+    assert result.luma == (30,) * 256
+    assert result.cb == (30,) * 64 and result.cr == (30,) * 64
+
+
+def test_b_direct_temporal_scales_colocated_vector_and_maps_reference_by_poc():
+    decoder = CABACArithmeticDecoder(bytes(128))
+
+    def reference(value, poc):
+        frame = Yuv420Frame(
+            16, 16, 16, 8, 8, bytes([value]) * 256, bytes([value]) * 64, bytes([value]) * 64
+        )
+        return CABACBReferencePicture(frame, poc)
+
+    input = CABACBDirectMacroblockInput(
+        direct_spatial=False,
+        list0_references=(reference(40, 3), reference(10, 0)),
+        list1_references=(reference(100, 10),),
+        colocated_reference_index=0,
+        colocated_reference_picture_order_count=0,
+        colocated_motion_vector=(4, -8),
+        current_picture_order_count=5,
+    )
+    result = decoder.decode_b_direct_macroblock(input, Yuv420FrameBuilder(1, 1), 0)
+    assert result.reference_indices == (1, 0)
+    assert result.motion_vectors == ((2, -4), (-2, 4))
+    assert result.prediction_flags == (True, True)
+    assert result.luma == (55,) * 256
+    assert result.cb == (55,) * 64 and result.cr == (55,) * 64
+
+
+def test_b_skip_uses_b_contexts_and_rolls_back_on_builder_failure():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[24]._value_mps = True
+    frame = Yuv420Frame(16, 16, 16, 8, 8, bytes([42]) * 256, bytes([42]) * 64, bytes([42]) * 64)
+    reference = CABACBReferencePicture(frame, 0)
+    input = CABACBDirectMacroblockInput(
+        list0_references=(reference,), list1_references=(reference,)
+    )
+    builder = Yuv420FrameBuilder(1, 1)
+    builder.place_macroblock(0, bytes(256), bytes(64), bytes(64))
+    original_contexts = _states(contexts)
+    original_decoder = (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset)
+    with pytest.raises(ValueError, match="invalid or duplicated"):
+        decoder.decode_b_skip_macroblock(input, contexts, builder, 0)
+    assert (decoder.code_range, decoder.code_offset, decoder._bits._bit_offset) == original_decoder
+    assert _states(contexts) == original_contexts
+
+
+def test_inter_macroblock_decodes_p16x16_reference_and_motion_vector():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+    encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 54)
+    encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 40)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 43)
+    encoder.bypass(False)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 47)
+
+    reference0 = CABACBReferencePicture(
+        Yuv420Frame(16, 16, 16, 8, 8, bytes([10]) * 256, bytes([10]) * 64, bytes([10]) * 64), 0
+    )
+    reference1 = CABACBReferencePicture(
+        Yuv420Frame(16, 16, 16, 8, 8, bytes([70]) * 256, bytes([70]) * 64, bytes([70]) * 64), 1
+    )
+    candidate = MotionVectorCandidate(1, MotionVector(4, -8))
+    partition_neighbors = CABACInterPartitionNeighbors(
+        list0=CABACInterListNeighbors(
+            left_candidate=candidate,
+            top_candidate=candidate,
+            top_right_candidate=candidate,
+        )
+    )
+    input = CABACInterMacroblockInput(
+        slice_type=0,
+        macroblock_x=0,
+        macroblock_y=0,
+        left_available=False,
+        top_available=False,
+        max_reference_index_minus1=(1, 0),
+        reference_lists=((reference0, reference1), ()),
+        partition_neighbors=(partition_neighbors,),
+    )
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    decoder = CABACArithmeticDecoder(encoder.data())
+    result = decoder.decode_inter_macroblock(input, decoder_contexts, Yuv420FrameBuilder(1, 1), 0)
+    assert result.macroblock_type == 0
+    assert result.partitions[0].reference_indices == (1, -1)
+    assert result.partitions[0].motion_vectors == ((5, -8), (0, 0))
+    assert result.partitions[0].motion_vector_differences == ((1, 0), (0, 0))
+    assert result.luma == (70,) * 256
+    assert result.cb == (70,) * 64 and result.cr == (70,) * 64
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+
+
+def test_slice_neighbor_indices_resolve_available_raster_neighbors():
+    assert derive_cabac_slice_neighbor_indices(9, 4, 2, 7) == CABACSliceNeighborIndices(
+        left=6, top=3, top_right=4, top_left=2
+    )
+    assert derive_cabac_slice_neighbor_indices(8, 4, 0, 8) == CABACSliceNeighborIndices(
+        left=None, top=4, top_right=5, top_left=None
+    )
+    assert derive_cabac_slice_neighbor_indices(2, 4, 0, 2) == CABACSliceNeighborIndices(
+        left=1, top=None, top_right=None, top_left=None
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (-1, 4, 0, 0),
+        (0, 0, 0, 0),
+        (1, 4, 0, 2),
+        (4, 4, 5, 0),
+        (4, 4, 0, -1),
+    ],
+)
+def test_slice_neighbor_indices_reject_invalid_history_ranges(arguments):
+    with pytest.raises(CABACError, match="history range"):
+        derive_cabac_slice_neighbor_indices(*arguments)
+
+
+def test_macroblock_neighbor_edge_samples_gather_yuv420_planes():
+    macroblock = CABACInterMacroblockResult(
+        0,
+        (),
+        (),
+        tuple(range(256)),
+        tuple(range(64)),
+        tuple(range(64)),
+    )
+    history_entry = CABACSliceMacroblockResult(
+        4, CABACPBMacroblockLayerResult(False, macroblock)
+    )
+
+    left = derive_cabac_macroblock_edge_samples(history_entry, "left")
+    top = derive_cabac_macroblock_edge_samples(history_entry, "top")
+
+    assert left == CABACMacroblockEdgeSamples(
+        tuple(row * 16 + 15 for row in range(16)),
+        tuple(row * 8 + 7 for row in range(8)),
+        tuple(row * 8 + 7 for row in range(8)),
+    )
+    assert top == CABACMacroblockEdgeSamples(
+        tuple(range(240, 256)), tuple(range(56, 64)), tuple(range(56, 64))
+    )
+
+
+def test_macroblock_neighbor_coded_state_maps_luma_and_chroma_edges():
+    luma_flags = [False] * 16
+    luma_flags[5] = True
+    luma_flags[15] = True
+    inter = CABACInterMacroblockResult(
+        0,
+        (),
+        (),
+        (0,) * 256,
+        (0,) * 64,
+        (0,) * 64,
+        coded_block_pattern_luma=15,
+        coded_block_pattern_chroma=2,
+        luma_4x4_coded_block_flags=tuple(luma_flags),
+        chroma_dc_coded=(True, False),
+        chroma_ac_coded_flags=((False, True, False, True), (True, False, True, False)),
+    )
+    history_entry = CABACSliceMacroblockResult(
+        4, CABACPBMacroblockLayerResult(False, inter)
+    )
+
+    state = derive_cabac_macroblock_neighbor_coded_state(history_entry, "left")
+
+    assert isinstance(state, CABACMacroblockNeighborCodedState)
+    assert state.luma_4x4_edge.transform_block_available == (True,) * 4
+    assert state.luma_4x4_edge.transform_block_coded == (True, False, False, True)
+    assert state.luma_16x16_edge.ac_transform_block_coded == (True, False, False, True)
+    assert state.chroma_edges[0].dc_block_coded
+    assert state.chroma_edges[0].ac_block_coded == (True, True)
+    assert state.chroma_edges[1].ac_block_coded == (False, False)
+
+
+def test_macroblock_neighbor_coded_state_maps_intra_prediction_modes():
+    intra = CABACIIntraMacroblockResult(
+        macroblock_type=0,
+        coded_block_pattern_luma=0,
+        coded_block_pattern_chroma=0,
+        transform_size_8x8=False,
+        intra16x16_luma_mode=0,
+        chroma_prediction_mode=0,
+        luma_4x4_modes=tuple(index % 9 for index in range(16)),
+        luma_8x8_modes=(),
+        qp_delta=0,
+        qpy=26,
+        luma=(0,) * 256,
+        cb=(0,) * 64,
+        cr=(0,) * 64,
+        luma_4x4_coded_block_flags=(False,) * 16,
+        chroma_dc_coded=(False, False),
+        chroma_ac_coded_flags=((False,) * 4, (False,) * 4),
+    )
+    history_entry = CABACSliceMacroblockResult(4, intra)
+
+    left = derive_cabac_macroblock_neighbor_coded_state(history_entry, "left")
+    top = derive_cabac_macroblock_neighbor_coded_state(history_entry, "top")
+
+    assert left.is_intra_nxn
+    assert left.luma_4x4_modes == (5, 7, 4, 6)
+    assert left.luma_8x8_modes == (5, 4)
+    assert top.luma_4x4_modes == (1, 2, 5, 6)
+    assert top.luma_8x8_modes == (1, 5)
+
+
+def test_macroblock_neighbor_8x8_coded_flags_are_inferred_from_cbp():
+    inter = CABACInterMacroblockResult(
+        0,
+        (),
+        (),
+        (0,) * 256,
+        (0,) * 64,
+        (0,) * 64,
+        coded_block_pattern_luma=2,
+        transform_size_8x8=True,
+    )
+    history_entry = CABACSliceMacroblockResult(
+        4, CABACPBMacroblockLayerResult(False, inter)
+    )
+
+    state = derive_cabac_macroblock_neighbor_coded_state(history_entry, "left")
+
+    assert state.luma_4x4_edge.transform_block_available == (True, True, False, False)
+    assert state.luma_4x4_edge.transform_block_coded == (True, True, False, False)
+
+
+def test_inter_macroblock_neighbor_state_derives_a_b_c_d_from_history():
+    history = []
+    for address in range(5):
+        partition = CABACInterMacroblockPartition(
+            x=0,
+            y=0,
+            width=16,
+            height=16,
+            prediction_flags=(True, False),
+            reference_indices=(address, -1),
+            motion_vectors=((100 + address, 200 + address), (0, 0)),
+            motion_vector_differences=((address, -address), (0, 0)),
+        )
+        inter = CABACInterMacroblockResult(
+            0, (), (partition,), (0,) * 256, (0,) * 64, (0,) * 64
+        )
+        history.append(
+            CABACSliceMacroblockResult(
+                address, CABACPBMacroblockLayerResult(False, inter)
+            )
+        )
+
+    state = derive_cabac_inter_macroblock_neighbor_state_from_history(
+        5, 4, 0, history, 0, 0, 0, 16, 16
+    )
+
+    assert isinstance(state, CABACInterMacroblockNeighborState)
+    assert (state.left_available, state.top_available) == (True, True)
+    assert not state.left_skipped and not state.top_skipped
+    list0 = state.partition_neighbors.list0
+    assert list0.left.reference_index == 4
+    assert list0.left.motion_vector_difference == (4, -4)
+    assert list0.top.reference_index == 1
+    assert list0.top.motion_vector_difference == (1, -1)
+    assert list0.left_candidate == MotionVectorCandidate(4, MotionVector(104, 204))
+    assert list0.top_candidate == MotionVectorCandidate(1, MotionVector(101, 201))
+    assert list0.top_right_candidate == MotionVectorCandidate(2, MotionVector(102, 202))
+    assert list0.top_left_candidate == MotionVectorCandidate(0, MotionVector(100, 200))
+    b_state = derive_cabac_inter_macroblock_neighbor_state_from_history(
+        5, 4, 0, history, 1, 0, 0, 16, 16
+    )
+    assert b_state.left_b_skip_or_direct and b_state.top_b_skip_or_direct
+
+    b_skip = CABACBDirectMacroblockResult(
+        True,
+        (0, 0),
+        ((10, 10), (0, 0)),
+        (True, False),
+        (0,) * 256,
+        (0,) * 64,
+        (0,) * 64,
+    )
+    b_skip_history = list(history)
+    b_skip_history[4] = CABACSliceMacroblockResult(
+        4, CABACPBMacroblockLayerResult(True, b_skip)
+    )
+    b_skip_state = derive_cabac_inter_macroblock_neighbor_state_from_history(
+        5, 4, 0, b_skip_history, 1, 0, 0, 16, 16
+    )
+    assert b_skip_state.left_skipped and b_skip_state.left_b_skip_or_direct
+    assert b_skip_state.partition_neighbors.list0.left.skip
+    assert b_skip_state.partition_neighbors.list0.left_candidate == MotionVectorCandidate(
+        0, MotionVector(10, 10)
+    )
+
+
+def test_inter_macroblock_decodes_b_biprediction_and_blends_partitions():
+    slice_contexts = initialize_slice_contexts(1, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(1, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[3])
+    for context_index in (40, 47, 40, 47):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+
+    reference0 = CABACBReferencePicture(
+        Yuv420Frame(16, 16, 16, 8, 8, bytes([20]) * 256, bytes([20]) * 64, bytes([20]) * 64), 0
+    )
+    reference1 = CABACBReferencePicture(
+        Yuv420Frame(16, 16, 16, 8, 8, bytes([100]) * 256, bytes([100]) * 64, bytes([100]) * 64), 1
+    )
+    neighbors = CABACInterPartitionNeighbors()
+    input = CABACInterMacroblockInput(
+        slice_type=1,
+        macroblock_x=0,
+        macroblock_y=0,
+        left_available=False,
+        top_available=False,
+        reference_lists=((reference0,), (reference1,)),
+        partition_neighbors=(neighbors,),
+    )
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    result = CABACArithmeticDecoder(encoder.data()).decode_inter_macroblock(
+        input, decoder_contexts, Yuv420FrameBuilder(1, 1), 0
+    )
+    assert result.macroblock_type == 3
+    assert result.partitions[0].prediction_flags == (True, True)
+    assert result.luma == (60,) * 256
+    assert result.cb == (60,) * 64 and result.cr == (60,) * 64
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+
+
+def test_inter_macroblock_decodes_p8x8_subtypes_and_raster_partitions():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[3])
+    for _ in range(4):
+        encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 21)
+    encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 40)
+    encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 43)
+    encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 44)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 45)
+    encoder.bypass(False)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 47)
+    for context_index in (41, 41, 40):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 47)
+    reference = CABACBReferencePicture(
+        Yuv420Frame(16, 16, 16, 8, 8, bytes([88]) * 256, bytes([88]) * 64, bytes([88]) * 64), 0
+    )
+    input = CABACInterMacroblockInput(
+        slice_type=0,
+        macroblock_x=0,
+        macroblock_y=0,
+        left_available=False,
+        top_available=False,
+        reference_lists=((reference,), ()),
+        partition_neighbors=tuple(CABACInterPartitionNeighbors() for _ in range(16)),
+    )
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    result = CABACArithmeticDecoder(encoder.data()).decode_inter_macroblock(
+        input, decoder_contexts, Yuv420FrameBuilder(1, 1), 0
+    )
+    assert result.macroblock_type == 3
+    assert result.sub_macroblock_types == (0, 0, 0, 0)
+    assert tuple((part.x, part.y, part.width, part.height) for part in result.partitions) == (
+        (0, 0, 8, 8), (8, 0, 8, 8), (0, 8, 8, 8), (8, 8, 8, 8)
+    )
+    assert tuple(part.motion_vectors[0] for part in result.partitions) == (
+        (3, 0), (3, 0), (3, 0), (3, 0)
+    )
+    assert result.luma == (88,) * 256
+    assert result.cb == (88,) * 64 and result.cr == (88,) * 64
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+
+
+def test_inter_macroblock_decodes_b8x8_direct_subtypes_with_supplied_direct_vectors():
+    slice_contexts = initialize_slice_contexts(1, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(1, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[22])
+    for _ in range(4):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 36)
+
+    def reference(value, poc):
+        frame = Yuv420Frame(
+            16, 16, 16, 8, 8, bytes([value]) * 256, bytes([value]) * 64, bytes([value]) * 64
+        )
+        return CABACBReferencePicture(frame, poc)
+
+    direct = CABACBDirectMacroblockResult(
+        False, (0, -1), ((0, 0), (0, 0)), (True, False), (0,) * 256, (0,) * 64, (0,) * 64
+    )
+    input = CABACInterMacroblockInput(
+        slice_type=1,
+        macroblock_x=0,
+        macroblock_y=0,
+        left_available=False,
+        top_available=False,
+        reference_lists=((reference(44, 0),), (reference(88, 1),)),
+        partition_neighbors=tuple(
+            CABACInterPartitionNeighbors(direct_prediction=direct) for _ in range(16)
+        ),
+    )
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    result = CABACArithmeticDecoder(encoder.data()).decode_inter_macroblock(
+        input, decoder_contexts, Yuv420FrameBuilder(1, 1), 0
+    )
+    assert result.macroblock_type == 22
+    assert result.sub_macroblock_types == (0, 0, 0, 0)
+    assert len(result.partitions) == 16
+    assert all(partition.prediction_flags == (True, False) for partition in result.partitions)
+    assert result.luma == (44,) * 256
+    assert result.cb == (44,) * 64 and result.cr == (44,) * 64
+
+
+def test_spatial_b_direct_uses_colocated_motion_for_each_inferred_8x8_region():
+    from pygorvid.cabac import _derive_spatial_b_direct_partition
+    from pygorvid.reconstruction import ColocatedMotionFact
+
+    frame = Yuv420Frame(16, 16, 16, 8, 8, bytes(256), bytes(64), bytes(64))
+    reference = CABACBReferencePicture(frame, 0)
+    candidate = MotionVectorCandidate(0, MotionVector(4, 0))
+    list_neighbors = CABACInterListNeighbors(
+        left_candidate=candidate,
+        top_candidate=candidate,
+        top_right_candidate=candidate,
+        top_left_candidate=candidate,
+    )
+    colocated_field = [ColocatedMotionFact(1, MotionVector(4, 0)) for _ in range(16)]
+    colocated_field[0] = ColocatedMotionFact(0, MotionVector(0, 0))
+    colocated_field[3] = ColocatedMotionFact(0, MotionVector(4, 0))
+    direct_input = CABACBDirectMacroblockInput(
+        list0_references=(reference,),
+        list1_references=(reference,),
+        colocated_motion_field=tuple(colocated_field),
+    )
+    neighbors = CABACInterPartitionNeighbors(list_neighbors, list_neighbors)
+
+    first = _derive_spatial_b_direct_partition(direct_input, neighbors, 0, 0, True)
+    second = _derive_spatial_b_direct_partition(direct_input, neighbors, 8, 0, True)
+
+    assert first.motion_vectors == ((0, 0), (0, 0))
+    assert second.motion_vectors == ((4, 0), (4, 0))
+
+
+def test_inter_macroblock_layer_decodes_qp_luma_and_chroma_dc_residuals():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+    for context_index in (40, 47):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+    for context_index, bit in ((76, 1), (75, 0), (74, 0), (76, 0), (77, 1), (81, 0), (60, 0)):
+        encoder.encode_bin_string(
+            encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index
+        )
+    for context_index, bit in ((85, 1), (105, 1), (166, 1), (228, 0)):
+        encoder.encode_bin_string(
+            encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index
+        )
+    encoder.bypass(False)
+    for context_index, bit in (
+        (86, 0), (87, 0), (85, 0), (97, 1), (149, 1), (210, 1), (258, 1), (262, 0), (97, 0)
+    ):
+        encoder.encode_bin_string(
+            encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index
+        )
+    encoder.bypass(False)
+
+    frame = Yuv420Frame(
+        16, 16, 16, 8, 8, bytes([20]) * 256, bytes([80]) * 64, bytes([120]) * 64
+    )
+    reference = CABACBReferencePicture(frame, 0)
+    input = CABACInterMacroblockInput(
+        slice_type=0,
+        macroblock_x=0,
+        macroblock_y=0,
+        left_available=False,
+        top_available=False,
+        reference_lists=((reference,), ()),
+        partition_neighbors=(CABACInterPartitionNeighbors(),),
+    )
+    encoded_data = encoder.data()
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    result = CABACArithmeticDecoder(encoded_data).decode_inter_macroblock_layer(
+        input,
+        CABACInterMacroblockResidualInput(chroma_qp_index_offsets=(12, 0)),
+        decoder_contexts,
+        Yuv420FrameBuilder(1, 1),
+        0,
+    )
+    assert (result.coded_block_pattern_luma, result.coded_block_pattern_chroma) == (1, 1)
+    assert result.qp_delta == 0 and result.qpy == 26
+    assert result.luma_4x4_coded_block_flags[0]
+    assert result.chroma_dc_coded == (True, False)
+    assert result.luma[0] != 20
+    assert result.cb != (80,) * 64
+    assert result.cr == (120,) * 64
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+
+    failed_decoder = CABACArithmeticDecoder(encoded_data)
+    failed_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    original_contexts = _states(failed_contexts)
+    original_state = (
+        failed_decoder.code_range,
+        failed_decoder.code_offset,
+        failed_decoder._bits._bit_offset,
+    )
+    failed_builder = Yuv420FrameBuilder(1, 1)
+    failed_builder.place_macroblock(0, bytes(256), bytes(64), bytes(64))
+    with pytest.raises(ValueError, match="invalid or duplicated"):
+        failed_decoder.decode_inter_macroblock_layer(
+            input, CABACInterMacroblockResidualInput(chroma_qp_index_offsets=(12, 0)),
+            failed_contexts, failed_builder, 0,
+        )
+    assert (failed_decoder.code_range, failed_decoder.code_offset, failed_decoder._bits._bit_offset) == original_state
+    assert _states(failed_contexts) == original_contexts
+
+
+def test_inter_macroblock_layer_decodes_transform8x8_luma_residual():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+    for context_index in (40, 47):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+    for context_index, bit in ((76, 1), (75, 0), (74, 0), (76, 0), (77, 0), (399, 1), (60, 0)):
+        encoder.encode_bin_string(encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index)
+    for context_index, bit in ((402, 1), (417, 1), (427, 0)):
+        encoder.encode_bin_string(encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index)
+    encoder.bypass(False)
+
+    frame = Yuv420Frame(16, 16, 16, 8, 8, bytes([20]) * 256, bytes([80]) * 64, bytes([120]) * 64)
+    reference = CABACBReferencePicture(frame, 0)
+    input = CABACInterMacroblockInput(
+        0, 0, 0, False, False, reference_lists=((reference,), ()),
+        partition_neighbors=(CABACInterPartitionNeighbors(),),
+    )
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    result = CABACArithmeticDecoder(encoder.data()).decode_inter_macroblock_layer(
+        input,
+        CABACInterMacroblockResidualInput(transform_8x8_mode_enabled=True),
+        decoder_contexts,
+        Yuv420FrameBuilder(1, 1),
+        0,
+    )
+    assert result.transform_size_8x8
+    assert result.luma[0] != 20
+    assert result.coded_block_pattern_luma == 1
+
+
+def test_inter_macroblock_layer_decodes_chroma_ac_residuals():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+    for context_index in (40, 47):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+    for _ in range(4):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 76)
+    for context_index, bit in ((77, 1), (81, 1), (60, 0), (97, 0), (97, 0)):
+        encoder.encode_bin_string(encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index)
+    for context_index, bit in ((101, 1), (152, 1), (213, 1), (267, 0)):
+        encoder.encode_bin_string(encoder_contexts, str(bit), lambda *_args, context_index=context_index: context_index)
+    encoder.bypass(False)
+    for context_index in (102, 103, 101, 101, 101, 101, 101):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+
+    frame = Yuv420Frame(16, 16, 16, 8, 8, bytes([20]) * 256, bytes([80]) * 64, bytes([120]) * 64)
+    reference = CABACBReferencePicture(frame, 0)
+    input = CABACInterMacroblockInput(
+        0, 0, 0, False, False, reference_lists=((reference,), ()),
+        partition_neighbors=(CABACInterPartitionNeighbors(),),
+    )
+    result = CABACArithmeticDecoder(encoder.data()).decode_inter_macroblock_layer(
+        input, CABACInterMacroblockResidualInput(),
+        [_model(model._state_index, model._value_mps) for model in slice_contexts],
+        Yuv420FrameBuilder(1, 1), 0,
+    )
+    assert result.coded_block_pattern_chroma == 2
+    assert result.chroma_ac_coded_flags[0][0]
+    assert result.cb != (80,) * 64
+    assert result.cr == (120,) * 64
+
+
+def test_p_b_macroblock_layer_dispatches_p_skip_and_places_reference():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[11]._value_mps = True
+    frame = Yuv420Frame(16, 16, 16, 8, 8, bytes([33]) * 256, bytes([33]) * 64, bytes([33]) * 64)
+    reference = CABACBReferencePicture(frame, 0)
+    input = CABACPBMacroblockLayerInput(
+        inter_input=CABACInterMacroblockInput(
+            0, 0, 0, False, False,
+            reference_lists=((reference,), ()),
+            partition_neighbors=(CABACInterPartitionNeighbors(),),
+        ),
+        residual_input=CABACInterMacroblockResidualInput(),
+    )
+    result = decoder.decode_p_b_macroblock_layer(input, contexts, Yuv420FrameBuilder(1, 1), 0)
+    assert result.skipped
+    assert isinstance(result.macroblock, CABACPSkipMacroblockResult)
+    assert result.macroblock.luma == (33,) * 256
+
+
+def test_p_b_macroblock_layer_dispatches_b_skip_direct_prediction():
+    decoder = CABACArithmeticDecoder(bytes(128))
+    contexts = [_model(63, False) for _ in range(460)]
+    contexts[24]._value_mps = True
+    frame = Yuv420Frame(16, 16, 16, 8, 8, bytes([77]) * 256, bytes([77]) * 64, bytes([77]) * 64)
+    reference = CABACBReferencePicture(frame, 0)
+    direct_input = CABACBDirectMacroblockInput(
+        list0_references=(reference,), list1_references=(reference,)
+    )
+    input = CABACPBMacroblockLayerInput(
+        inter_input=CABACInterMacroblockInput(
+            1, 0, 0, False, False,
+        ),
+        residual_input=CABACInterMacroblockResidualInput(),
+        b_skip_input=direct_input,
+    )
+    result = decoder.decode_p_b_macroblock_layer(input, contexts, Yuv420FrameBuilder(1, 1), 0)
+    assert result.skipped
+    assert isinstance(result.macroblock, CABACBDirectMacroblockResult)
+    assert result.macroblock.skipped
+    assert result.macroblock.luma == (77,) * 256
+
+
+def test_p_b_macroblock_layer_continues_after_non_skip_flag():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 11)
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+    for context_index in (40, 47):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+    for _ in range(4):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 76)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 77)
+    reference = CABACBReferencePicture(
+        Yuv420Frame(16, 16, 16, 8, 8, bytes([61]) * 256, bytes([61]) * 64, bytes([61]) * 64), 0
+    )
+    input = CABACPBMacroblockLayerInput(
+        inter_input=CABACInterMacroblockInput(
+            0, 0, 0, False, False,
+            reference_lists=((reference,), ()),
+            partition_neighbors=(CABACInterPartitionNeighbors(),),
+        ),
+        residual_input=CABACInterMacroblockResidualInput(),
+    )
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    result = CABACArithmeticDecoder(encoder.data()).decode_p_b_macroblock_layer(
+        input, decoder_contexts, Yuv420FrameBuilder(1, 1), 0
+    )
+    assert not result.skipped
+    assert isinstance(result.macroblock, CABACInterMacroblockResult)
+    assert result.macroblock.macroblock_type == 0
+    assert result.macroblock.luma == (61,) * 256
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+
+
+def test_slice_data_runs_skip_non_skip_and_end_of_slice_with_neighbor_history():
+    slice_contexts = initialize_slice_contexts(0, 0, 26)
+    encoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    encoder = _TestEncoder()
+    encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 11)
+    encoder.terminate(False)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 11)
+    symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+    for context_index in (40, 47):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_args, context_index=context_index: context_index)
+    for _ in range(4):
+        encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 76)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 77)
+    encoder.terminate(True)
+
+    frame = Yuv420Frame(
+        32, 16, 32, 16, 16, bytes([51]) * 512, bytes([61]) * 128, bytes([71]) * 128
+    )
+    reference = CABACBReferencePicture(frame, 0)
+    history_lengths = []
+
+    def input_provider(address, history):
+        history_lengths.append(len(history))
+        previous_was_skipped = bool(
+            history
+            and isinstance(history[-1].macroblock, CABACPBMacroblockLayerResult)
+            and history[-1].macroblock.skipped
+        )
+        inter_input = CABACInterMacroblockInput(
+            0,
+            address,
+            0,
+            address > 0,
+            False,
+            reference_lists=((reference,), ()),
+            partition_neighbors=(CABACInterPartitionNeighbors(),),
+        )
+        return CABACPBMacroblockLayerInput(
+            inter_input=inter_input,
+            residual_input=CABACInterMacroblockResidualInput(),
+            left_skipped=previous_was_skipped,
+        )
+
+    decoder_contexts = [_model(model._state_index, model._value_mps) for model in slice_contexts]
+    decoder = CABACArithmeticDecoder(encoder.data())
+    builder = Yuv420FrameBuilder(2, 1)
+    result = decoder.decode_slice_data(
+        0, 0, 2, decoder_contexts, builder, input_provider
+    )
+    assert tuple(item.address for item in result) == (0, 1)
+    assert isinstance(result[0].macroblock, CABACPBMacroblockLayerResult)
+    assert result[0].macroblock.skipped
+    assert isinstance(result[1].macroblock, CABACPBMacroblockLayerResult)
+    assert not result[1].macroblock.skipped
+    assert history_lengths == [0, 1]
+    frame = builder.finish()
+    assert frame.y[:16] == bytes([51]) * 16
+    assert frame.y[16:32] == bytes([51]) * 16
+    assert _states(decoder_contexts) == _states(encoder_contexts)
+
+
 def test_intra_nxn_8x8_luma_category5_residual_and_rollback():
     decoder = CABACArithmeticDecoder(bytes(128))
     contexts = [_model(63, False) for _ in range(460)]
@@ -1235,7 +2112,7 @@ def test_reconstruct_i16x16_luma_dc_hadamard_and_scaling():
 def test_decode_i16x16_luma_dc_and_prediction():
     decoder = CABACArithmeticDecoder(bytes(64))
     contexts = [_model(63, False) for _ in range(460)]
-    for index in (96, 134, 195):
+    for index in (88, 105, 166):
         contexts[index]._value_mps = True
     result = decoder.decode_intra16x16_luma_macroblock(
         1,
@@ -1257,7 +2134,7 @@ def test_decode_i16x16_luma_dc_and_prediction():
 def test_decode_i16x16_luma_ac_residuals():
     decoder = CABACArithmeticDecoder(bytes(128))
     contexts = [_model(63, False) for _ in range(460)]
-    for index in (92, 96, 120, 134, 166, 181):
+    for index in (88, 92, 105, 120, 166, 181):
         contexts[index]._value_mps = True
     result = decoder.decode_intra16x16_luma_macroblock(
         13,
@@ -1283,7 +2160,7 @@ def test_i16x16_luma_dc_hadamard_scaling_and_decode():
 
     decoder = CABACArithmeticDecoder(bytes(64))
     contexts = [_model(63, False) for _ in range(460)]
-    for index in (96, 134, 195):
+    for index in (88, 105, 166):
         contexts[index]._value_mps = True
     top = (100,) * 16
     result = decoder.decode_intra16x16_luma_macroblock(
@@ -1300,7 +2177,7 @@ def test_i16x16_luma_dc_hadamard_scaling_and_decode():
 def test_i16x16_luma_ac_residuals_decode():
     decoder = CABACArithmeticDecoder(bytes(128))
     contexts = [_model(63, False) for _ in range(460)]
-    for index in (92, 96, 120, 134, 166, 181):
+    for index in (88, 92, 105, 120, 166, 181):
         contexts[index]._value_mps = True
     top = (100,) * 16
     result = decoder.decode_intra16x16_luma_macroblock(
@@ -1399,6 +2276,19 @@ class _TestEncoder:
             self.code_range = range_lps
         model.update(bin_value)
         self._renormalize()
+
+    def bypass(self, bin_value):
+        self.low <<= 1
+        if bin_value:
+            self.low += self.code_range
+        if self.low < 512:
+            self._put_bit(0)
+        elif self.low >= 1024:
+            self.low -= 1024
+            self._put_bit(1)
+        else:
+            self.low -= 512
+            self.outstanding += 1
 
     def terminate(self, bin_value):
         self.code_range -= 2

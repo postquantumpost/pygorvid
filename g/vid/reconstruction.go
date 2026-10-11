@@ -9,6 +9,7 @@ var ErrReferenceFrameNum = errors.New("reference frame number is outside the con
 var ErrReferenceListModification = errors.New("reference-list modification is invalid or unresolved")
 var ErrLumaFractionalSampleOffset = errors.New("luma fractional-sample offset is outside [0,3]")
 var ErrLumaReferencePlaneLayout = errors.New("luma reference plane layout is invalid or truncated")
+var ErrChromaFractionalSampleOffset = errors.New("chroma fractional-sample offset is outside [0,7]")
 var ErrPictureOrderCount = errors.New("picture order count input or arithmetic is invalid")
 var ErrLumaDeblockingParameters = errors.New("luma deblocking parameters are invalid")
 var ErrLumaDeblockingBoundaryStrength = errors.New("luma deblocking boundary strength is outside [0,4]")
@@ -937,6 +938,30 @@ func interpolateLumaFractionalSample(plane []uint8, width, height, stride, xInt,
 	return selectLumaFractionalSample(grid, xFracL, yFracL)
 }
 
+func interpolateChromaFractionalSample(plane []uint8, width, height, stride, xInt, yInt int, xFracC, yFracC uint8) (uint8, error) {
+	if xFracC > 7 || yFracC > 7 {
+		return 0, ErrChromaFractionalSampleOffset
+	}
+	if width <= 0 || height <= 0 || stride < width {
+		return 0, ErrLumaReferencePlaneLayout
+	}
+	maxInt := int(^uint(0) >> 1)
+	if height-1 > (maxInt-width)/stride || len(plane) < (height-1)*stride+width {
+		return 0, ErrLumaReferencePlaneLayout
+	}
+	x0 := clampLumaReferenceCoordinate(xInt, 0, width)
+	x1 := clampLumaReferenceCoordinate(xInt, 1, width)
+	y0 := clampLumaReferenceCoordinate(yInt, 0, height)
+	y1 := clampLumaReferenceCoordinate(yInt, 1, height)
+	a := int(plane[y0*stride+x0])
+	b := int(plane[y0*stride+x1])
+	c := int(plane[y1*stride+x0])
+	d := int(plane[y1*stride+x1])
+	xFrac, yFrac := int(xFracC), int(yFracC)
+	value := ((8-xFrac)*(8-yFrac)*a + xFrac*(8-yFrac)*b + (8-xFrac)*yFrac*c + xFrac*yFrac*d + 32) >> 6
+	return uint8(value), nil
+}
+
 func filterLumaSixTap(samples [6]int) int {
 	return samples[0] - 5*samples[1] + 20*samples[2] + 20*samples[3] - 5*samples[4] + samples[5]
 }
@@ -1635,7 +1660,7 @@ func inverseScaleChromaDC2x2(transformed [4]int64, qpc int) ([4]int64, error) {
 			return scaled, ErrInverseScaleChromaDCOutOfRange
 		}
 	}
-	factor := inverseScale4x4Factors[qpc%6][0]
+	factor := inverseScale4x4Factors[qpc%6][0] * 16
 	shift := qpc / 6
 	for index, coefficient := range transformed {
 		scaled[index] = (coefficient * factor << shift) >> 5
@@ -1751,10 +1776,10 @@ func inverseScaleLuma8x8(levels [64]int32, scalingList [64]uint8, qpy int) ([64]
 		}
 		factorClass := inverseScale8x8Classes[index]
 		value := int64(levels[index]) * inverseScale8x8Factors[qpy%6][factorClass] * int64(weight)
-		if qpy >= 24 {
-			scaled[index] = value << (qpy/6 - 4)
+		if qpy >= 36 {
+			scaled[index] = value << (qpy/6 - 6)
 		} else {
-			shift := 4 - qpy/6
+			shift := 6 - qpy/6
 			rounding := int64(1) << (shift - 1)
 			scaled[index] = (value + rounding) >> shift
 		}
@@ -1950,7 +1975,7 @@ func inverseTransform8x8Line(coefficients [8]int64) (samples [8]int64) {
 	a7 := coefficients[3] + coefficients[5] + coefficients[1] + (coefficients[1] >> 1)
 	b1 := a1 + (a7 >> 2)
 	b3 := a3 + (a5 >> 2)
-	b5 := a5 - (a3 >> 2)
+	b5 := (a3 >> 2) - a5
 	b7 := a7 - (a1 >> 2)
 
 	samples = [8]int64{
@@ -2287,7 +2312,7 @@ func predictLumaIntra4x4DiagonalDownRight(top [8]uint8, left [4]uint8, topLeft u
 	}
 	for row := 0; row < 4; row++ {
 		for column := 0; column < 4; column++ {
-			position := column - row
+			position := column - row - 1
 			value := (referenceAt(position-1) + 2*referenceAt(position) + referenceAt(position+1) + 2) >> 2
 			prediction[row*4+column] = uint8(value)
 		}
@@ -2427,16 +2452,16 @@ func predictLumaIntra4x4VerticalRight(top [8]uint8, left [4]uint8, topLeft uint8
 			switch {
 			case phase >= 0 && phase%2 == 0:
 				center := phase / 2
-				value = (topReferenceAt(center-1) + 2*topReferenceAt(center) + topReferenceAt(center+1) + 2) >> 2
+				value = (topReferenceAt(center-1) + topReferenceAt(center) + 1) >> 1
 			case phase >= 0:
 				center := (phase - 1) / 2
-				value = (topReferenceAt(center-1) + topReferenceAt(center) + 1) >> 1
+				value = (topReferenceAt(center-1) + 2*topReferenceAt(center) + topReferenceAt(center+1) + 2) >> 2
 			case phase == -1:
-				value = (int(left[0]) + int(topLeft) + 1) >> 1
-			case phase == -2:
 				value = (int(left[0]) + 2*int(topLeft) + int(top[0]) + 2) >> 2
+			case phase == -2:
+				value = (int(left[1]) + 2*int(left[0]) + int(topLeft) + 2) >> 2
 			default:
-				value = (int(left[0]) + int(left[1]) + 1) >> 1
+				value = (int(left[2]) + 2*int(left[1]) + int(left[0]) + 2) >> 2
 			}
 			prediction[row*4+column] = uint8(value)
 		}
@@ -2474,16 +2499,17 @@ func predictLumaIntra4x4VerticalLeft(top [8]uint8) (prediction [16]uint8) {
 }
 
 func predictLumaIntra4x4HorizontalUp(left [8]uint8) (prediction [16]uint8) {
+	referenceAt := func(position int) int { return int(left[min(position, 3)]) }
 	for row := 0; row < 4; row++ {
 		for column := 0; column < 4; column++ {
 			phase := 2*row + column
 			var value int
 			if phase%2 == 0 {
 				center := phase / 2
-				value = (int(left[center]) + int(left[center+1]) + 1) >> 1
+				value = (referenceAt(center) + referenceAt(center+1) + 1) >> 1
 			} else {
 				center := (phase - 1) / 2
-				value = (int(left[center]) + 2*int(left[center+1]) + int(left[center+2]) + 2) >> 2
+				value = (referenceAt(center) + 2*referenceAt(center+1) + referenceAt(center+2) + 2) >> 2
 			}
 			prediction[row*4+column] = uint8(value)
 		}

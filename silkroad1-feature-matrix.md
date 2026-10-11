@@ -21,6 +21,7 @@ Stream metadata and AVC configuration are inventoried by `scripts/inventory_stre
 | Entropy coding | CABAC in every inventoried PPS | CABAC required; CAVLC is not observed |
 | Weighted prediction | `weighted_pred_flag=0` and `weighted_bipred_idc=0` in every active PPS | Not needed for the active corpus |
 | Reference/reorder metadata | `refs=1`; `has_b_frames=2` in every active video stream | Support observed reference use and up to two B-frame reordering |
+| B direct mode | `direct_spatial_mv_pred=1` in every active B slice | Support spatial direct; temporal direct is not observed |
 | Audio accompanying video | AAC-LC, 48 kHz, stereo in the active samples | Not decoded by frame extraction |
 
 ## Explicit Initial Exclusions

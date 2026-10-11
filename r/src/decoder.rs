@@ -1,14 +1,25 @@
-use std::{fmt, io};
+use std::{collections::HashMap, fmt, io};
 
 use crate::reconstruction::Yuv420Frame;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencySlice {
+    pub sample_index: u64,
+    pub dts_ticks: i64,
+    pub pts_ticks: i64,
+    pub is_sync: bool,
+    pub nal_unit: Vec<u8>,
+    pub header: crate::SliceHeader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     MissingSampleReader,
     FrameIndexOutOfRange,
     NotImplemented,
     UnsupportedFeature,
     ReferenceMismatch,
+    DecodeFailure(String),
 }
 
 impl fmt::Display for DecodeError {
@@ -26,11 +37,114 @@ impl fmt::Display for DecodeError {
             Self::ReferenceMismatch => {
                 write!(f, "decoded frame does not match the reference frame data")
             }
+            Self::DecodeFailure(message) => write!(f, "native H.264 decode failed: {message}"),
         }
     }
 }
 
 impl std::error::Error for DecodeError {}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn slice_history_entry<'a>(
+    history: &'a [crate::CabacDecodedSliceMacroblock],
+    index: Option<usize>,
+    expected_address: Option<usize>,
+) -> io::Result<Option<&'a crate::CabacDecodedSliceMacroblock>> {
+    let (Some(index), Some(expected_address)) = (index, expected_address) else {
+        return Ok(None);
+    };
+    let entry = history
+        .get(index)
+        .ok_or_else(|| invalid("decoded slice history index is invalid"))?;
+    if entry.address != expected_address {
+        return Err(invalid("decoded slice history is not contiguous"));
+    }
+    Ok(Some(entry))
+}
+
+fn colocated_motion_facts(
+    result: &crate::CabacSliceMacroblockResult,
+) -> io::Result<[crate::ColocatedMotionFact; 16]> {
+    let inactive = crate::ColocatedMotionFact {
+        reference_index: -1,
+        motion_vector: crate::MotionVector::default(),
+    };
+    let mut facts = [inactive; 16];
+    let mut set_fact = |cell: usize,
+                        prediction_flags: [bool; 2],
+                        references: [i32; 2],
+                        vectors: [crate::MotionVector; 2]| {
+        let list_index = if prediction_flags[0] {
+            Some(0)
+        } else if prediction_flags[1] {
+            Some(1)
+        } else {
+            None
+        };
+        if let Some(list_index) = list_index {
+            facts[cell] = crate::ColocatedMotionFact {
+                reference_index: references[list_index],
+                motion_vector: vectors[list_index],
+            };
+        }
+    };
+
+    match result {
+        crate::CabacSliceMacroblockResult::Intra(_) => {}
+        crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+            crate::CabacPBMacroblockPrediction::PSkip(decoded) => {
+                let fact = crate::ColocatedMotionFact {
+                    reference_index: decoded.reference_index,
+                    motion_vector: decoded.motion_vector,
+                };
+                facts.fill(fact);
+            }
+            crate::CabacPBMacroblockPrediction::BSkip(decoded) => {
+                facts.fill(inactive);
+                for fact in &mut facts {
+                    let list_index = if decoded.prediction_flags[0] {
+                        Some(0)
+                    } else if decoded.prediction_flags[1] {
+                        Some(1)
+                    } else {
+                        None
+                    };
+                    if let Some(list_index) = list_index {
+                        *fact = crate::ColocatedMotionFact {
+                            reference_index: decoded.reference_indices[list_index],
+                            motion_vector: decoded.motion_vectors[list_index],
+                        };
+                    }
+                }
+            }
+            crate::CabacPBMacroblockPrediction::Inter(decoded) => {
+                for cell in 0..16 {
+                    let x = (cell % 4) * 4;
+                    let y = (cell / 4) * 4;
+                    let partition = decoded.partitions.iter().find(|partition| {
+                        partition.x <= x
+                            && x < partition.x + partition.width
+                            && partition.y <= y
+                            && y < partition.y + partition.height
+                    });
+                    let partition = partition.ok_or_else(|| {
+                        invalid("decoded reference macroblock has incomplete motion partitions")
+                    })?;
+                    set_fact(
+                        cell,
+                        partition.prediction_flags,
+                        partition.reference_indices,
+                        partition.motion_vectors,
+                    );
+                }
+            }
+        },
+    }
+    Ok(facts)
+}
 
 #[derive(Default)]
 pub struct H264Decoder {
@@ -42,6 +156,10 @@ pub struct H264Decoder {
     sample_reader: Option<crate::videosamplereader::VideoSampleReader>,
     first_sync_sample_index: Option<u64>,
     unsupported_feature: bool,
+    poc_type0_state: crate::PocType0State,
+    poc_type12_state: crate::PocType12State,
+    poc_cache: Option<(crate::PictureIdentity, i64)>,
+    decoded_frames: HashMap<usize, Yuv420Frame>,
 }
 
 impl H264Decoder {
@@ -71,6 +189,10 @@ impl H264Decoder {
             sample_reader: Some(sample_reader),
             first_sync_sample_index,
             unsupported_feature,
+            poc_type0_state: crate::PocType0State::default(),
+            poc_type12_state: crate::PocType12State::default(),
+            poc_cache: None,
+            decoded_frames: HashMap::new(),
         }
     }
 
@@ -84,6 +206,10 @@ impl H264Decoder {
             sample_reader: None,
             first_sync_sample_index: None,
             unsupported_feature: false,
+            poc_type0_state: crate::PocType0State::default(),
+            poc_type12_state: crate::PocType12State::default(),
+            poc_cache: None,
+            decoded_frames: HashMap::new(),
         }
     }
 
@@ -101,6 +227,20 @@ impl H264Decoder {
         frame: &Yuv420Frame,
     ) -> io::Result<()> {
         self.reference_picture_buffer.store(reference, frame)
+    }
+
+    pub fn store_reference_picture_with_macroblocks(
+        &mut self,
+        reference: crate::reconstruction::ReferencePicture,
+        frame: &Yuv420Frame,
+        macroblocks: &[crate::CabacDecodedSliceMacroblock],
+    ) -> io::Result<()> {
+        let motion_field = macroblocks
+            .iter()
+            .map(|entry| Ok((entry.address, colocated_motion_facts(&entry.result)?)))
+            .collect::<io::Result<Vec<_>>>()?;
+        self.reference_picture_buffer
+            .store_with_motion_field(reference, frame, motion_field)
     }
 
     pub fn queue_presentation(
@@ -124,6 +264,925 @@ impl H264Decoder {
                 io::Error::new(io::ErrorKind::NotConnected, "sample reader is unavailable")
             })?
             .decode_order_dependency_samples(presentation_index)
+    }
+
+    /// Splits and groups coded slices from the dependency window without advancing sample order.
+    pub fn dependency_slice_pictures(
+        &mut self,
+        presentation_index: usize,
+    ) -> io::Result<Vec<Vec<DependencySlice>>> {
+        let (nal_length_size, picture_parameter_sets) = {
+            let reader = self.sample_reader.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "sample reader is unavailable")
+            })?;
+            let configuration = reader.configuration();
+            (
+                usize::from(configuration.nal_length_size),
+                configuration.picture_parameter_sets.clone(),
+            )
+        };
+        let sequence_parameter_sets = self.sequence_parameter_sets.clone();
+        let samples = self.decode_order_dependency_samples(presentation_index)?;
+        let mut pictures: Vec<Vec<DependencySlice>> = Vec::new();
+        for sample in samples {
+            let nal_units = crate::split_length_prefixed_nals(&sample.data, nal_length_size)
+                .map_err(|error| invalid(format!("sample {}: {error}", sample.index)))?;
+            for nal_unit in nal_units {
+                let nal_header = crate::parse_nal_header(nal_unit)
+                    .map_err(|error| invalid(format!("sample {}: {error}", sample.index)))?;
+                if !matches!(nal_header.unit_type, 1 | 5) {
+                    if (1..=5).contains(&nal_header.unit_type) {
+                        return Err(invalid(format!(
+                            "unsupported VCL NAL unit type {}",
+                            nal_header.unit_type
+                        )));
+                    }
+                    continue;
+                }
+                let mut parsed_header = None;
+                let mut last_error = None;
+                for pps_nal in &picture_parameter_sets {
+                    let pps = crate::parse_pps(pps_nal)?;
+                    let Some(sps) = sequence_parameter_sets
+                        .iter()
+                        .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+                    else {
+                        continue;
+                    };
+                    match crate::parse_slice_header(nal_unit, sps, &pps) {
+                        Ok(header) => {
+                            parsed_header = Some(header);
+                            break;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                let header = parsed_header.ok_or_else(|| {
+                    last_error.unwrap_or_else(|| invalid("slice references an unavailable SPS"))
+                })?;
+                let slice = DependencySlice {
+                    sample_index: sample.index,
+                    dts_ticks: sample.dts_ticks,
+                    pts_ticks: sample.pts_ticks,
+                    is_sync: sample.is_sync,
+                    nal_unit: nal_unit.to_vec(),
+                    header,
+                };
+                if pictures.last().is_none_or(|picture| {
+                    !crate::same_primary_picture(&picture[0].header, &slice.header)
+                }) {
+                    pictures.push(vec![slice]);
+                } else if let Some(picture) = pictures.last_mut() {
+                    picture.push(slice);
+                }
+            }
+        }
+        Ok(pictures)
+    }
+
+    pub fn decode_dependency_slice_data<F>(
+        &self,
+        dependency_slice: &DependencySlice,
+        builder: &mut crate::Yuv420FrameBuilder,
+        input_provider: F,
+    ) -> io::Result<Vec<crate::CabacDecodedSliceMacroblock>>
+    where
+        F: FnMut(
+            usize,
+            &[crate::CabacDecodedSliceMacroblock],
+        ) -> io::Result<crate::CabacSliceMacroblockInput>,
+    {
+        let pps = self
+            .picture_parameter_sets
+            .iter()
+            .find(|pps| {
+                pps.picture_parameter_set_id == dependency_slice.header.picture_parameter_set_id
+            })
+            .ok_or_else(|| invalid("dependency slice references an unavailable PPS"))?;
+        let sps = self
+            .sequence_parameter_sets
+            .iter()
+            .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+            .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
+        if !pps.entropy_coding_mode {
+            return Err(invalid("dependency slice does not use CABAC"));
+        }
+        if dependency_slice.header.slice_data_bit_offset % 8 != 0 {
+            return Err(invalid("CABAC slice-data offset is not byte-aligned"));
+        }
+        let rbsp = crate::ebsp_to_rbsp(
+            dependency_slice
+                .nal_unit
+                .get(1..)
+                .ok_or_else(|| invalid("dependency slice NAL unit is empty"))?,
+        )?;
+        let byte_offset = dependency_slice.header.slice_data_bit_offset / 8;
+        let cabac_data = rbsp
+            .get(byte_offset..)
+            .ok_or_else(|| invalid("CABAC slice-data offset exceeds the NAL unit"))?;
+        let mut cabac = crate::CabacArithmeticDecoder::new(cabac_data)?;
+        let slice_qpy = 26_i64 + pps.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta;
+        let slice_qpy = i32::try_from(slice_qpy)
+            .map_err(|_| invalid("dependency slice QP is outside the supported range"))?;
+        let contexts = crate::new_cabac_slice_contexts(
+            dependency_slice.header.slice_type,
+            dependency_slice.header.cabac_init_idc.unwrap_or(0),
+            slice_qpy,
+        )?;
+        let mut contexts: [crate::CabacContextModel; crate::CABAC_CONTEXT_COUNT] = contexts
+            .try_into()
+            .map_err(|_| invalid("CABAC context table has an invalid length"))?;
+        let width_in_mbs = usize::try_from(sps.coded_width / 16)
+            .map_err(|_| invalid("picture width exceeds the host address space"))?;
+        let height_in_mbs = usize::try_from(sps.coded_height / 16)
+            .map_err(|_| invalid("picture height exceeds the host address space"))?;
+        let macroblock_count = width_in_mbs
+            .checked_mul(height_in_mbs)
+            .ok_or_else(|| invalid("picture macroblock count overflows"))?;
+        cabac.decode_slice_data(
+            dependency_slice.header.slice_type,
+            dependency_slice.header.first_macroblock_in_slice as usize,
+            macroblock_count,
+            &mut contexts,
+            builder,
+            input_provider,
+        )
+    }
+
+    fn decode_dependency_slice_data_from_history(
+        &mut self,
+        dependency_slice: &DependencySlice,
+        builder: &mut crate::Yuv420FrameBuilder,
+    ) -> io::Result<Vec<crate::CabacDecodedSliceMacroblock>> {
+        let pps = self
+            .picture_parameter_sets
+            .iter()
+            .find(|pps| {
+                pps.picture_parameter_set_id == dependency_slice.header.picture_parameter_set_id
+            })
+            .cloned()
+            .ok_or_else(|| invalid("dependency slice references an unavailable PPS"))?;
+        let sps = self
+            .sequence_parameter_sets
+            .iter()
+            .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+            .cloned()
+            .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
+        if !pps.entropy_coding_mode {
+            return Err(invalid("dependency slice does not use CABAC"));
+        }
+        if dependency_slice.header.slice_data_bit_offset % 8 != 0 {
+            return Err(invalid("CABAC slice-data offset is not byte-aligned"));
+        }
+        let rbsp = crate::ebsp_to_rbsp(
+            dependency_slice
+                .nal_unit
+                .get(1..)
+                .ok_or_else(|| invalid("dependency slice NAL unit is empty"))?,
+        )?;
+        let byte_offset = dependency_slice.header.slice_data_bit_offset / 8;
+        let cabac_data = rbsp
+            .get(byte_offset..)
+            .ok_or_else(|| invalid("CABAC slice-data offset exceeds the NAL unit"))?;
+        let mut cabac = crate::CabacArithmeticDecoder::new(cabac_data)?;
+        let slice_qpy = i32::try_from(
+            26_i64 + pps.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta,
+        )
+        .map_err(|_| invalid("dependency slice QP is outside the supported range"))?;
+        let contexts = crate::new_cabac_slice_contexts(
+            dependency_slice.header.slice_type,
+            dependency_slice.header.cabac_init_idc.unwrap_or(0),
+            slice_qpy,
+        )?;
+        let mut contexts: [crate::CabacContextModel; crate::CABAC_CONTEXT_COUNT] = contexts
+            .try_into()
+            .map_err(|_| invalid("CABAC context table has an invalid length"))?;
+        let width_in_mbs = usize::try_from(sps.coded_width / 16)
+            .map_err(|_| invalid("picture width exceeds the host address space"))?;
+        let height_in_mbs = usize::try_from(sps.coded_height / 16)
+            .map_err(|_| invalid("picture height exceeds the host address space"))?;
+        let macroblock_count = width_in_mbs
+            .checked_mul(height_in_mbs)
+            .ok_or_else(|| invalid("picture macroblock count overflows"))?;
+        cabac.decode_slice_data(
+            dependency_slice.header.slice_type,
+            dependency_slice.header.first_macroblock_in_slice as usize,
+            macroblock_count,
+            &mut contexts,
+            builder,
+            |address, history| {
+                self.macroblock_input_from_history(dependency_slice, address, history)
+            },
+        )
+    }
+
+    /// Builds the I or P/B CABAC input selected by the dependency slice type.
+    pub fn macroblock_input_from_history(
+        &mut self,
+        dependency_slice: &DependencySlice,
+        macroblock_address: usize,
+        history: &[crate::CabacDecodedSliceMacroblock],
+    ) -> io::Result<crate::CabacSliceMacroblockInput> {
+        match dependency_slice.header.slice_type % 5 {
+            2 => self
+                .intra_macroblock_input_from_history(dependency_slice, macroblock_address, history)
+                .map(crate::CabacSliceMacroblockInput::Intra),
+            0 | 1 => self
+                .inter_macroblock_input_from_history(dependency_slice, macroblock_address, history)
+                .map(crate::CabacSliceMacroblockInput::Inter),
+            _ => Err(invalid(
+                "history input builder supports only I, P, and B slices",
+            )),
+        }
+    }
+
+    fn picture_order_count(
+        &mut self,
+        header: &crate::SliceHeader,
+        sps: &crate::sps::SpsInfo,
+    ) -> io::Result<i64> {
+        let identity = header.picture_identity();
+        if let Some((cached_identity, cached_poc)) = self.poc_cache {
+            if cached_identity == identity {
+                return Ok(cached_poc);
+            }
+        }
+        let max_frame_num = 1_u32
+            .checked_shl(sps.log2_max_frame_num_minus4 + 4)
+            .ok_or_else(|| invalid("MaxFrameNum is outside the supported range"))?;
+        let poc = match sps.pic_order_cnt_type {
+            0 => {
+                let max_poc_lsb = 1_u32
+                    .checked_shl(sps.log2_max_pic_order_cnt_lsb_minus4.unwrap_or(0) + 4)
+                    .ok_or_else(|| invalid("MaxPicOrderCntLsb is invalid"))?;
+                self.poc_type0_state.calculate(
+                    max_poc_lsb,
+                    header.pic_order_cnt_lsb,
+                    header.delta_pic_order_bottom,
+                    header.nal_ref_idc,
+                    header.idr,
+                )?
+            }
+            1 => self.poc_type12_state.calculate_type1(
+                max_frame_num,
+                header.frame_num,
+                header.delta_pic_order_cnt0,
+                header.delta_pic_order_cnt1,
+                sps.offset_for_non_ref_pic.unwrap_or(0),
+                sps.offset_for_top_to_bottom_field.unwrap_or(0),
+                &sps.offset_for_ref_frame,
+                header.nal_ref_idc,
+                header.idr,
+            )?,
+            2 => self.poc_type12_state.calculate_type2(
+                max_frame_num,
+                header.frame_num,
+                header.nal_ref_idc,
+                header.idr,
+            )?,
+            _ => return Err(invalid("dependency slice POC type is unsupported")),
+        };
+        self.poc_cache = Some((identity, poc));
+        Ok(poc)
+    }
+
+    /// Gathers raw I-slice references; reconstruction filters Intra_8x8 edges after internal references are gathered.
+    pub fn intra_macroblock_input_from_history(
+        &self,
+        dependency_slice: &DependencySlice,
+        macroblock_address: usize,
+        history: &[crate::CabacDecodedSliceMacroblock],
+    ) -> io::Result<crate::CabacIIntraMacroblockInput> {
+        if dependency_slice.header.slice_type % 5 != 2 {
+            return Err(invalid("history input builder requires an I-slice"));
+        }
+        let pps = self
+            .picture_parameter_sets
+            .iter()
+            .find(|pps| {
+                pps.picture_parameter_set_id == dependency_slice.header.picture_parameter_set_id
+            })
+            .ok_or_else(|| invalid("dependency slice references an unavailable PPS"))?;
+        let sps = self
+            .sequence_parameter_sets
+            .iter()
+            .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+            .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
+        if !pps.entropy_coding_mode {
+            return Err(invalid("dependency slice does not use CABAC"));
+        }
+        let width_in_mbs = usize::try_from(sps.coded_width / 16)
+            .map_err(|_| invalid("picture width exceeds the host address space"))?;
+        let height_in_mbs = usize::try_from(sps.coded_height / 16)
+            .map_err(|_| invalid("picture height exceeds the host address space"))?;
+        let picture_macroblock_count = width_in_mbs
+            .checked_mul(height_in_mbs)
+            .ok_or_else(|| invalid("picture macroblock count overflows"))?;
+        if macroblock_address >= picture_macroblock_count {
+            return Err(invalid("macroblock address is outside the picture"));
+        }
+        let neighbor_indices = crate::derive_cabac_slice_neighbor_indices(
+            macroblock_address,
+            width_in_mbs,
+            dependency_slice.header.first_macroblock_in_slice as usize,
+            history.len(),
+        )?;
+        let column = macroblock_address % width_in_mbs;
+        let left_entry = slice_history_entry(
+            history,
+            neighbor_indices.left,
+            (column > 0).then(|| macroblock_address - 1),
+        )?;
+        let top_entry = slice_history_entry(
+            history,
+            neighbor_indices.top,
+            (macroblock_address >= width_in_mbs).then(|| macroblock_address - width_in_mbs),
+        )?;
+        let top_right_entry = slice_history_entry(
+            history,
+            neighbor_indices.top_right,
+            (macroblock_address >= width_in_mbs && column + 1 < width_in_mbs)
+                .then(|| macroblock_address - width_in_mbs + 1),
+        )?;
+        let top_left_entry = slice_history_entry(
+            history,
+            neighbor_indices.top_left,
+            (macroblock_address >= width_in_mbs && column > 0)
+                .then(|| macroblock_address - width_in_mbs - 1),
+        )?;
+        let state = |entry: Option<&crate::CabacDecodedSliceMacroblock>, direction| {
+            entry.map(|entry| crate::derive_cabac_macroblock_neighbor_coded_state(entry, direction))
+        };
+        let left_state = state(left_entry, crate::CabacMacroblockNeighborDirection::Left);
+        let top_state = state(top_entry, crate::CabacMacroblockNeighborDirection::Top);
+        let top_right_state = state(
+            top_right_entry,
+            crate::CabacMacroblockNeighborDirection::Top,
+        );
+        let top_left_state = state(
+            top_left_entry,
+            crate::CabacMacroblockNeighborDirection::Left,
+        );
+        let prediction_available = |state: Option<crate::CabacMacroblockNeighborCodedState>| {
+            state.is_some_and(|state| {
+                !pps.constrained_intra_pred
+                    || state.is_intra_nxn
+                    || state.is_intra16x16
+                    || state.is_ipcm
+            })
+        };
+        let left_prediction_available = prediction_available(left_state);
+        let top_prediction_available = prediction_available(top_state);
+        let top_right_prediction_available = prediction_available(top_right_state);
+        let top_left_prediction_available = prediction_available(top_left_state);
+        let edge_samples = |entry: Option<&crate::CabacDecodedSliceMacroblock>,
+                            direction: crate::CabacMacroblockNeighborDirection,
+                            available: bool|
+         -> Option<crate::CabacMacroblockEdgeSamples> {
+            if available {
+                entry.map(|entry| crate::derive_cabac_macroblock_edge_samples(entry, direction))
+            } else {
+                None
+            }
+        };
+        let left_samples = edge_samples(
+            left_entry,
+            crate::CabacMacroblockNeighborDirection::Left,
+            left_prediction_available,
+        );
+        let top_samples = edge_samples(
+            top_entry,
+            crate::CabacMacroblockNeighborDirection::Top,
+            top_prediction_available,
+        );
+        let top_right_samples = edge_samples(
+            top_right_entry,
+            crate::CabacMacroblockNeighborDirection::Top,
+            top_right_prediction_available,
+        );
+        let top_left_samples = edge_samples(
+            top_left_entry,
+            crate::CabacMacroblockNeighborDirection::Left,
+            top_left_prediction_available,
+        );
+        let gather_top = |edge_start: usize, count: usize| -> Option<Vec<u8>> {
+            let top = top_samples?;
+            let mut samples = Vec::with_capacity(count);
+            for column in edge_start..edge_start + count {
+                if column < 16 {
+                    samples.push(top.luma[column]);
+                } else if let Some(top_right) = top_right_samples {
+                    samples.push(top_right.luma[column - 16]);
+                } else {
+                    samples.push(*samples.last().unwrap_or(&top.luma[15]));
+                }
+            }
+            Some(samples)
+        };
+        let gather_left = |edge_start: usize, count: usize| -> Option<Vec<u8>> {
+            let left = left_samples?;
+            Some(
+                (edge_start..edge_start + count)
+                    .map(|row| left.luma.get(row).copied().unwrap_or(left.luma[15]))
+                    .collect(),
+            )
+        };
+        let top_left_sample = |block_x: usize, block_y: usize| -> Option<u8> {
+            if block_y == 0 {
+                if block_x == 0 {
+                    top_left_samples.map(|samples| samples.luma[15])
+                } else {
+                    top_samples.map(|samples| samples.luma[block_x - 1])
+                }
+            } else if block_x == 0 {
+                left_samples.map(|samples| samples.luma[block_y - 1])
+            } else {
+                None
+            }
+        };
+        const LUMA4X4_SCAN_TO_RASTER: [usize; 16] =
+            [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+        let mut luma4_blocks = [crate::LumaIntra4x4Block {
+            mode: 2,
+            ..crate::LumaIntra4x4Block::default()
+        }; 16];
+        for (scan_index, raster_index) in LUMA4X4_SCAN_TO_RASTER.iter().enumerate() {
+            let block_x = (raster_index % 4) * 4;
+            let block_y = (raster_index / 4) * 4;
+            if block_y == 0 {
+                if let Some(samples) = gather_top(block_x, 8) {
+                    luma4_blocks[scan_index].top[..8].copy_from_slice(&samples);
+                    luma4_blocks[scan_index].top_available = true;
+                }
+            }
+            if block_x == 0 {
+                if let Some(samples) = gather_left(block_y, 8) {
+                    luma4_blocks[scan_index].left[..8].copy_from_slice(&samples);
+                    luma4_blocks[scan_index].left_available = true;
+                }
+            }
+            if let Some(sample) = top_left_sample(block_x, block_y) {
+                luma4_blocks[scan_index].top_left = sample;
+                luma4_blocks[scan_index].top_left_available = true;
+            }
+        }
+        let mut luma8_blocks = [crate::LumaIntra8x8Block {
+            mode: 2,
+            references_filtered: false,
+            ..crate::LumaIntra8x8Block::default()
+        }; 4];
+        for block_index in 0..4 {
+            let block_x = (block_index % 2) * 8;
+            let block_y = (block_index / 2) * 8;
+            if block_y == 0 {
+                if let Some(samples) = gather_top(block_x, 16) {
+                    luma8_blocks[block_index].top.copy_from_slice(&samples);
+                    luma8_blocks[block_index].top_available = true;
+                }
+            }
+            if block_x == 0 {
+                if let Some(samples) = gather_left(block_y, 8) {
+                    luma8_blocks[block_index].left[..8].copy_from_slice(&samples);
+                    luma8_blocks[block_index].left[8..].fill(samples[7]);
+                    luma8_blocks[block_index].left_available = true;
+                }
+            }
+            if let Some(sample) = top_left_sample(block_x, block_y) {
+                luma8_blocks[block_index].top_left = sample;
+                luma8_blocks[block_index].top_left_available = true;
+            }
+        }
+        let slice_qpy = 26_i64 + pps.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta;
+        let slice_qpy = i32::try_from(slice_qpy)
+            .map_err(|_| invalid("dependency slice QP is outside the supported range"))?;
+        let (previous_qpy, previous_qp_delta) = if let Some(previous) = history.last() {
+            let crate::CabacSliceMacroblockResult::Intra(previous) = &previous.result else {
+                return Err(invalid("I-slice history contains a non-intra macroblock"));
+            };
+            (previous.qpy, previous.qp_delta)
+        } else {
+            (slice_qpy, 0)
+        };
+        let mut input = crate::CabacIIntraMacroblockInput {
+            slice_type: dependency_slice.header.slice_type,
+            left_available: left_entry.is_some(),
+            left_intra16_or_pcm: left_state
+                .is_some_and(|state| state.is_intra16x16 || state.is_ipcm),
+            top_available: top_entry.is_some(),
+            top_intra16_or_pcm: top_state.is_some_and(|state| state.is_intra16x16 || state.is_ipcm),
+            previous_qpy,
+            previous_qp_delta,
+            left_luma_cbp: left_state
+                .filter(|state| !state.is_ipcm)
+                .map_or(15, |state| state.coded_block_pattern_luma),
+            top_luma_cbp: top_state
+                .filter(|state| !state.is_ipcm)
+                .map_or(15, |state| state.coded_block_pattern_luma),
+            left_chroma_cbp: left_state.map_or(0, |state| {
+                if state.is_ipcm {
+                    2
+                } else {
+                    state.coded_block_pattern_chroma
+                }
+            }),
+            top_chroma_cbp: top_state.map_or(0, |state| {
+                if state.is_ipcm {
+                    2
+                } else {
+                    state.coded_block_pattern_chroma
+                }
+            }),
+            transform_8x8_mode_enabled: pps.transform_8x8_mode,
+            left_has_8x8_transform: left_state.is_some_and(|state| state.transform_size_8x8),
+            top_has_8x8_transform: top_state.is_some_and(|state| state.transform_size_8x8),
+            top_modes_4x4: top_state
+                .filter(|_| top_prediction_available)
+                .map_or([2; 4], |state| state.luma_4x4_modes),
+            left_modes_4x4: left_state
+                .filter(|_| left_prediction_available)
+                .map_or([2; 4], |state| state.luma_4x4_modes),
+            top_modes_8x8: top_state
+                .filter(|_| top_prediction_available)
+                .map_or([2; 2], |state| state.luma_8x8_modes),
+            left_modes_8x8: left_state
+                .filter(|_| left_prediction_available)
+                .map_or([2; 2], |state| state.luma_8x8_modes),
+            top_mode_available: top_prediction_available,
+            left_mode_available: left_prediction_available,
+            luma_4x4_top_edge: top_state.map_or_default(|state| state.luma_4x4_edge),
+            luma_4x4_left_edge: left_state.map_or_default(|state| state.luma_4x4_edge),
+            luma_16x16_top_edge: top_state.map_or_default(|state| state.luma_16x16_edge),
+            luma_16x16_left_edge: left_state.map_or_default(|state| state.luma_16x16_edge),
+            luma_4x4_blocks: luma4_blocks,
+            luma_8x8_blocks: luma8_blocks,
+            intra16x16_top: top_samples.map_or([0; 16], |samples| samples.luma),
+            intra16x16_left: left_samples.map_or([0; 16], |samples| samples.luma),
+            intra16x16_top_available: top_prediction_available,
+            intra16x16_left_available: left_prediction_available,
+            intra16x16_top_left: top_left_samples.map_or(0, |samples| samples.luma[15]),
+            intra16x16_top_left_available: top_left_prediction_available,
+            chroma_left_mode_nonzero: left_state
+                .filter(|_| left_prediction_available)
+                .is_some_and(|state| state.chroma_mode_nonzero),
+            chroma_top_mode_nonzero: top_state
+                .filter(|_| top_prediction_available)
+                .is_some_and(|state| state.chroma_mode_nonzero),
+            chroma_qp_index_offsets: [
+                i32::try_from(pps.chroma_qp_index_offset)
+                    .map_err(|_| invalid("PPS chroma QP offset is outside the supported range"))?,
+                i32::try_from(pps.second_chroma_qp_index_offset)
+                    .map_err(|_| invalid("PPS chroma QP offset is outside the supported range"))?,
+            ],
+            ..crate::CabacIIntraMacroblockInput::default()
+        };
+        for component in 0..2 {
+            let top_available = top_prediction_available;
+            let left_available = left_prediction_available;
+            let top_left_available = top_left_prediction_available;
+            let top_values = top_samples.map(|samples| {
+                if component == 0 {
+                    samples.cb
+                } else {
+                    samples.cr
+                }
+            });
+            let left_values = left_samples.map(|samples| {
+                if component == 0 {
+                    samples.cb
+                } else {
+                    samples.cr
+                }
+            });
+            input.chroma_references[component] = crate::CabacChroma420References {
+                top_available,
+                left_available,
+                top_left_available,
+                top: top_values.unwrap_or([0; 8]),
+                left: left_values.unwrap_or([0; 8]),
+                top_left: if component == 0 {
+                    top_left_samples.map_or(0, |samples| samples.cb[7])
+                } else {
+                    top_left_samples.map_or(0, |samples| samples.cr[7])
+                },
+            };
+            input.chroma_left_edges[component] =
+                left_state.map_or_default(|state| state.chroma_edges[component]);
+            input.chroma_top_edges[component] =
+                top_state.map_or_default(|state| state.chroma_edges[component]);
+        }
+        Ok(input)
+    }
+
+    pub fn inter_macroblock_input_from_history(
+        &mut self,
+        dependency_slice: &DependencySlice,
+        macroblock_address: usize,
+        history: &[crate::CabacDecodedSliceMacroblock],
+    ) -> io::Result<crate::CabacPBMacroblockLayerInput> {
+        let header = &dependency_slice.header;
+        if !matches!(header.slice_type % 5, 0 | 1) {
+            return Err(invalid(
+                "inter history input builder requires a P- or B-slice",
+            ));
+        }
+        let pps = self
+            .picture_parameter_sets
+            .iter()
+            .find(|pps| pps.picture_parameter_set_id == header.picture_parameter_set_id)
+            .copied()
+            .ok_or_else(|| invalid("dependency slice references an unavailable PPS"))?;
+        let sps = self
+            .sequence_parameter_sets
+            .iter()
+            .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+            .cloned()
+            .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
+        if !pps.entropy_coding_mode {
+            return Err(invalid("dependency slice does not use CABAC"));
+        }
+        if pps.weighted_pred || pps.weighted_bipred_idc != 0 {
+            return Err(invalid("weighted inter prediction is unsupported"));
+        }
+
+        let max_frame_num = 1_u32
+            .checked_shl(sps.log2_max_frame_num_minus4 + 4)
+            .ok_or_else(|| invalid("MaxFrameNum is outside the supported range"))?;
+        let current_poc = self.picture_order_count(header, &sps)?;
+
+        let references = self.reference_picture_buffer.references();
+        let (mut list0, mut list1) = if header.slice_type % 5 == 0 {
+            (
+                crate::build_p_reference_list(&references, header.frame_num, max_frame_num)?,
+                Vec::new(),
+            )
+        } else {
+            crate::build_b_reference_lists(&references, current_poc)
+        };
+        list0 = crate::apply_reference_list_modifications(
+            &list0,
+            &references,
+            header.frame_num,
+            max_frame_num,
+            &header.ref_pic_list_reordering_l0,
+        )?;
+        if header.slice_type % 5 == 1 {
+            list1 = crate::apply_reference_list_modifications(
+                &list1,
+                &references,
+                header.frame_num,
+                max_frame_num,
+                &header.ref_pic_list_reordering_l1,
+            )?;
+        }
+        let active_l0 = if header.num_ref_idx_active_override {
+            header.num_ref_idx_l0_active_minus1
+        } else {
+            pps.num_ref_idx_l0_default_active_minus1
+        };
+        let active_l1 = if header.num_ref_idx_active_override {
+            header.num_ref_idx_l1_active_minus1
+        } else {
+            pps.num_ref_idx_l1_default_active_minus1
+        };
+        list0.truncate(active_l0 as usize + 1);
+        if header.slice_type % 5 == 1 {
+            list1.truncate(active_l1 as usize + 1);
+        } else {
+            list1.clear();
+        }
+        let decode_references = |pictures: &[crate::ReferencePicture]| {
+            pictures
+                .iter()
+                .map(|reference| {
+                    let decoded = self
+                        .reference_picture_buffer
+                        .get(reference.identifier)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "reference picture {} is not decoded",
+                                reference.identifier
+                            ))
+                        })?;
+                    Ok(crate::CabacBReferencePicture {
+                        frame: decoded.frame,
+                        picture_order_count: reference.picture_order_cnt,
+                        long_term: reference.long_term_frame_idx.is_some(),
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()
+        };
+        let references0 = decode_references(&list0)?;
+        let references1 = decode_references(&list1)?;
+        if references0.is_empty() || (header.slice_type % 5 == 1 && references1.is_empty()) {
+            return Err(invalid("P/B slice reference list is empty"));
+        }
+
+        let width_in_mbs = usize::try_from(sps.coded_width / 16)
+            .map_err(|_| invalid("picture width exceeds the host address space"))?;
+        let height_in_mbs = usize::try_from(sps.coded_height / 16)
+            .map_err(|_| invalid("picture height exceeds the host address space"))?;
+        let picture_macroblock_count = width_in_mbs
+            .checked_mul(height_in_mbs)
+            .ok_or_else(|| invalid("picture macroblock count overflows"))?;
+        if macroblock_address >= picture_macroblock_count {
+            return Err(invalid("macroblock address is outside the picture"));
+        }
+
+        let macroblock_neighbors =
+            crate::derive_cabac_inter_macroblock_neighbor_state_from_history(
+                macroblock_address,
+                width_in_mbs,
+                header.first_macroblock_in_slice as usize,
+                history,
+                header.slice_type,
+                0,
+                0,
+                4,
+                4,
+            )?;
+        let mut partition_neighbors = Vec::with_capacity(16);
+        for cell in 0..16 {
+            partition_neighbors.push(
+                crate::derive_cabac_inter_macroblock_neighbor_state_from_history(
+                    macroblock_address,
+                    width_in_mbs,
+                    header.first_macroblock_in_slice as usize,
+                    history,
+                    header.slice_type,
+                    (cell % 4) * 4,
+                    (cell / 4) * 4,
+                    4,
+                    4,
+                )?
+                .partition_neighbors,
+            );
+        }
+        let neighbor_indices = crate::derive_cabac_slice_neighbor_indices(
+            macroblock_address,
+            width_in_mbs,
+            header.first_macroblock_in_slice as usize,
+            history.len(),
+        )?;
+        let neighbor_state = |index: Option<usize>, direction| {
+            index.map(|index| {
+                crate::derive_cabac_macroblock_neighbor_coded_state(&history[index], direction)
+            })
+        };
+        let left_state = neighbor_state(
+            neighbor_indices.left,
+            crate::CabacMacroblockNeighborDirection::Left,
+        );
+        let top_state = neighbor_state(
+            neighbor_indices.top,
+            crate::CabacMacroblockNeighborDirection::Top,
+        );
+        let slice_qpy = i32::try_from(26_i64 + pps.pic_init_qp_minus26 + header.slice_qp_delta)
+            .map_err(|_| invalid("dependency slice QP is outside the supported range"))?;
+        let mut previous_qpy = slice_qpy;
+        let mut previous_qp_delta = 0;
+        for entry in history.iter().rev() {
+            let values = match &entry.result {
+                crate::CabacSliceMacroblockResult::Intra(decoded) => {
+                    Some((decoded.qpy, decoded.qp_delta))
+                }
+                crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+                    crate::CabacPBMacroblockPrediction::Inter(decoded) => {
+                        Some((decoded.qpy, decoded.qp_delta))
+                    }
+                    _ => None,
+                },
+            };
+            if let Some((qpy, qp_delta)) = values {
+                previous_qpy = qpy;
+                previous_qp_delta = qp_delta;
+                break;
+            }
+        }
+
+        let macroblock_x = macroblock_address % width_in_mbs;
+        let macroblock_y = macroblock_address / width_in_mbs;
+        let left_skipped = macroblock_neighbors.left_skipped;
+        let top_skipped = macroblock_neighbors.top_skipped;
+        let inter_input = crate::CabacInterMacroblockInput {
+            slice_type: header.slice_type,
+            macroblock_x,
+            macroblock_y,
+            left_available: macroblock_neighbors.left_available,
+            top_available: macroblock_neighbors.top_available,
+            left_b_skip_or_direct: macroblock_neighbors.left_b_skip_or_direct,
+            top_b_skip_or_direct: macroblock_neighbors.top_b_skip_or_direct,
+            max_reference_index_minus1: [active_l0, active_l1],
+            reference_lists: [references0.clone(), references1.clone()],
+            partition_neighbors,
+        };
+        let residual_input = crate::CabacInterMacroblockResidualInput {
+            previous_qpy,
+            previous_qp_delta,
+            left_luma_cbp: left_state
+                .filter(|state| !state.is_ipcm)
+                .map_or(15, |state| state.coded_block_pattern_luma),
+            top_luma_cbp: top_state
+                .filter(|state| !state.is_ipcm)
+                .map_or(15, |state| state.coded_block_pattern_luma),
+            left_chroma_cbp: left_state.map_or(0, |state| {
+                if state.is_ipcm {
+                    2
+                } else {
+                    state.coded_block_pattern_chroma
+                }
+            }),
+            top_chroma_cbp: top_state.map_or(0, |state| {
+                if state.is_ipcm {
+                    2
+                } else {
+                    state.coded_block_pattern_chroma
+                }
+            }),
+            transform_8x8_mode_enabled: pps.transform_8x8_mode,
+            direct_8x8_inference_flag: sps.direct_8x8_inference,
+            left_has_8x8_transform: left_state.is_some_and(|state| state.transform_size_8x8),
+            top_has_8x8_transform: top_state.is_some_and(|state| state.transform_size_8x8),
+            luma_4x4_left_edge: left_state.map_or_default(|state| state.luma_4x4_edge),
+            luma_4x4_top_edge: top_state.map_or_default(|state| state.luma_4x4_edge),
+            chroma_left_edges: left_state
+                .map_or([Default::default(); 2], |state| state.chroma_edges),
+            chroma_top_edges: top_state.map_or([Default::default(); 2], |state| state.chroma_edges),
+            chroma_qp_index_offsets: [
+                i32::try_from(pps.chroma_qp_index_offset)
+                    .map_err(|_| invalid("PPS chroma QP offset is outside the supported range"))?,
+                i32::try_from(pps.second_chroma_qp_index_offset)
+                    .map_err(|_| invalid("PPS chroma QP offset is outside the supported range"))?,
+            ],
+            ..crate::CabacInterMacroblockResidualInput::default()
+        };
+        let b_skip_input = if header.slice_type % 5 == 1 {
+            if !header.direct_spatial_mv_pred {
+                return Err(invalid(
+                    "temporal B direct requires co-located motion metadata in the reference buffer",
+                ));
+            }
+            let direct_neighbors =
+                crate::derive_cabac_inter_macroblock_neighbor_state_from_history(
+                    macroblock_address,
+                    width_in_mbs,
+                    header.first_macroblock_in_slice as usize,
+                    history,
+                    header.slice_type,
+                    0,
+                    0,
+                    16,
+                    16,
+                )?;
+            let list0 = direct_neighbors.partition_neighbors.list0;
+            let list1_neighbors = direct_neighbors.partition_neighbors.list1;
+            let colocated_picture = list1
+                .first()
+                .ok_or_else(|| invalid("B direct co-located picture is unavailable"))?;
+            let colocated_facts = self
+                .reference_picture_buffer
+                .colocated_motion_facts(colocated_picture.identifier, macroblock_address)
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "co-located motion facts are unavailable for reference picture {} macroblock {}",
+                        colocated_picture.identifier, macroblock_address
+                    ))
+                })?;
+            let colocated_top_left = colocated_facts[0];
+            Some(crate::CabacBDirectMacroblockInput {
+                slice_type: header.slice_type,
+                macroblock_x,
+                macroblock_y,
+                direct_spatial: true,
+                left_available: direct_neighbors.left_available,
+                left_skipped: direct_neighbors.left_skipped,
+                top_available: direct_neighbors.top_available,
+                top_skipped: direct_neighbors.top_skipped,
+                list0_references: references0.clone(),
+                list1_references: references1.clone(),
+                left_l0_candidate: list0.left_candidate,
+                top_l0_candidate: list0.top_candidate,
+                top_right_l0_candidate: list0.top_right_candidate,
+                top_left_l0_candidate: list0.top_left_candidate,
+                left_l1_candidate: list1_neighbors.left_candidate,
+                top_l1_candidate: list1_neighbors.top_candidate,
+                top_right_l1_candidate: list1_neighbors.top_right_candidate,
+                top_left_l1_candidate: list1_neighbors.top_left_candidate,
+                colocated_reference_index: colocated_top_left.reference_index,
+                colocated_reference_picture_order_count: None,
+                colocated_motion_vector: colocated_top_left.motion_vector,
+                colocated_motion_field: Some(colocated_facts),
+                current_picture_order_count: current_poc,
+            })
+        } else {
+            None
+        };
+        Ok(crate::CabacPBMacroblockLayerInput {
+            inter_input,
+            residual_input,
+            left_skipped,
+            top_skipped,
+            b_skip_input,
+        })
     }
 
     pub fn decode_first_sync_frame(&mut self) -> Result<Yuv420Frame, DecodeError> {
@@ -184,34 +1243,143 @@ impl H264Decoder {
             Some(count) => count,
             None => return Err(DecodeError::MissingSampleReader),
         };
-        if index as usize >= sample_count {
+        let requested_index =
+            usize::try_from(index).map_err(|_| DecodeError::FrameIndexOutOfRange)?;
+        if requested_index >= sample_count {
             return Err(DecodeError::FrameIndexOutOfRange);
         }
-        if let Some(stored) = self.reference_picture_buffer.get(index as u32) {
-            let y = stored
-                .frame
-                .luma_plane_bytes()
-                .map_err(|_| DecodeError::ReferenceMismatch)?;
-            let u = stored
-                .frame
-                .u_plane_bytes()
-                .map_err(|_| DecodeError::ReferenceMismatch)?;
-            let v = stored
-                .frame
-                .v_plane_bytes()
-                .map_err(|_| DecodeError::ReferenceMismatch)?;
-            let chroma_width = stored.frame.width / 2 + stored.frame.width % 2;
-            return Ok(Yuv420Frame {
-                width: stored.frame.width,
-                height: stored.frame.height,
-                y_stride: stored.frame.width,
-                u_stride: chroma_width,
-                v_stride: chroma_width,
-                y,
-                u,
-                v,
-            });
+        if let Some(frame) = self.decoded_frames.get(&requested_index) {
+            return Ok(frame.clone());
         }
-        Err(DecodeError::NotImplemented)
+        if let Ok(identifier) = u32::try_from(requested_index) {
+            if let Some(stored) = self.reference_picture_buffer.get(identifier) {
+                let y = stored
+                    .frame
+                    .luma_plane_bytes()
+                    .map_err(|_| DecodeError::ReferenceMismatch)?;
+                let u = stored
+                    .frame
+                    .u_plane_bytes()
+                    .map_err(|_| DecodeError::ReferenceMismatch)?;
+                let v = stored
+                    .frame
+                    .v_plane_bytes()
+                    .map_err(|_| DecodeError::ReferenceMismatch)?;
+                let chroma_width = stored.frame.width / 2 + stored.frame.width % 2;
+                return Ok(Yuv420Frame {
+                    width: stored.frame.width,
+                    height: stored.frame.height,
+                    y_stride: stored.frame.width,
+                    u_stride: chroma_width,
+                    v_stride: chroma_width,
+                    y,
+                    u,
+                    v,
+                });
+            }
+        }
+
+        let target_sample_index = self
+            .sample_reader
+            .as_ref()
+            .ok_or(DecodeError::MissingSampleReader)?
+            .presentation_sample_index(requested_index)
+            .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+        let picture_groups = self
+            .dependency_slice_pictures(requested_index)
+            .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+        self.reference_picture_buffer.clear();
+        self.poc_type0_state = crate::PocType0State::default();
+        self.poc_type12_state = crate::PocType12State::default();
+        self.poc_cache = None;
+
+        let mut target_frame = None;
+        for picture in picture_groups {
+            let first_slice = picture
+                .first()
+                .ok_or_else(|| DecodeError::DecodeFailure("dependency picture is empty".into()))?;
+            let header = first_slice.header.clone();
+            let pps = self
+                .picture_parameter_sets
+                .iter()
+                .find(|pps| pps.picture_parameter_set_id == header.picture_parameter_set_id)
+                .copied()
+                .ok_or_else(|| {
+                    DecodeError::DecodeFailure(
+                        "dependency picture references an unavailable PPS".into(),
+                    )
+                })?;
+            let sps = self
+                .sequence_parameter_sets
+                .iter()
+                .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+                .cloned()
+                .ok_or_else(|| {
+                    DecodeError::DecodeFailure(
+                        "dependency picture references an unavailable SPS".into(),
+                    )
+                })?;
+            if header.idr {
+                self.reference_picture_buffer.clear();
+                self.poc_type0_state = crate::PocType0State::default();
+                self.poc_type12_state = crate::PocType12State::default();
+                self.poc_cache = None;
+            }
+            let picture_order_count = self
+                .picture_order_count(&header, &sps)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let width_in_mbs = usize::try_from(sps.coded_width / 16)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let height_in_mbs = usize::try_from(sps.coded_height / 16)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let mut builder = crate::Yuv420FrameBuilder::new(
+                width_in_mbs,
+                height_in_mbs,
+                sps.frame_crop_left as usize,
+                sps.frame_crop_top as usize,
+                sps.frame_crop_right as usize,
+                sps.frame_crop_bottom as usize,
+            )
+            .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let mut picture_history = Vec::new();
+            for dependency_slice in &picture {
+                let mut slice_history = self
+                    .decode_dependency_slice_data_from_history(dependency_slice, &mut builder)
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                picture_history.append(&mut slice_history);
+            }
+            let frame = builder
+                .finish()
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let sample_index = usize::try_from(first_slice.sample_index)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let display_index = self
+                .sample_reader
+                .as_ref()
+                .ok_or(DecodeError::MissingSampleReader)?
+                .presentation_index_for_sample_index(sample_index)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            self.decoded_frames.insert(display_index, frame.clone());
+            if header.nal_ref_idc != 0 {
+                let identifier = u32::try_from(display_index)
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                let reference = crate::ReferencePicture {
+                    identifier,
+                    frame_num: header.frame_num,
+                    picture_order_cnt: picture_order_count,
+                    long_term_frame_idx: (header.idr && header.long_term_reference).then_some(0),
+                };
+                self.store_reference_picture_with_macroblocks(reference, &frame, &picture_history)
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            }
+            if sample_index == target_sample_index && display_index == requested_index {
+                target_frame = Some(frame);
+            }
+        }
+        target_frame.ok_or_else(|| {
+            DecodeError::DecodeFailure(format!(
+                "requested presentation frame {requested_index} is absent from its dependency window"
+            ))
+        })
     }
 }

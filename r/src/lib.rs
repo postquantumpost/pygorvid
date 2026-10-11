@@ -18,24 +18,34 @@ mod vidfile;
 pub use basicinfo::{BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo};
 pub use bitreader::BitReader;
 pub use cabac::{
-    cabac_residual_context_bases, derive_cabac_mvd_context_increment,
-    derive_cabac_reference_index_context_increment, derive_coded_block_flag_cond_term,
+    cabac_residual_context_bases, derive_cabac_inter_macroblock_neighbor_state_from_history,
+    derive_cabac_macroblock_edge_samples, derive_cabac_macroblock_neighbor_coded_state,
+    derive_cabac_mvd_context_increment, derive_cabac_reference_index_context_increment,
+    derive_cabac_slice_neighbor_indices, derive_coded_block_flag_cond_term,
     new_cabac_i_chroma_coded_block_pattern_contexts, new_cabac_i_intra4x4_pred_mode_contexts,
     new_cabac_i_intra_chroma_pred_mode_contexts, new_cabac_i_intra_mb_type_contexts,
     new_cabac_i_luma4x4_coded_block_flag_contexts, new_cabac_i_luma_coded_block_pattern_contexts,
     new_cabac_i_mb_qp_delta_contexts, new_cabac_i_transform_size_8x8_contexts,
     new_cabac_inter_prediction_contexts, new_cabac_p_inter_mb_type_contexts,
     new_cabac_slice_contexts, place_chroma4x4_scan_levels, place_luma4x4_scan_levels,
-    place_luma8x8_scan_levels, CabacArithmeticDecoder, CabacChroma420EdgeState,
-    CabacChroma420References, CabacContextModel, CabacIIntraMacroblockInput,
-    CabacIIntraMacroblockResult, CabacInterNeighbor, CabacIntra16x16EdgeState,
-    CabacIntra4x4EdgeState, Intra16x16LumaMacroblockResult, Intra4x4LumaMacroblockResult,
-    IntraChroma420MacroblockResult, CABAC_CONTEXT_COUNT,
+    place_luma8x8_scan_levels, CabacArithmeticDecoder, CabacBDirectMacroblockInput,
+    CabacBDirectMacroblockResult, CabacBReferencePicture, CabacChroma420EdgeState,
+    CabacChroma420References, CabacContextModel, CabacDecodedSliceMacroblock,
+    CabacIIntraMacroblockInput, CabacIIntraMacroblockResult, CabacInterListNeighbors,
+    CabacInterMacroblockInput, CabacInterMacroblockNeighborState, CabacInterMacroblockPartition,
+    CabacInterMacroblockResidualInput, CabacInterMacroblockResult, CabacInterNeighbor,
+    CabacInterPartitionNeighbors, CabacIntra16x16EdgeState, CabacIntra4x4EdgeState,
+    CabacMacroblockEdgeSamples, CabacMacroblockNeighborCodedState,
+    CabacMacroblockNeighborDirection, CabacPBMacroblockLayerInput, CabacPBMacroblockLayerResult,
+    CabacPBMacroblockPrediction, CabacPSkipMacroblockInput, CabacPSkipMacroblockResult,
+    CabacSliceMacroblockInput, CabacSliceMacroblockResult, CabacSliceNeighborIndices,
+    Intra16x16LumaMacroblockResult, Intra4x4LumaMacroblockResult, IntraChroma420MacroblockResult,
+    CABAC_CONTEXT_COUNT,
 };
-pub use decoder::{DecodeError, H264Decoder};
+pub use decoder::{DecodeError, DependencySlice, H264Decoder};
 pub use mp4boxes::AvcConfiguration;
 pub use mp4file::Mp4File;
-pub use nal::{ebsp_to_rbsp, parse_nal_header, NalHeader};
+pub use nal::{ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals, NalHeader};
 pub use pps::{parse_pps, PpsInfo};
 pub use reconstruction::{
     apply_luma_deblocking_edge, apply_luma_deblocking_edge_segment,
@@ -51,15 +61,16 @@ pub use reconstruction::{
     assemble_chroma420_residual_macroblock, build_b_reference_lists, build_p_reference_list,
     derive_chroma_qpc, derive_luma_deblocking_parameters, derive_motion_vector,
     filter_chroma_weak_edge, filter_luma_strong_edge, filter_luma_weak_edge,
-    gather_luma_quarter_sample_neighborhood, interpolate_luma_fractional_sample,
-    interpolate_luma_half_sample_diagonal, interpolate_luma_half_sample_horizontal,
-    interpolate_luma_half_sample_vertical, interpolate_luma_quarter_sample_around_j,
-    interpolate_luma_quarter_sample_average, interpolate_luma_quarter_sample_axial,
-    interpolate_luma_quarter_sample_diagonal, interpolate_luma_quarter_sample_grid,
-    interpolate_luma_quarter_sample_pair, inverse_scale_chroma4x4, inverse_scale_chroma_dc2x2,
-    inverse_scale_luma4x4, inverse_scale_luma8x8, inverse_transform_chroma_dc2x2,
-    inverse_transform_luma4x4, inverse_transform_luma8x8, lookup_luma_deblocking_thresholds,
-    lookup_luma_tc0, motion_vector_difference_neighbor_magnitudes, predict_chroma_intra8x8,
+    gather_luma_quarter_sample_neighborhood, interpolate_chroma_fractional_sample,
+    interpolate_luma_fractional_sample, interpolate_luma_half_sample_diagonal,
+    interpolate_luma_half_sample_horizontal, interpolate_luma_half_sample_vertical,
+    interpolate_luma_quarter_sample_around_j, interpolate_luma_quarter_sample_average,
+    interpolate_luma_quarter_sample_axial, interpolate_luma_quarter_sample_diagonal,
+    interpolate_luma_quarter_sample_grid, interpolate_luma_quarter_sample_pair,
+    inverse_scale_chroma4x4, inverse_scale_chroma_dc2x2, inverse_scale_luma4x4,
+    inverse_scale_luma8x8, inverse_transform_chroma_dc2x2, inverse_transform_luma4x4,
+    inverse_transform_luma8x8, lookup_luma_deblocking_thresholds, lookup_luma_tc0,
+    motion_vector_difference_neighbor_magnitudes, predict_chroma_intra8x8,
     predict_chroma_intra8x8_dc, predict_chroma_intra8x8_horizontal, predict_chroma_intra8x8_plane,
     predict_chroma_intra8x8_vertical, predict_luma_intra16x16_dc,
     predict_luma_intra16x16_horizontal, predict_luma_intra16x16_plane,
@@ -77,11 +88,11 @@ pub use reconstruction::{
     reconstruct_chroma4x4_residual, reconstruct_intra16x16_luma_dc,
     reconstruct_luma_intra16x16_macroblock, reconstruct_luma_intra4x4_macroblock,
     reconstruct_luma_intra8x8_macroblock, select_luma_fractional_sample, should_filter_luma_edge,
-    ChromaEdgeSamples, DecodedReferencePicture, LumaDeblockingMode, LumaDeblockingParameters,
-    LumaDeblockingThresholds, LumaEdgeSamples, LumaIntra4x4Block, LumaStrongEdgeSamples,
-    MotionVector, MotionVectorCandidate, MotionVectorPartitionShape, PocType0State, PocType12State,
-    PresentationOrderBuffer, PresentationPicture, ReferencePicture, ReferencePictureBuffer,
-    Yuv420Frame, Yuv420FrameBuilder,
+    ChromaEdgeSamples, ColocatedMotionFact, DecodedReferencePicture, LumaDeblockingMode,
+    LumaDeblockingParameters, LumaDeblockingThresholds, LumaEdgeSamples, LumaIntra4x4Block,
+    LumaStrongEdgeSamples, MotionVector, MotionVectorCandidate, MotionVectorPartitionShape,
+    PocType0State, PocType12State, PresentationOrderBuffer, PresentationPicture, ReferencePicture,
+    ReferencePictureBuffer, Yuv420Frame, Yuv420FrameBuilder,
 };
 pub use slice::{
     group_slices_into_pictures, parse_slice_header, same_primary_picture, PictureIdentity,
