@@ -119,9 +119,9 @@ from pygorvid import (
     ("index_a", "index_b", "expected"),
     (
         (0, 0, LumaDeblockingThresholds(0, 0)),
-        (16, 17, LumaDeblockingThresholds(4, 0)),
+        (16, 17, LumaDeblockingThresholds(4, 2)),
         (18, 18, LumaDeblockingThresholds(5, 2)),
-        (40, 40, LumaDeblockingThresholds(80, 12)),
+        (40, 40, LumaDeblockingThresholds(80, 13)),
         (51, 51, LumaDeblockingThresholds(255, 18)),
     ),
 )
@@ -141,6 +141,7 @@ def test_lookup_luma_deblocking_thresholds_rejects_invalid_indices(index_a, inde
         (0, 1, 0),
         (23, 1, 1),
         (21, 2, 1),
+        (17, 3, 1),
         (18, 3, 1),
         (33, 1, 2),
         (51, 1, 13),
@@ -745,6 +746,18 @@ def test_derive_luma_deblocking_parameters_rejects_invalid_inputs(
         derive_luma_deblocking_parameters(qp_p, qp_q, disable_idc, alpha_offset, beta_offset)
 
 
+def test_deblocking_parameter_lookups_reuse_cached_immutable_values():
+    from pygorvid.reconstruction import lookup_luma_deblocking_thresholds
+
+    first_parameters = derive_luma_deblocking_parameters(24, 28, 0, -1, 2)
+    second_parameters = derive_luma_deblocking_parameters(24, 28, 0, -1, 2)
+    first_thresholds = lookup_luma_deblocking_thresholds(25, 30)
+    second_thresholds = lookup_luma_deblocking_thresholds(25, 30)
+
+    assert first_parameters is second_parameters
+    assert first_thresholds is second_thresholds
+
+
 @pytest.mark.parametrize(
     ("previous_msb", "previous_lsb", "lsb", "delta", "idr", "expected", "next_msb", "next_lsb"),
     (
@@ -1162,6 +1175,77 @@ def test_gather_luma_quarter_sample_neighborhood_clips_edges_and_ignores_padding
         (3, 3, 3, 4, 4, 4),
         (3, 3, 3, 4, 4, 4),
     )
+
+
+def test_gather_luma_quarter_sample_neighborhood_checks_timeout_by_chunk():
+    checks = []
+
+    def timeout_check():
+        checks.append(True)
+        if len(checks) == 2:
+            raise TimeoutError("decode time limit exceeded")
+
+    with pytest.raises(TimeoutError, match="time limit"):
+        gather_luma_quarter_sample_neighborhood(
+            bytes(8192), 128, 64, 128, 0, 0, timeout_check=timeout_check
+        )
+
+    assert checks == [True, True]
+
+
+def test_gather_luma_quarter_sample_neighborhood_polls_bytes_without_rescanning():
+    class TrackedBytes(bytes):
+        def __new__(cls, data):
+            result = super().__new__(cls, data)
+            result.sample_reads = 0
+            return result
+
+        def __getitem__(self, index):
+            if isinstance(index, int):
+                self.sample_reads += 1
+            return super().__getitem__(index)
+
+    plane = TrackedBytes(bytes(8192))
+    checks = []
+    gather_luma_quarter_sample_neighborhood(
+        plane, 128, 64, 128, 0, 0, timeout_check=lambda: checks.append(True)
+    )
+
+    assert plane.sample_reads == 36
+    assert checks == [True, True]
+
+
+def test_luma_fractional_sample_cache_reuses_clipped_neighborhood(monkeypatch):
+    import pygorvid.reconstruction as reconstruction
+
+    plane = bytes(range(256))
+    expected = tuple(
+        reconstruction.interpolate_luma_fractional_sample(
+            plane, 16, 16, 16, x_int, -3, 1, 2
+        )
+        for x_int in (-3, -4)
+    )
+    original_gather = reconstruction.gather_luma_quarter_sample_neighborhood
+    gather_calls = []
+
+    def count_gather(*args, **kwargs):
+        gather_calls.append(True)
+        return original_gather(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconstruction, "gather_luma_quarter_sample_neighborhood", count_gather
+    )
+    cache = reconstruction._LumaFractionalSampleCache(plane, 16, 16, 16)
+    actual = tuple(cache.sample(x_int, -3, 1, 2) for x_int in (-3, -4))
+
+    assert actual == expected
+    assert gather_calls == [True]
+
+
+def test_yuv420_frame_reuses_exact_packed_planes():
+    plane = bytes(range(16))
+    frame = Yuv420Frame(4, 4, 4, 2, 2, plane, bytes(4), bytes(4))
+    assert frame.luma_plane_bytes() is plane
 
 
 @pytest.mark.parametrize(
@@ -1825,6 +1909,89 @@ def test_inverse_scale_luma8x8_scaling_classes_and_qp_vectors(qpy, expected):
     ]
 
 
+def test_picture_deblocking_derives_motion_and_coefficient_strengths():
+    from dataclasses import replace
+    from pygorvid.reconstruction import PictureDeblockingMacroblock, deblock_yuv420_picture
+
+    row = bytearray([100] * 16 + [118] * 16)
+    row[13:19] = bytes([80, 95, 100, 118, 123, 138])
+    frame = Yuv420Frame(32, 16, 32, 16, 16, bytes(row) * 16, bytes([128]) * 128, bytes([128]) * 128)
+    first = LumaPredictionVector(7, MotionVector(0, 0))
+    second = LumaPredictionVector(7, MotionVector(4, 0))
+    left = PictureDeblockingMacroblock(40, False, True, predictions=((first,),) * 16)
+    right = replace(left, predictions=((second,),) * 16)
+    assert deblock_yuv420_picture(frame, (left, left)) == frame
+    motion_filtered = deblock_yuv420_picture(frame, (left, right))
+    assert motion_filtered.y[15] == 104
+    coefficients = replace(right, nonzero=(True,) * 16)
+    assert deblock_yuv420_picture(frame, (left, coefficients)).y[15] == 105
+    invalid = replace(right, predictions=((first, second, first),) * 16)
+    with pytest.raises(ValueError, match="at most two"):
+        deblock_yuv420_picture(frame, (left, invalid))
+    assert frame.y[15] == 100
+
+
+def test_picture_deblocking_uses_neighbor_qp_and_slice_controls():
+    from pygorvid.reconstruction import PictureDeblockingMacroblock, deblock_yuv420_picture
+
+    frame = Yuv420Frame(32, 16, 32, 16, 16, bytes([100] * 16 + [108] * 16) * 16,
+                        bytes([100] * 8 + [108] * 8) * 8, bytes([100] * 8 + [108] * 8) * 8)
+    blocks = (PictureDeblockingMacroblock(8, True), PictureDeblockingMacroblock(40, True))
+    filtered = deblock_yuv420_picture(frame, blocks)
+    assert filtered.y != frame.y
+    assert frame.y[15:17] == bytes([100, 108])
+    from dataclasses import replace
+
+    suppressed = (blocks[0], replace(blocks[1], slice_id=1, disable_idc=2))
+    assert deblock_yuv420_picture(frame, suppressed) == frame
+    offsets = (blocks[0], replace(blocks[1], alpha_offset_div2=-6))
+    assert deblock_yuv420_picture(frame, offsets) == frame
+    with pytest.raises(ValueError, match="metadata is incomplete"):
+        deblock_yuv420_picture(frame, blocks[:1])
+
+
+def test_picture_deblocking_checks_timeout_between_macroblocks():
+    from pygorvid.reconstruction import PictureDeblockingMacroblock, deblock_yuv420_picture
+
+    frame = Yuv420Frame(
+        32, 16, 32, 16, 16,
+        bytes([100] * 32) * 16,
+        bytes([128] * 16) * 8,
+        bytes([128] * 16) * 8,
+    )
+    macroblocks = (PictureDeblockingMacroblock(26, True),) * 2
+    checks = []
+
+    def timeout_check():
+        checks.append(True)
+        if len(checks) == 2:
+            raise TimeoutError("decode time limit exceeded")
+
+    with pytest.raises(TimeoutError, match="time limit"):
+        deblock_yuv420_picture(frame, macroblocks, timeout_check=timeout_check)
+
+    assert checks == [True, True]
+    assert frame.y == bytes([100] * 32) * 16
+
+
+def test_chroma_deblocking_dispatches_strong_weak_and_slice_gating():
+    from pygorvid.reconstruction import (
+        ChromaEdgeSamples, LumaDeblockingMode, LumaDeblockingParameters,
+        apply_chroma_deblocking_edge, filter_chroma_weak_edge, lookup_luma_tc0,
+    )
+
+    samples = ChromaEdgeSamples(100, 96, 108, 110)
+    enabled = LumaDeblockingParameters(LumaDeblockingMode.ALL_EDGES, 40, 40)
+    assert apply_chroma_deblocking_edge(samples, 4, enabled, False) == ChromaEdgeSamples(101, 96, 106, 110)
+    assert apply_chroma_deblocking_edge(samples, 1, enabled, False) == filter_chroma_weak_edge(samples, lookup_luma_tc0(40, 1))
+    assert apply_chroma_deblocking_edge(samples, 0, enabled, False) == samples
+    disabled = LumaDeblockingParameters(LumaDeblockingMode.DISABLED, 40, 40)
+    assert apply_chroma_deblocking_edge(samples, 4, disabled, False) == samples
+    same_slice = LumaDeblockingParameters(LumaDeblockingMode.ALL_EXCEPT_SLICE_BOUNDARIES, 40, 40)
+    assert apply_chroma_deblocking_edge(samples, 4, same_slice, True) == samples
+    assert apply_chroma_deblocking_edge(samples, 4, same_slice, False) == ChromaEdgeSamples(101, 96, 106, 110)
+
+
 def test_inverse_scale_luma8x8_negative_level_and_custom_weight():
     levels = [0] * 64
     levels[0:2] = [-1, 1]
@@ -2257,7 +2424,6 @@ def test_predict_luma_intra8x8_diagonal_down_right_uses_all_reference_regions():
         [60, 100, 140, 180, 220, 240, 200, 160],
         30,
     ) == [
-        28, 40, 60, 80, 100, 120, 140, 160,
         35, 28, 40, 60, 80, 100, 120, 140,
         63, 35, 28, 40, 60, 80, 100, 120,
         100, 63, 35, 28, 40, 60, 80, 100,
@@ -2265,6 +2431,7 @@ def test_predict_luma_intra8x8_diagonal_down_right_uses_all_reference_regions():
         180, 140, 100, 63, 35, 28, 40, 60,
         215, 180, 140, 100, 63, 35, 28, 40,
         225, 215, 180, 140, 100, 63, 35, 28,
+        200, 225, 215, 180, 140, 100, 63, 35,
     ]
 
 
@@ -2292,14 +2459,14 @@ def test_predict_luma_intra8x8_vertical_right_uses_all_reference_regions():
         [60, 100, 140, 180, 220, 240, 200, 160],
         30,
     ) == [
-        28, 40, 60, 80, 100, 120, 140, 160,
-        45, 25, 30, 50, 70, 90, 110, 130,
+        25, 30, 50, 70, 90, 110, 130, 150,
         35, 28, 40, 60, 80, 100, 120, 140,
-        80, 45, 25, 30, 50, 70, 90, 110,
+        63, 25, 30, 50, 70, 90, 110, 130,
         100, 35, 28, 40, 60, 80, 100, 120,
-        120, 80, 45, 25, 30, 50, 70, 90,
-        140, 100, 35, 28, 40, 60, 80, 100,
-        160, 120, 80, 45, 25, 30, 50, 70,
+        140, 63, 25, 30, 50, 70, 90, 110,
+        180, 100, 35, 28, 40, 60, 80, 100,
+        215, 140, 63, 25, 30, 50, 70, 90,
+        225, 180, 100, 35, 28, 40, 60, 80,
     ]
 
 
@@ -2327,14 +2494,14 @@ def test_predict_luma_intra8x8_horizontal_down_transposes_vertical_right():
         [20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250, 230, 210, 190],
         30,
     ) == [
-        28, 45, 35, 80, 100, 120, 140, 160,
-        40, 25, 28, 45, 35, 80, 100, 120,
-        60, 30, 40, 25, 28, 45, 35, 80,
-        80, 50, 60, 30, 40, 25, 28, 45,
-        100, 70, 80, 50, 60, 30, 40, 25,
-        120, 90, 100, 70, 80, 50, 60, 30,
-        140, 110, 120, 90, 100, 70, 80, 50,
-        160, 130, 140, 110, 120, 90, 100, 70,
+        25, 35, 63, 100, 140, 180, 215, 225,
+        30, 28, 25, 35, 63, 100, 140, 180,
+        50, 40, 30, 28, 25, 35, 63, 100,
+        70, 60, 50, 40, 30, 28, 25, 35,
+        90, 80, 70, 60, 50, 40, 30, 28,
+        110, 100, 90, 80, 70, 60, 50, 40,
+        130, 120, 110, 100, 90, 80, 70, 60,
+        150, 140, 130, 120, 110, 100, 90, 80,
     ]
 
 
@@ -2382,11 +2549,11 @@ def test_predict_luma_intra8x8_horizontal_up_transposes_vertical_left():
         15, 20, 25, 30, 35, 40, 45, 50,
         25, 30, 35, 40, 45, 50, 55, 60,
         35, 40, 45, 50, 55, 60, 65, 70,
-        45, 50, 55, 60, 65, 70, 75, 80,
-        55, 60, 65, 70, 75, 80, 85, 90,
-        65, 70, 75, 80, 85, 90, 95, 100,
-        75, 80, 85, 90, 95, 100, 105, 110,
-        85, 90, 95, 100, 105, 110, 115, 120,
+        45, 50, 55, 60, 65, 70, 75, 78,
+        55, 60, 65, 70, 75, 78, 80, 80,
+        65, 70, 75, 78, 80, 80, 80, 80,
+        75, 78, 80, 80, 80, 80, 80, 80,
+        80, 80, 80, 80, 80, 80, 80, 80,
     ]
 
 

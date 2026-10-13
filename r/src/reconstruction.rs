@@ -664,6 +664,213 @@ pub fn apply_luma_deblocking_edge(
     Ok(filter_luma_weak_edge(unchanged, thresholds.beta, tc0))
 }
 
+pub fn apply_chroma_deblocking_edge(
+    samples: ChromaEdgeSamples,
+    strength: u8,
+    parameters: LumaDeblockingParameters,
+    slice_boundary: bool,
+) -> io::Result<ChromaEdgeSamples> {
+    if strength > 4 {
+        return Err(invalid(
+            "chroma deblocking boundary strength is outside [0,4]",
+        ));
+    }
+    let thresholds = lookup_luma_deblocking_thresholds(parameters.index_a, parameters.index_b)?;
+    if parameters.mode == LumaDeblockingMode::Disabled
+        || (parameters.mode == LumaDeblockingMode::AllExceptSliceBoundaries && slice_boundary)
+        || !should_filter_luma_edge(
+            samples.p0, samples.q0, samples.p1, samples.q1, strength, thresholds,
+        )?
+    {
+        return Ok(samples);
+    }
+    if strength == 4 {
+        return Ok(ChromaEdgeSamples {
+            p0: ((2 * u16::from(samples.p1) + u16::from(samples.p0) + u16::from(samples.q1) + 2)
+                >> 2) as u8,
+            p1: samples.p1,
+            q0: ((2 * u16::from(samples.q1) + u16::from(samples.q0) + u16::from(samples.p1) + 2)
+                >> 2) as u8,
+            q1: samples.q1,
+        });
+    }
+    Ok(filter_chroma_weak_edge(
+        samples,
+        lookup_luma_tc0(parameters.index_a, strength)?,
+    ))
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PictureDeblockingMacroblock {
+    pub qpy: i32,
+    pub intra: bool,
+    pub transform_size_8x8: bool,
+    pub nonzero: [bool; 16],
+    pub predictions: [Vec<LumaPredictionVector>; 16],
+    pub slice_id: usize,
+    pub disable_idc: u8,
+    pub alpha_offset_div2: i64,
+    pub beta_offset_div2: i64,
+    pub chroma_qp_offsets: [i32; 2],
+}
+
+pub fn deblock_yuv420_picture(
+    frame: &Yuv420Frame,
+    macroblocks: &[PictureDeblockingMacroblock],
+) -> io::Result<Yuv420Frame> {
+    if frame.width == 0 || frame.height == 0 || frame.width % 16 != 0 || frame.height % 16 != 0 {
+        return Err(invalid(
+            "picture deblocking requires complete coded macroblocks",
+        ));
+    }
+    let width_in_mbs = frame.width / 16;
+    if width_in_mbs.checked_mul(frame.height / 16) != Some(macroblocks.len()) {
+        return Err(invalid(
+            "picture deblocking macroblock metadata is incomplete",
+        ));
+    }
+    let mut qpc = Vec::with_capacity(macroblocks.len());
+    for block in macroblocks {
+        derive_luma_deblocking_parameters(
+            block.qpy,
+            block.qpy,
+            block.disable_idc,
+            block.alpha_offset_div2,
+            block.beta_offset_div2,
+        )?;
+        for prediction in &block.predictions {
+            luma_inter_prediction_differs(prediction, prediction)?;
+        }
+        qpc.push([
+            derive_chroma_qpc(block.qpy, block.chroma_qp_offsets[0])?,
+            derive_chroma_qpc(block.qpy, block.chroma_qp_offsets[1])?,
+        ]);
+    }
+    let mut planes = [
+        frame.plane_bytes(&frame.y, frame.width, frame.height, frame.y_stride)?,
+        frame.u_plane_bytes()?,
+        frame.v_plane_bytes()?,
+    ];
+    for (address, current) in macroblocks.iter().enumerate() {
+        if current.disable_idc == 1 {
+            continue;
+        }
+        let origin_x = (address % width_in_mbs) * 16;
+        let origin_y = (address / width_in_mbs) * 16;
+        for vertical in [true, false] {
+            for edge in [0, 4, 8, 12] {
+                if edge == 0 && (if vertical { origin_x } else { origin_y }) == 0 {
+                    continue;
+                }
+                if (edge == 4 || edge == 12) && current.transform_size_8x8 {
+                    continue;
+                }
+                let neighbor_address = if edge == 0 {
+                    address - if vertical { 1 } else { width_in_mbs }
+                } else {
+                    address
+                };
+                let neighbor = &macroblocks[neighbor_address];
+                let slice_boundary = current.slice_id != neighbor.slice_id;
+                let parameters = derive_luma_deblocking_parameters(
+                    neighbor.qpy,
+                    current.qpy,
+                    current.disable_idc,
+                    current.alpha_offset_div2,
+                    current.beta_offset_div2,
+                )?;
+                for segment in 0..4 {
+                    let (block_x, block_y) = if vertical {
+                        (edge / 4, segment)
+                    } else {
+                        (segment, edge / 4)
+                    };
+                    let index_q = block_y * 4 + block_x;
+                    let index_p = if edge == 0 {
+                        if vertical {
+                            block_y * 4 + 3
+                        } else {
+                            12 + block_x
+                        }
+                    } else {
+                        index_q - if vertical { 1 } else { 4 }
+                    };
+                    let strength = derive_luma_boundary_strength(
+                        edge == 0,
+                        current.intra || neighbor.intra,
+                        current.nonzero[index_q] || neighbor.nonzero[index_p],
+                        luma_inter_prediction_differs(
+                            &neighbor.predictions[index_p],
+                            &current.predictions[index_q],
+                        )?,
+                    );
+                    let x = origin_x + if vertical { edge } else { segment * 4 };
+                    let y = origin_y + if vertical { segment * 4 } else { edge };
+                    apply_luma_deblocking_plane_edge_segment(
+                        &mut planes[0],
+                        frame.width,
+                        frame.height,
+                        frame.width,
+                        x,
+                        y,
+                        vertical,
+                        strength,
+                        parameters,
+                        slice_boundary,
+                    )?;
+                    if edge % 8 != 0 {
+                        continue;
+                    }
+                    for component in 0..2 {
+                        let chroma_parameters = derive_luma_deblocking_parameters(
+                            qpc[neighbor_address][component],
+                            qpc[address][component],
+                            current.disable_idc,
+                            current.alpha_offset_div2,
+                            current.beta_offset_div2,
+                        )?;
+                        let stride = frame.width / 2;
+                        let step = if vertical { 1 } else { stride };
+                        for lane in 0..2 {
+                            let index = if vertical {
+                                (y / 2 + lane) * stride + x / 2
+                            } else {
+                                (y / 2) * stride + x / 2 + lane
+                            };
+                            let plane = &mut planes[component + 1];
+                            let samples = ChromaEdgeSamples {
+                                p0: plane[index - step],
+                                p1: plane[index - 2 * step],
+                                q0: plane[index],
+                                q1: plane[index + step],
+                            };
+                            let filtered = apply_chroma_deblocking_edge(
+                                samples,
+                                strength,
+                                chroma_parameters,
+                                slice_boundary,
+                            )?;
+                            plane[index - step] = filtered.p0;
+                            plane[index] = filtered.q0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let [y, u, v] = planes;
+    Ok(Yuv420Frame {
+        width: frame.width,
+        height: frame.height,
+        y_stride: frame.width,
+        u_stride: frame.width / 2,
+        v_stride: frame.width / 2,
+        y,
+        u,
+        v,
+    })
+}
+
 pub fn apply_luma_deblocking_edge_segment(
     samples: [LumaStrongEdgeSamples; 4],
     boundary_strength: u8,
@@ -1164,8 +1371,8 @@ const LUMA_ALPHA_TABLE: [u8; 52] = [
 ];
 
 const LUMA_BETA_TABLE: [u8; 52] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7,
-    8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 18,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7, 8, 8,
+    9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18,
 ];
 
 const LUMA_TC0_TABLE: [[u8; 52]; 3] = [
@@ -1178,7 +1385,7 @@ const LUMA_TC0_TABLE: [[u8; 52]; 3] = [
         1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 5, 6, 7, 8, 8, 10, 11, 12, 13, 15, 17,
     ],
     [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
         2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 23, 25,
     ],
 ];
@@ -1380,6 +1587,18 @@ impl ReferencePictureBuffer {
         } else {
             false
         }
+    }
+
+    pub fn set_long_term_frame_idx(&mut self, identifier: u32, frame_idx: Option<u32>) -> bool {
+        let Some(picture) = self
+            .pictures
+            .iter_mut()
+            .find(|picture| picture.reference.identifier == identifier)
+        else {
+            return false;
+        };
+        picture.reference.long_term_frame_idx = frame_idx;
+        true
     }
 
     pub fn clear(&mut self) {
@@ -2584,7 +2803,7 @@ pub fn predict_luma_intra8x8_diagonal_down_right(
     let mut prediction = [0_u8; 64];
     for row in 0..8 {
         for column in 0..8 {
-            let position = column as i32 - row as i32;
+            let position = column as i32 - row as i32 - 1;
             let value = (reference_at(position - 1)
                 + 2 * reference_at(position)
                 + reference_at(position + 1)
@@ -2616,26 +2835,24 @@ pub fn predict_luma_intra8x8_vertical_right(
             let phase = 2 * column as i32 - row as i32;
             let value = if phase >= 0 && phase % 2 == 0 {
                 let center = phase / 2;
+                (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
+            } else if phase >= 0 {
+                let center = (phase - 1) / 2;
                 (top_reference_at(center - 1)
                     + 2 * top_reference_at(center)
                     + top_reference_at(center + 1)
                     + 2)
                     >> 2
-            } else if phase >= 0 {
-                let center = (phase - 1) / 2;
-                (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
             } else if phase == -1 {
-                (u16::from(left[0]) + u16::from(top_left) + 1) >> 1
-            } else if phase == -2 {
                 (u16::from(left[0]) + 2 * u16::from(top_left) + u16::from(top[0]) + 2) >> 2
-            } else if (-phase) % 2 == 1 {
-                let center = ((-phase - 3) / 2) as usize;
-                (u16::from(left[center]) + u16::from(left[center + 1]) + 1) >> 1
             } else {
-                let center = ((-phase - 4) / 2) as usize;
-                (u16::from(left[center])
-                    + 2 * u16::from(left[center + 1])
-                    + u16::from(left[center + 2])
+                let center = (-phase - 2) as usize;
+                (u16::from(if center == 0 {
+                    top_left
+                } else {
+                    left[center - 1]
+                }) + 2 * u16::from(left[center])
+                    + u16::from(left[center + 1])
                     + 2)
                     >> 2
             };
@@ -2686,7 +2903,9 @@ pub fn predict_luma_intra8x8_vertical_left(top: &[u8; 16]) -> [u8; 64] {
 
 /// Predicts an 8x8 luma block by transposing vertical-left prediction.
 pub fn predict_luma_intra8x8_horizontal_up(left: &[u8; 16]) -> [u8; 64] {
-    let vertical_prediction = predict_luma_intra8x8_vertical_left(left);
+    let mut extended_left = [left[7]; 16];
+    extended_left[..8].copy_from_slice(&left[..8]);
+    let vertical_prediction = predict_luma_intra8x8_vertical_left(&extended_left);
     let mut prediction = [0_u8; 64];
     for row in 0..8 {
         for column in 0..8 {
@@ -3550,15 +3769,15 @@ mod tests {
     fn looks_up_luma_deblocking_threshold_table_vectors() {
         for (index_a, index_b, expected) in [
             (0, 0, LumaDeblockingThresholds { alpha: 0, beta: 0 }),
-            (16, 17, LumaDeblockingThresholds { alpha: 4, beta: 0 }),
+            (16, 17, LumaDeblockingThresholds { alpha: 4, beta: 2 }),
             (18, 18, LumaDeblockingThresholds { alpha: 5, beta: 2 }),
-            (26, 26, LumaDeblockingThresholds { alpha: 15, beta: 4 }),
+            (26, 26, LumaDeblockingThresholds { alpha: 15, beta: 6 }),
             (
                 40,
                 40,
                 LumaDeblockingThresholds {
                     alpha: 80,
-                    beta: 12,
+                    beta: 13,
                 },
             ),
             (
@@ -3584,6 +3803,7 @@ mod tests {
             (0, 1, 0),
             (23, 1, 1),
             (21, 2, 1),
+            (17, 3, 1),
             (18, 3, 1),
             (33, 1, 2),
             (51, 1, 13),
@@ -3681,6 +3901,172 @@ mod tests {
         for (samples, beta, tc0, expected) in vectors {
             assert_eq!(filter_luma_weak_edge(samples, beta, tc0), expected);
         }
+    }
+
+    #[test]
+    fn picture_deblocking_uses_neighbor_qp_and_slice_controls() {
+        let mut row = vec![100; 16];
+        row.extend_from_slice(&[108; 16]);
+        let mut chroma = vec![100; 8];
+        chroma.extend_from_slice(&[108; 8]);
+        let frame = Yuv420Frame {
+            width: 32,
+            height: 16,
+            y_stride: 32,
+            u_stride: 16,
+            v_stride: 16,
+            y: row.repeat(16),
+            u: chroma.repeat(8),
+            v: chroma.repeat(8),
+        };
+        let left = PictureDeblockingMacroblock {
+            qpy: 8,
+            intra: true,
+            ..Default::default()
+        };
+        let right = PictureDeblockingMacroblock {
+            qpy: 40,
+            intra: true,
+            ..Default::default()
+        };
+        assert_ne!(
+            deblock_yuv420_picture(&frame, &[left.clone(), right.clone()])
+                .unwrap()
+                .y,
+            frame.y
+        );
+        let suppressed = PictureDeblockingMacroblock {
+            slice_id: 1,
+            disable_idc: 2,
+            ..right.clone()
+        };
+        assert_eq!(
+            deblock_yuv420_picture(&frame, &[left.clone(), suppressed]).unwrap(),
+            frame
+        );
+        let offsets = PictureDeblockingMacroblock {
+            alpha_offset_div2: -6,
+            ..right
+        };
+        assert_eq!(
+            deblock_yuv420_picture(&frame, &[left.clone(), offsets]).unwrap(),
+            frame
+        );
+        assert!(deblock_yuv420_picture(&frame, &[left]).is_err());
+        assert_eq!(&frame.y[15..17], &[100, 108]);
+    }
+
+    #[test]
+    fn picture_deblocking_derives_motion_and_coefficient_strengths() {
+        let mut row = vec![100; 16];
+        row.extend_from_slice(&[118; 16]);
+        row[13..19].copy_from_slice(&[80, 95, 100, 118, 123, 138]);
+        let frame = Yuv420Frame {
+            width: 32,
+            height: 16,
+            y_stride: 32,
+            u_stride: 16,
+            v_stride: 16,
+            y: row.repeat(16),
+            u: vec![128; 128],
+            v: vec![128; 128],
+        };
+        let first = LumaPredictionVector {
+            reference_picture_id: 7,
+            motion_vector: MotionVector { x: 0, y: 0 },
+        };
+        let second = LumaPredictionVector {
+            reference_picture_id: 7,
+            motion_vector: MotionVector { x: 4, y: 0 },
+        };
+        let left = PictureDeblockingMacroblock {
+            qpy: 40,
+            transform_size_8x8: true,
+            predictions: std::array::from_fn(|_| vec![first]),
+            ..Default::default()
+        };
+        let right = PictureDeblockingMacroblock {
+            predictions: std::array::from_fn(|_| vec![second]),
+            ..left.clone()
+        };
+        assert_eq!(
+            deblock_yuv420_picture(&frame, &[left.clone(), left.clone()]).unwrap(),
+            frame
+        );
+        assert_eq!(
+            deblock_yuv420_picture(&frame, &[left.clone(), right.clone()])
+                .unwrap()
+                .y[15],
+            104
+        );
+        let coefficients = PictureDeblockingMacroblock {
+            nonzero: [true; 16],
+            ..right.clone()
+        };
+        assert_eq!(
+            deblock_yuv420_picture(&frame, &[left.clone(), coefficients])
+                .unwrap()
+                .y[15],
+            105
+        );
+        let invalid = PictureDeblockingMacroblock {
+            predictions: std::array::from_fn(|_| vec![first, second, first]),
+            ..right
+        };
+        assert!(deblock_yuv420_picture(&frame, &[left, invalid]).is_err());
+        assert_eq!(frame.y[15], 100);
+    }
+
+    #[test]
+    fn chroma_deblocking_dispatches_strong_weak_and_slice_gating() {
+        let samples = ChromaEdgeSamples {
+            p0: 100,
+            p1: 96,
+            q0: 108,
+            q1: 110,
+        };
+        let expected = ChromaEdgeSamples {
+            p0: 101,
+            q0: 106,
+            ..samples
+        };
+        let enabled = LumaDeblockingParameters {
+            mode: LumaDeblockingMode::AllEdges,
+            index_a: 40,
+            index_b: 40,
+        };
+        assert_eq!(
+            apply_chroma_deblocking_edge(samples, 4, enabled, false).unwrap(),
+            expected
+        );
+        assert_eq!(
+            apply_chroma_deblocking_edge(samples, 1, enabled, false).unwrap(),
+            filter_chroma_weak_edge(samples, lookup_luma_tc0(40, 1).unwrap())
+        );
+        assert_eq!(
+            apply_chroma_deblocking_edge(samples, 0, enabled, false).unwrap(),
+            samples
+        );
+        let disabled = LumaDeblockingParameters {
+            mode: LumaDeblockingMode::Disabled,
+            ..enabled
+        };
+        assert_eq!(
+            apply_chroma_deblocking_edge(samples, 4, disabled, false).unwrap(),
+            samples
+        );
+        let same_slice = LumaDeblockingParameters {
+            mode: LumaDeblockingMode::AllExceptSliceBoundaries,
+            ..enabled
+        };
+        assert_eq!(
+            apply_chroma_deblocking_edge(samples, 4, same_slice, true).unwrap(),
+            samples
+        );
+        assert_eq!(
+            apply_chroma_deblocking_edge(samples, 4, same_slice, false).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -6429,10 +6815,10 @@ mod tests {
         assert_eq!(
             predict_luma_intra8x8_diagonal_down_right(&top, &left, 30),
             [
-                28, 40, 60, 80, 100, 120, 140, 160, 35, 28, 40, 60, 80, 100, 120, 140, 63, 35, 28,
-                40, 60, 80, 100, 120, 100, 63, 35, 28, 40, 60, 80, 100, 140, 100, 63, 35, 28, 40,
-                60, 80, 180, 140, 100, 63, 35, 28, 40, 60, 215, 180, 140, 100, 63, 35, 28, 40, 225,
-                215, 180, 140, 100, 63, 35, 28,
+                35, 28, 40, 60, 80, 100, 120, 140, 63, 35, 28, 40, 60, 80, 100, 120, 100, 63, 35,
+                28, 40, 60, 80, 100, 140, 100, 63, 35, 28, 40, 60, 80, 180, 140, 100, 63, 35, 28,
+                40, 60, 215, 180, 140, 100, 63, 35, 28, 40, 225, 215, 180, 140, 100, 63, 35, 28,
+                200, 225, 215, 180, 140, 100, 63, 35,
             ]
         );
     }
@@ -6446,10 +6832,10 @@ mod tests {
         assert_eq!(
             predict_luma_intra8x8_vertical_right(&top, &left, 30),
             [
-                28, 40, 60, 80, 100, 120, 140, 160, 45, 25, 30, 50, 70, 90, 110, 130, 35, 28, 40,
-                60, 80, 100, 120, 140, 80, 45, 25, 30, 50, 70, 90, 110, 100, 35, 28, 40, 60, 80,
-                100, 120, 120, 80, 45, 25, 30, 50, 70, 90, 140, 100, 35, 28, 40, 60, 80, 100, 160,
-                120, 80, 45, 25, 30, 50, 70,
+                25, 30, 50, 70, 90, 110, 130, 150, 35, 28, 40, 60, 80, 100, 120, 140, 63, 25, 30,
+                50, 70, 90, 110, 130, 100, 35, 28, 40, 60, 80, 100, 120, 140, 63, 25, 30, 50, 70,
+                90, 110, 180, 100, 35, 28, 40, 60, 80, 100, 215, 140, 63, 25, 30, 50, 70, 90, 225,
+                180, 100, 35, 28, 40, 60, 80,
             ]
         );
     }
@@ -6463,10 +6849,10 @@ mod tests {
         assert_eq!(
             predict_luma_intra8x8_horizontal_down(&top, &left, 30),
             [
-                28, 45, 35, 80, 100, 120, 140, 160, 40, 25, 28, 45, 35, 80, 100, 120, 60, 30, 40,
-                25, 28, 45, 35, 80, 80, 50, 60, 30, 40, 25, 28, 45, 100, 70, 80, 50, 60, 30, 40,
-                25, 120, 90, 100, 70, 80, 50, 60, 30, 140, 110, 120, 90, 100, 70, 80, 50, 160, 130,
-                140, 110, 120, 90, 100, 70,
+                25, 35, 63, 100, 140, 180, 215, 225, 30, 28, 25, 35, 63, 100, 140, 180, 50, 40, 30,
+                28, 25, 35, 63, 100, 70, 60, 50, 40, 30, 28, 25, 35, 90, 80, 70, 60, 50, 40, 30,
+                28, 110, 100, 90, 80, 70, 60, 50, 40, 130, 120, 110, 100, 90, 80, 70, 60, 150, 140,
+                130, 120, 110, 100, 90, 80,
             ]
         );
     }
@@ -6496,9 +6882,9 @@ mod tests {
             predict_luma_intra8x8_horizontal_up(&left),
             [
                 15, 20, 25, 30, 35, 40, 45, 50, 25, 30, 35, 40, 45, 50, 55, 60, 35, 40, 45, 50, 55,
-                60, 65, 70, 45, 50, 55, 60, 65, 70, 75, 80, 55, 60, 65, 70, 75, 80, 85, 90, 65, 70,
-                75, 80, 85, 90, 95, 100, 75, 80, 85, 90, 95, 100, 105, 110, 85, 90, 95, 100, 105,
-                110, 115, 120,
+                60, 65, 70, 45, 50, 55, 60, 65, 70, 75, 78, 55, 60, 65, 70, 75, 78, 80, 80, 65, 70,
+                75, 78, 80, 80, 80, 80, 75, 78, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80,
+                80,
             ]
         );
     }

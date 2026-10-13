@@ -1,8 +1,9 @@
 """H.264 coefficient reconstruction primitives."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Optional, Sequence
 
 
@@ -133,6 +134,12 @@ def filter_luma_weak_edge(
     if any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255 for value in values):
         raise DeblockingError("luma weak-edge filter inputs are invalid")
 
+    return _filter_luma_weak_edge_validated(samples, beta, tc0)
+
+
+def _filter_luma_weak_edge_validated(
+    samples: LumaEdgeSamples, beta: int, tc0: int
+) -> LumaEdgeSamples:
     ap = abs(samples.p2 - samples.p0)
     aq = abs(samples.q2 - samples.q0)
     tc = tc0 + int(ap < beta) + int(aq < beta)
@@ -177,6 +184,12 @@ def filter_luma_strong_edge(
     )
     if any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255 for value in values):
         raise DeblockingError("luma strong-edge filter inputs are invalid")
+    return _filter_luma_strong_edge_validated(samples, alpha, beta)
+
+
+def _filter_luma_strong_edge_validated(
+    samples: LumaStrongEdgeSamples, alpha: int, beta: int
+) -> LumaEdgeSamples:
 
     strong_limit = (alpha >> 2) + 2
     alpha_passes = abs(samples.p0 - samples.q0) < strong_limit
@@ -204,10 +217,10 @@ _LUMA_ALPHA_TABLE = (
     203, 226, 255, 255,
 )
 _LUMA_BETA_TABLE = (
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7,
     8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
-    16, 16, 17, 18,
+    16, 16, 17, 17, 18, 18,
 )
 _LUMA_TC0_TABLE = (
     (
@@ -221,9 +234,9 @@ _LUMA_TC0_TABLE = (
         11, 12, 13, 15, 17,
     ),
     (
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1,
-        1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13,
-        14, 16, 18, 20, 23, 25,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 23, 25,
     ),
 )
 
@@ -238,6 +251,13 @@ def lookup_luma_deblocking_thresholds(index_a: int, index_b: int) -> LumaDeblock
         or not 0 <= index_b <= 51
     ):
         raise DeblockingError("luma deblocking table index is outside [0,51]")
+    return _lookup_luma_deblocking_thresholds_cached(index_a, index_b)
+
+
+@lru_cache(maxsize=2704)
+def _lookup_luma_deblocking_thresholds_cached(
+    index_a: int, index_b: int
+) -> LumaDeblockingThresholds:
     return LumaDeblockingThresholds(_LUMA_ALPHA_TABLE[index_a], _LUMA_BETA_TABLE[index_b])
 
 
@@ -273,6 +293,19 @@ def should_filter_luma_edge(
         or not 0 <= thresholds.beta <= 255
     ):
         raise DeblockingError("luma edge-filter inputs are invalid")
+    return _should_filter_luma_edge_validated(
+        p0, q0, p1, q1, boundary_strength, thresholds
+    )
+
+
+def _should_filter_luma_edge_validated(
+    p0: int,
+    q0: int,
+    p1: int,
+    q1: int,
+    boundary_strength: int,
+    thresholds: LumaDeblockingThresholds,
+) -> bool:
     if boundary_strength == 0:
         return False
     return (
@@ -319,6 +352,17 @@ def apply_luma_deblocking_edge(
     if not 0 <= boundary_strength <= 4:
         raise DeblockingError("luma deblocking boundary strength is outside [0,4]")
 
+    return _apply_luma_deblocking_edge_validated(
+        samples, boundary_strength, parameters, slice_boundary
+    )
+
+
+def _apply_luma_deblocking_edge_validated(
+    samples: LumaStrongEdgeSamples,
+    boundary_strength: int,
+    parameters: LumaDeblockingParameters,
+    slice_boundary: bool,
+) -> LumaEdgeSamples:
     unchanged = LumaEdgeSamples(
         samples.p0, samples.p1, samples.p2, samples.q0, samples.q1, samples.q2
     )
@@ -332,8 +376,10 @@ def apply_luma_deblocking_edge(
     ):
         return unchanged
 
-    thresholds = lookup_luma_deblocking_thresholds(parameters.index_a, parameters.index_b)
-    if not should_filter_luma_edge(
+    thresholds = _lookup_luma_deblocking_thresholds_cached(
+        parameters.index_a, parameters.index_b
+    )
+    if not _should_filter_luma_edge_validated(
         samples.p0,
         samples.q0,
         samples.p1,
@@ -343,9 +389,47 @@ def apply_luma_deblocking_edge(
     ):
         return unchanged
     if boundary_strength == 4:
-        return filter_luma_strong_edge(samples, thresholds.alpha, thresholds.beta)
-    tc0 = lookup_luma_tc0(parameters.index_a, boundary_strength)
-    return filter_luma_weak_edge(unchanged, thresholds.beta, tc0)
+        return _filter_luma_strong_edge_validated(
+            samples, thresholds.alpha, thresholds.beta
+        )
+    tc0 = _LUMA_TC0_TABLE[boundary_strength - 1][parameters.index_a]
+    return _filter_luma_weak_edge_validated(unchanged, thresholds.beta, tc0)
+
+
+def apply_chroma_deblocking_edge(
+    samples: ChromaEdgeSamples,
+    boundary_strength: int,
+    parameters: LumaDeblockingParameters,
+    slice_boundary: bool,
+) -> ChromaEdgeSamples:
+    if (
+        not isinstance(samples, ChromaEdgeSamples)
+        or not isinstance(parameters, LumaDeblockingParameters)
+        or not isinstance(parameters.mode, LumaDeblockingMode)
+        or not isinstance(slice_boundary, bool)
+        or isinstance(boundary_strength, bool)
+        or not isinstance(boundary_strength, int)
+        or not 0 <= boundary_strength <= 4
+    ):
+        raise DeblockingError("chroma deblocking edge inputs are invalid")
+    filter_chroma_weak_edge(samples, 0)
+    thresholds = lookup_luma_deblocking_thresholds(parameters.index_a, parameters.index_b)
+    if (
+        parameters.mode is LumaDeblockingMode.DISABLED
+        or (parameters.mode is LumaDeblockingMode.ALL_EXCEPT_SLICE_BOUNDARIES and slice_boundary)
+        or not should_filter_luma_edge(
+            samples.p0, samples.q0, samples.p1, samples.q1, boundary_strength, thresholds
+        )
+    ):
+        return samples
+    if boundary_strength == 4:
+        return ChromaEdgeSamples(
+            (2 * samples.p1 + samples.p0 + samples.q1 + 2) >> 2,
+            samples.p1,
+            (2 * samples.q1 + samples.q0 + samples.p1 + 2) >> 2,
+            samples.q1,
+        )
+    return filter_chroma_weak_edge(samples, lookup_luma_tc0(parameters.index_a, boundary_strength))
 
 
 def apply_luma_deblocking_edge_segment(
@@ -381,6 +465,17 @@ def apply_luma_deblocking_plane_edge_segment(
         or any(not isinstance(value, int) or isinstance(value, bool) for value in values)
         or not isinstance(vertical, bool)
         or not isinstance(slice_boundary, bool)
+        or not isinstance(boundary_strength, int)
+        or isinstance(boundary_strength, bool)
+        or not 0 <= boundary_strength <= 4
+        or not isinstance(parameters, LumaDeblockingParameters)
+        or not isinstance(parameters.mode, LumaDeblockingMode)
+        or not isinstance(parameters.index_a, int)
+        or isinstance(parameters.index_a, bool)
+        or not isinstance(parameters.index_b, int)
+        or isinstance(parameters.index_b, bool)
+        or not 0 <= parameters.index_a <= 51
+        or not 0 <= parameters.index_b <= 51
         or width <= 0
         or height <= 0
         or stride < width
@@ -395,6 +490,22 @@ def apply_luma_deblocking_plane_edge_segment(
     elif width < 4 or height < 8 or x > width - 4 or y < 4 or y > height - 4:
         raise DeblockingError("luma deblocking plane layout or edge coordinates are invalid")
 
+    _apply_luma_deblocking_plane_edge_segment_validated(
+        plane, width, stride, x, y, vertical, boundary_strength, parameters, slice_boundary
+    )
+
+
+def _apply_luma_deblocking_plane_edge_segment_validated(
+    plane: bytearray,
+    width: int,
+    stride: int,
+    x: int,
+    y: int,
+    vertical: bool,
+    boundary_strength: int,
+    parameters: LumaDeblockingParameters,
+    slice_boundary: bool,
+) -> None:
     edge_samples = []
     for lane in range(4):
         q0_index = (y + lane) * stride + x if vertical else y * stride + x + lane
@@ -425,8 +536,11 @@ def apply_luma_deblocking_plane_edge_segment(
                 )
             )
 
-    filtered = apply_luma_deblocking_edge_segment(
-        edge_samples, boundary_strength, parameters, slice_boundary
+    filtered = tuple(
+        _apply_luma_deblocking_edge_validated(
+            samples, boundary_strength, parameters, slice_boundary
+        )
+        for samples in edge_samples
     )
     for lane, result in enumerate(filtered):
         q0_index = (y + lane) * stride + x if vertical else y * stride + x + lane
@@ -498,10 +612,9 @@ def apply_luma_deblocking_plane_macroblock_edge(
     for segment, boundary_strength in enumerate(boundary_strengths):
         segment_x = x if vertical else x + 4 * segment
         segment_y = y + 4 * segment if vertical else y
-        apply_luma_deblocking_plane_edge_segment(
+        _apply_luma_deblocking_plane_edge_segment_validated(
             plane,
             width,
-            height,
             stride,
             segment_x,
             segment_y,
@@ -784,6 +897,140 @@ def luma_inter_prediction_differs(
     return not (direct_match or swapped_match)
 
 
+@dataclass(frozen=True)
+class PictureDeblockingMacroblock:
+    qpy: int
+    intra: bool
+    transform_size_8x8: bool = False
+    nonzero: tuple[bool, ...] = (False,) * 16
+    predictions: tuple[tuple["LumaPredictionVector", ...], ...] = ((),) * 16
+    slice_id: int = 0
+    disable_idc: int = 0
+    alpha_offset_div2: int = 0
+    beta_offset_div2: int = 0
+    chroma_qp_offsets: tuple[int, int] = (0, 0)
+
+
+def deblock_yuv420_picture(
+    frame: "Yuv420Frame",
+    macroblocks: Sequence[PictureDeblockingMacroblock],
+    *,
+    timeout_check: Callable[[], None] | None = None,
+) -> "Yuv420Frame":
+    if timeout_check is not None and not callable(timeout_check):
+        raise DeblockingError("picture deblocking timeout check must be callable")
+    if frame.width % 16 or frame.height % 16 or frame.width <= 0 or frame.height <= 0:
+        raise DeblockingError("picture deblocking requires complete coded macroblocks")
+    width_in_mbs = frame.width // 16
+    if len(macroblocks) != width_in_mbs * (frame.height // 16):
+        raise DeblockingError("picture deblocking macroblock metadata is incomplete")
+    qpc = []
+    for block in macroblocks:
+        if (
+            not isinstance(block, PictureDeblockingMacroblock)
+            or not isinstance(block.intra, bool)
+            or not isinstance(block.transform_size_8x8, bool)
+            or len(block.nonzero) != 16 or len(block.predictions) != 16
+            or any(not isinstance(flag, bool) for flag in block.nonzero)
+            or len(block.chroma_qp_offsets) != 2
+        ):
+            raise DeblockingError("picture deblocking macroblock metadata is invalid")
+        derive_luma_deblocking_parameters(
+            block.qpy, block.qpy, block.disable_idc, block.alpha_offset_div2, block.beta_offset_div2
+        )
+        for prediction in block.predictions:
+            luma_inter_prediction_differs(prediction, prediction)
+        qpc.append(tuple(derive_chroma_qpc(block.qpy, offset) for offset in block.chroma_qp_offsets))
+    planes = []
+    for plane, width, height, stride in (
+        (frame.y, frame.width, frame.height, frame.y_stride),
+        (frame.u, frame.width // 2, frame.height // 2, frame.u_stride),
+        (frame.v, frame.width // 2, frame.height // 2, frame.v_stride),
+    ):
+        if not _valid_yuv_plane(plane, width, height, stride):
+            raise DeblockingError("picture deblocking plane layout is invalid")
+        planes.append(bytearray(b"".join(plane[row * stride:row * stride + width] for row in range(height))))
+
+    for address, current in enumerate(macroblocks):
+        if timeout_check is not None:
+            timeout_check()
+        if current.disable_idc == 1:
+            continue
+        origin_x = (address % width_in_mbs) * 16
+        origin_y = (address // width_in_mbs) * 16
+        for vertical in (True, False):
+            for edge in (0, 4, 8, 12):
+                if edge == 0 and (origin_x if vertical else origin_y) == 0:
+                    continue
+                if edge in (4, 12) and current.transform_size_8x8:
+                    continue
+                neighbor_address = address - (1 if vertical else width_in_mbs) if edge == 0 else address
+                neighbor = macroblocks[neighbor_address]
+                slice_boundary = current.slice_id != neighbor.slice_id
+                parameters = derive_luma_deblocking_parameters(
+                    neighbor.qpy, current.qpy, current.disable_idc,
+                    current.alpha_offset_div2, current.beta_offset_div2,
+                )
+                boundary_strengths = []
+                for segment in range(4):
+                    block_x, block_y = (edge // 4, segment) if vertical else (segment, edge // 4)
+                    index_q = block_y * 4 + block_x
+                    index_p = (block_y * 4 + 3 if vertical else 12 + block_x) if edge == 0 else index_q - (1 if vertical else 4)
+                    strength = derive_luma_boundary_strength(
+                        edge == 0, current.intra or neighbor.intra,
+                        current.nonzero[index_q] or neighbor.nonzero[index_p],
+                        luma_inter_prediction_differs(neighbor.predictions[index_p], current.predictions[index_q]),
+                    )
+                    if (
+                        parameters.mode is LumaDeblockingMode.DISABLED
+                        or (
+                            parameters.mode is LumaDeblockingMode.ALL_EXCEPT_SLICE_BOUNDARIES
+                            and slice_boundary
+                        )
+                    ):
+                        strength = 0
+                    boundary_strengths.append(strength)
+                if any(boundary_strengths):
+                    edge_x = origin_x + edge if vertical else origin_x
+                    edge_y = origin_y if vertical else origin_y + edge
+                    apply_luma_deblocking_plane_macroblock_edge(
+                        planes[0],
+                        frame.width,
+                        frame.height,
+                        frame.width,
+                        edge_x,
+                        edge_y,
+                        vertical,
+                        boundary_strengths,
+                        parameters,
+                        slice_boundary,
+                    )
+                if edge % 8:
+                    continue
+                for segment, strength in enumerate(boundary_strengths):
+                    if strength == 0:
+                        continue
+                    x = origin_x + (edge if vertical else segment * 4)
+                    y = origin_y + (segment * 4 if vertical else edge)
+                    for component in range(2):
+                        chroma_parameters = derive_luma_deblocking_parameters(
+                            qpc[neighbor_address][component], qpc[address][component], current.disable_idc,
+                            current.alpha_offset_div2, current.beta_offset_div2,
+                        )
+                        stride = frame.width // 2
+                        step = 1 if vertical else stride
+                        for lane in range(2):
+                            index = (y // 2 + lane) * stride + x // 2 if vertical else (y // 2) * stride + x // 2 + lane
+                            plane = planes[component + 1]
+                            samples = ChromaEdgeSamples(plane[index-step], plane[index-2*step], plane[index], plane[index+step])
+                            filtered = apply_chroma_deblocking_edge(samples, strength, chroma_parameters, slice_boundary)
+                            plane[index-step], plane[index] = filtered.p0, filtered.q0
+    return Yuv420Frame(
+        frame.width, frame.height, frame.width, frame.width // 2, frame.width // 2,
+        bytes(planes[0]), bytes(planes[1]), bytes(planes[2]),
+    )
+
+
 def derive_luma_deblocking_parameters(
     qp_p: int,
     qp_q: int,
@@ -808,6 +1055,23 @@ def derive_luma_deblocking_parameters(
         or not -6 <= slice_beta_offset_div2 <= 6
     ):
         raise DeblockingError("luma deblocking parameters are invalid")
+    return _derive_luma_deblocking_parameters_cached(
+        qp_p,
+        qp_q,
+        disable_deblocking_filter_idc,
+        slice_alpha_c0_offset_div2,
+        slice_beta_offset_div2,
+    )
+
+
+@lru_cache(maxsize=4096)
+def _derive_luma_deblocking_parameters_cached(
+    qp_p: int,
+    qp_q: int,
+    disable_deblocking_filter_idc: int,
+    slice_alpha_c0_offset_div2: int,
+    slice_beta_offset_div2: int,
+) -> LumaDeblockingParameters:
     mode = (
         LumaDeblockingMode.ALL_EDGES,
         LumaDeblockingMode.DISABLED,
@@ -929,8 +1193,6 @@ class POCType0State:
             self.previous_pic_order_cnt_msb = current_msb
             self.previous_pic_order_cnt_lsb = pic_order_cnt_lsb
         return min(top_field_order_cnt, bottom_field_order_cnt)
-
-
 @dataclass
 class POCType12State:
     previous_frame_num: int = 0
@@ -1090,6 +1352,8 @@ class Yuv420Frame:
             raise ValueError("reference picture frame layout is invalid or truncated")
         if len(plane) < stride * height:
             raise ValueError("reference picture frame layout is invalid or truncated")
+        if stride == width and isinstance(plane, bytes) and len(plane) == width * height:
+            return plane
         return b"".join(plane[row * stride : row * stride + width] for row in range(height))
 
     def luma_plane_bytes(self) -> bytes:
@@ -1338,6 +1602,21 @@ class ReferencePictureBuffer:
         self._motion_fields.pop(identifier, None)
         return removed
 
+    def set_long_term_frame_idx(self, identifier: int, frame_idx: Optional[int]) -> bool:
+        picture = self._pictures.get(identifier)
+        if picture is None:
+            return False
+        self._pictures[identifier] = DecodedReferencePicture(
+            ReferencePicture(
+                picture.reference.identifier,
+                picture.reference.frame_num,
+                picture.reference.picture_order_cnt,
+                frame_idx,
+            ),
+            picture.frame,
+        )
+        return True
+
     def clear(self) -> None:
         self._pictures.clear()
         self._motion_fields.clear()
@@ -1487,6 +1766,8 @@ def gather_luma_quarter_sample_neighborhood(
     stride: int,
     x_int: int,
     y_int: int,
+    *,
+    timeout_check: Callable[[], None] | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Gather a stride-aware 6x6 luma neighborhood with per-coordinate edge clipping."""
     integer_values = (width, height, stride, x_int, y_int)
@@ -1497,13 +1778,31 @@ def gather_luma_quarter_sample_neighborhood(
     required_length = (height - 1) * stride + width
     if len(plane) < required_length:
         raise InterPredictionError("luma reference plane layout is invalid or truncated")
-    if any(
-        not isinstance(sample, int)
-        or isinstance(sample, bool)
-        or not 0 <= sample <= 255
-        for sample in plane[:required_length]
-    ):
-        raise InterPredictionError("luma reference plane must contain 8-bit samples")
+    if timeout_check is not None and not callable(timeout_check):
+        raise InterPredictionError("luma timeout check must be callable")
+    if isinstance(plane, bytes):
+        if timeout_check is not None:
+            for _ in range(0, required_length, 4096):
+                timeout_check()
+    elif timeout_check is None:
+        if any(
+            not isinstance(sample, int)
+            or isinstance(sample, bool)
+            or not 0 <= sample <= 255
+            for sample in plane[:required_length]
+        ):
+            raise InterPredictionError("luma reference plane must contain 8-bit samples")
+    else:
+        for chunk_start in range(0, required_length, 4096):
+            timeout_check()
+            chunk_end = min(chunk_start + 4096, required_length)
+            if any(
+                not isinstance(plane[index], int)
+                or isinstance(plane[index], bool)
+                or not 0 <= plane[index] <= 255
+                for index in range(chunk_start, chunk_end)
+            ):
+                raise InterPredictionError("luma reference plane must contain 8-bit samples")
 
     return tuple(
         tuple(
@@ -1568,6 +1867,47 @@ def select_luma_fractional_sample(
     return samples[x_frac_l][y_frac_l]
 
 
+class _LumaFractionalSampleCache:
+    __slots__ = ("plane", "width", "height", "stride", "timeout_check", "_grids")
+
+    def __init__(
+        self,
+        plane: Sequence[int],
+        width: int,
+        height: int,
+        stride: int,
+        timeout_check: Callable[[], None] | None = None,
+    ):
+        self.plane = plane
+        self.width = width
+        self.height = height
+        self.stride = stride
+        self.timeout_check = timeout_check
+        self._grids = {}
+
+    def sample(self, x_int: int, y_int: int, x_frac_l: int, y_frac_l: int) -> int:
+        if self.timeout_check is not None:
+            self.timeout_check()
+        key = (
+            min(max(x_int, -3), self.width + 1),
+            min(max(y_int, -3), self.height + 1),
+        )
+        grid = self._grids.get(key)
+        if grid is None:
+            neighborhood = gather_luma_quarter_sample_neighborhood(
+                self.plane,
+                self.width,
+                self.height,
+                self.stride,
+                key[0],
+                key[1],
+                timeout_check=self.timeout_check,
+            )
+            grid = interpolate_luma_quarter_sample_grid(neighborhood)
+            self._grids[key] = grid
+        return select_luma_fractional_sample(grid, x_frac_l, y_frac_l)
+
+
 def interpolate_luma_fractional_sample(
     plane: Sequence[int],
     width: int,
@@ -1577,10 +1917,18 @@ def interpolate_luma_fractional_sample(
     y_int: int,
     x_frac_l: int,
     y_frac_l: int,
+    *,
+    timeout_check: Callable[[], None] | None = None,
 ) -> int:
     """Interpolate and select one luma sample from a reference plane."""
     neighborhood = gather_luma_quarter_sample_neighborhood(
-        plane, width, height, stride, x_int, y_int
+        plane,
+        width,
+        height,
+        stride,
+        x_int,
+        y_int,
+        timeout_check=timeout_check,
     )
     grid = interpolate_luma_quarter_sample_grid(neighborhood)
     return select_luma_fractional_sample(grid, x_frac_l, y_frac_l)
@@ -2471,7 +2819,7 @@ def predict_luma_intra8x8_diagonal_down_right(
     prediction = [0] * 64
     for row in range(8):
         for column in range(8):
-            position = column - row
+            position = column - row - 1
             prediction[row * 8 + column] = (
                 reference_at(position - 1)
                 + 2 * reference_at(position)
@@ -2514,28 +2862,22 @@ def predict_luma_intra8x8_vertical_right(
             phase = 2 * column - row
             if phase >= 0 and phase % 2 == 0:
                 center = phase // 2
+                value = (top_reference_at(center - 1) + top_reference_at(center) + 1) >> 1
+            elif phase >= 0:
+                center = (phase - 1) // 2
                 value = (
                     top_reference_at(center - 1)
                     + 2 * top_reference_at(center)
                     + top_reference_at(center + 1)
                     + 2
                 ) >> 2
-            elif phase >= 0:
-                center = (phase - 1) // 2
-                value = (
-                    top_reference_at(center - 1) + top_reference_at(center) + 1
-                ) >> 1
             elif phase == -1:
-                value = (left[0] + top_left + 1) >> 1
-            elif phase == -2:
                 value = (left[0] + 2 * top_left + top[0] + 2) >> 2
-            elif -phase % 2 == 1:
-                center = (-phase - 3) // 2
-                value = (left[center] + left[center + 1] + 1) >> 1
             else:
-                center = (-phase - 4) // 2
+                center = -phase - 2
                 value = (
-                    left[center] + 2 * left[center + 1] + left[center + 2] + 2
+                    (top_left if center == 0 else left[center - 1])
+                    + 2 * left[center] + left[center + 1] + 2
                 ) >> 2
             prediction[row * 8 + column] = value
     return prediction
@@ -2613,7 +2955,8 @@ def predict_luma_intra8x8_horizontal_up(left: Sequence[int]) -> list[int]:
             "horizontal-up 8x8 prediction requires sixteen 8-bit filtered left samples"
         )
 
-    vertical_prediction = predict_luma_intra8x8_vertical_left(left)
+    extended_left = list(left[:8]) + [left[7]] * 8
+    vertical_prediction = predict_luma_intra8x8_vertical_left(extended_left)
     return [
         vertical_prediction[column * 8 + row]
         for row in range(8)

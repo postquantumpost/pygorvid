@@ -360,6 +360,7 @@ pub struct CabacPBMacroblockLayerInput {
     pub left_skipped: bool,
     pub top_skipped: bool,
     pub b_skip_input: Option<CabacBDirectMacroblockInput>,
+    pub intra_input: Option<CabacIIntraMacroblockInput>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -367,6 +368,7 @@ pub enum CabacPBMacroblockPrediction {
     PSkip(CabacPSkipMacroblockResult),
     BSkip(CabacBDirectMacroblockResult),
     Inter(CabacInterMacroblockResult),
+    Intra(CabacIIntraMacroblockResult),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -466,6 +468,9 @@ pub fn derive_cabac_macroblock_edge_samples(
     let (luma, cb, cr) = match &neighbor.result {
         CabacSliceMacroblockResult::Intra(decoded) => (&decoded.luma, &decoded.cb, &decoded.cr),
         CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+            CabacPBMacroblockPrediction::Intra(decoded) => {
+                (&decoded.luma, &decoded.cb, &decoded.cr)
+            }
             CabacPBMacroblockPrediction::PSkip(decoded) => {
                 (&decoded.luma, &decoded.cb, &decoded.cr)
             }
@@ -768,6 +773,7 @@ fn cabac_history_macroblock_skip_direct(
         CabacSliceMacroblockResult::Intra(_) => (false, false),
         CabacSliceMacroblockResult::Inter(layer) => {
             let direct = match &layer.macroblock {
+                CabacPBMacroblockPrediction::Intra(_) => false,
                 CabacPBMacroblockPrediction::BSkip(_) => true,
                 CabacPBMacroblockPrediction::Inter(decoded) => {
                     b_slice && decoded.macroblock_type == 0
@@ -795,12 +801,28 @@ fn cabac_history_partition_fact(
                         intra: true,
                         ..CabacInterNeighbor::default()
                     },
-                    None,
+                    Some(crate::MotionVectorCandidate {
+                        reference_index: None,
+                        vector: crate::MotionVector::default(),
+                    }),
                 );
             }
             CabacSliceMacroblockResult::Inter(layer) => {
                 skipped = layer.skipped;
                 match &layer.macroblock {
+                    CabacPBMacroblockPrediction::Intra(_) => {
+                        return (
+                            CabacInterNeighbor {
+                                available: true,
+                                intra: true,
+                                ..CabacInterNeighbor::default()
+                            },
+                            Some(crate::MotionVectorCandidate {
+                                reference_index: None,
+                                vector: crate::MotionVector::default(),
+                            }),
+                        );
+                    }
                     CabacPBMacroblockPrediction::PSkip(decoded) => (
                         [true, false],
                         [decoded.reference_index, -1],
@@ -836,16 +858,23 @@ fn cabac_history_partition_fact(
     let reference_index = if active {
         reference_indices[list_index]
     } else {
-        0
+        -1
     };
-    let motion_vector_difference = motion_differences[list_index];
-    let candidate = if active && reference_index >= 0 {
+    let motion_vector_difference = if active {
+        motion_differences[list_index]
+    } else {
+        crate::MotionVector::default()
+    };
+    let candidate = if reference_index >= 0 {
         Some(crate::MotionVectorCandidate {
             reference_index: Some(reference_index),
             vector: motion_vectors[list_index],
         })
     } else {
-        None
+        Some(crate::MotionVectorCandidate {
+            reference_index: None,
+            vector: crate::MotionVector::default(),
+        })
     };
     (
         CabacInterNeighbor {
@@ -1138,7 +1167,7 @@ fn cabac_spatial_b_direct_prediction(
         if reference_index as usize >= references.len() {
             return Err(invalid("B_Direct spatial reference index is unavailable"));
         }
-        if !direct_zero && reference_index == 0 && colocated_zero {
+        if direct_zero || (reference_index == 0 && colocated_zero) {
             continue;
         }
         let state = list_neighbors[list_index];
@@ -2392,18 +2421,19 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 value.reference_index == Some(0) && value.vector == crate::MotionVector::default()
             })
         };
-        if let (Some(left), Some(top)) = (left, top) {
-            if !zero_ref_vector(Some(left)) && !zero_ref_vector(Some(top)) {
-                motion_vector = crate::reconstruction::predict_motion_vector(
-                    0,
-                    Some(left),
-                    Some(top),
-                    input.top_right_candidate,
-                    input.top_left_candidate,
-                );
-            }
+        if input.left_available
+            && input.top_available
+            && !zero_ref_vector(left)
+            && !zero_ref_vector(top)
+        {
+            motion_vector = crate::reconstruction::predict_motion_vector(
+                0,
+                left,
+                top,
+                input.top_right_candidate,
+                input.top_left_candidate,
+            );
         }
-
         let reference = input.reference_frame;
         let ref_y = reference.luma_plane_bytes()?;
         let ref_cb = reference.u_plane_bytes()?;
@@ -3183,6 +3213,17 @@ impl<'a> CabacArithmeticDecoder<'a> {
         builder: &mut crate::Yuv420FrameBuilder,
         address: usize,
     ) -> io::Result<CabacIIntraMacroblockResult> {
+        self.decode_i_intra_macroblock_with_type(input, contexts, builder, address, None)
+    }
+
+    fn decode_i_intra_macroblock_with_type(
+        &mut self,
+        input: CabacIIntraMacroblockInput,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        builder: &mut crate::Yuv420FrameBuilder,
+        address: usize,
+        predecoded_type: Option<u8>,
+    ) -> io::Result<CabacIIntraMacroblockResult> {
         if !(0..=51).contains(&input.previous_qpy) {
             return Err(invalid("previous QPY is outside [0,51]"));
         }
@@ -3203,21 +3244,28 @@ impl<'a> CabacArithmeticDecoder<'a> {
             trial_contexts[9],
             trial_contexts[10],
         ];
-        let mb_type = trial.decode_i_intra_mb_type(
-            input.slice_type,
-            &mut mb_type_contexts,
-            input.left_available,
-            input.left_intra16_or_pcm,
-            input.top_available,
-            input.top_intra16_or_pcm,
-        )?;
-        trial_contexts[3..11].copy_from_slice(&mb_type_contexts);
+        let mb_type = if let Some(mb_type) = predecoded_type {
+            if mb_type > 25 {
+                return Err(invalid("predecoded intra mb_type is outside [0,25]"));
+            }
+            mb_type
+        } else {
+            let mb_type = trial.decode_i_intra_mb_type(
+                input.slice_type,
+                &mut mb_type_contexts,
+                input.left_available,
+                input.left_intra16_or_pcm,
+                input.top_available,
+                input.top_intra16_or_pcm,
+            )?;
+            trial_contexts[3..11].copy_from_slice(&mb_type_contexts);
+            mb_type
+        };
         let mut result = CabacIIntraMacroblockResult {
             macroblock_type: mb_type,
             qpy: input.previous_qpy,
             ..CabacIIntraMacroblockResult::default()
         };
-
         if mb_type == 25 {
             let mut y_block = [0_u8; 256];
             let mut cb_block = [0_u8; 64];
@@ -4012,7 +4060,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let skipped = match &skip_prediction {
             CabacPBMacroblockPrediction::PSkip(result) => result.skipped,
             CabacPBMacroblockPrediction::BSkip(result) => result.skipped,
-            CabacPBMacroblockPrediction::Inter(_) => false,
+            CabacPBMacroblockPrediction::Inter(_) | CabacPBMacroblockPrediction::Intra(_) => false,
         };
         if skipped {
             self.bits = trial.bits;
@@ -4025,10 +4073,11 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 macroblock: skip_prediction,
             });
         }
-        let inter_result = trial.decode_inter_macroblock_inner(
+        let macroblock = trial.decode_inter_macroblock_inner(
             inter_input,
             Some(input.residual_input),
             input.b_skip_input.as_ref(),
+            input.intra_input,
             &mut trial_contexts,
             builder,
             address,
@@ -4040,7 +4089,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         *contexts = trial_contexts;
         Ok(CabacPBMacroblockLayerResult {
             skipped: false,
-            macroblock: CabacPBMacroblockPrediction::Inter(inter_result),
+            macroblock,
         })
     }
 
@@ -4069,6 +4118,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let mut decoded = Vec::new();
         let mut macroblock_address = first_macroblock_address;
         loop {
+            let bit_offset_before = self.bits.bit_offset();
+            let range_before = self.code_range;
+            let offset_before = self.code_offset;
             let macroblock_input = input_provider(macroblock_address, &decoded)?;
             let macroblock_result = if slice_type % 5 == 2 {
                 let CabacSliceMacroblockInput::Intra(input) = macroblock_input else {
@@ -4089,18 +4141,44 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 if input.inter_input.slice_type % 5 != slice_type % 5 {
                     return Err(invalid("macroblock slice type does not match slice_data"));
                 }
-                CabacSliceMacroblockResult::Inter(self.decode_p_b_macroblock_layer(
-                    input,
-                    contexts,
-                    builder,
-                    macroblock_address,
-                )?)
+                let layer =
+                    self.decode_p_b_macroblock_layer(input, contexts, builder, macroblock_address)?;
+                match layer.macroblock {
+                    CabacPBMacroblockPrediction::Intra(intra) => {
+                        CabacSliceMacroblockResult::Intra(intra)
+                    }
+                    _ => CabacSliceMacroblockResult::Inter(layer),
+                }
             };
             decoded.push(CabacDecodedSliceMacroblock {
                 address: macroblock_address,
                 result: macroblock_result,
             });
-            if self.decode_terminate_bin()? {
+            let end_of_slice = self.decode_terminate_bin()?;
+            if (347..=350).contains(&macroblock_address) {
+                eprintln!(
+                    "mb={macroblock_address} bits={bit_offset_before}->{} range={range_before}->{} offset={offset_before}->{} eos={end_of_slice} kind={:?}",
+                    self.bits.bit_offset(),
+                    self.code_range,
+                    self.code_offset,
+                    decoded.last().map(|entry| match &entry.result {
+                        CabacSliceMacroblockResult::Intra(macroblock) => {
+                            format!("intra:{}", macroblock.macroblock_type)
+                        }
+                        CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+                            CabacPBMacroblockPrediction::PSkip(_) => "p-skip".to_owned(),
+                            CabacPBMacroblockPrediction::BSkip(_) => "b-skip".to_owned(),
+                            CabacPBMacroblockPrediction::Inter(macroblock) => {
+                                format!("inter:{}", macroblock.macroblock_type)
+                            }
+                            CabacPBMacroblockPrediction::Intra(macroblock) => {
+                                format!("wrapped-intra:{}", macroblock.macroblock_type)
+                            }
+                        },
+                    })
+                );
+            }
+            if end_of_slice {
                 return Ok(decoded);
             }
             macroblock_address = macroblock_address
@@ -4120,7 +4198,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
         builder: &mut crate::Yuv420FrameBuilder,
         address: usize,
     ) -> io::Result<CabacInterMacroblockResult> {
-        self.decode_inter_macroblock_inner(input, None, None, contexts, builder, address)
+        match self
+            .decode_inter_macroblock_inner(input, None, None, None, contexts, builder, address)?
+        {
+            CabacPBMacroblockPrediction::Inter(result) => Ok(result),
+            _ => Err(invalid("inter macroblock decoded an intra macroblock")),
+        }
     }
 
     /// Decodes a complete P/B macroblock layer, including CBP, QP, and residual reconstruction.
@@ -4132,14 +4215,18 @@ impl<'a> CabacArithmeticDecoder<'a> {
         builder: &mut crate::Yuv420FrameBuilder,
         address: usize,
     ) -> io::Result<CabacInterMacroblockResult> {
-        self.decode_inter_macroblock_inner(
+        match self.decode_inter_macroblock_inner(
             input,
             Some(residual_input),
+            None,
             None,
             contexts,
             builder,
             address,
-        )
+        )? {
+            CabacPBMacroblockPrediction::Inter(result) => Ok(result),
+            _ => Err(invalid("inter macroblock decoded an intra macroblock")),
+        }
     }
 
     fn decode_inter_macroblock_inner(
@@ -4147,10 +4234,11 @@ impl<'a> CabacArithmeticDecoder<'a> {
         input: CabacInterMacroblockInput,
         residual_input: Option<CabacInterMacroblockResidualInput>,
         direct_input: Option<&CabacBDirectMacroblockInput>,
+        intra_input: Option<CabacIIntraMacroblockInput>,
         contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
         builder: &mut crate::Yuv420FrameBuilder,
         address: usize,
-    ) -> io::Result<CabacInterMacroblockResult> {
+    ) -> io::Result<CabacPBMacroblockPrediction> {
         if input.slice_type > 9 || !matches!(input.slice_type % 5, 0 | 1) {
             return Err(invalid("inter macroblock slice type is unsupported"));
         }
@@ -4194,6 +4282,24 @@ impl<'a> CabacArithmeticDecoder<'a> {
             input.top_b_skip_or_direct,
         )?;
         let is_b_slice = input.slice_type % 5 == 1;
+        let intra_type_start = if is_b_slice { 23 } else { 5 };
+        if macroblock_type >= intra_type_start {
+            let input = intra_input
+                .ok_or_else(|| invalid("P/B intra macroblock references are unavailable"))?;
+            let intra = trial.decode_i_intra_macroblock_with_type(
+                input,
+                &mut trial_contexts,
+                builder,
+                address,
+                Some(macroblock_type - intra_type_start),
+            )?;
+            self.bits = trial.bits;
+            self.code_range = trial.code_range;
+            self.code_offset = trial.code_offset;
+            self.terminated = trial.terminated;
+            *contexts = trial_contexts;
+            return Ok(CabacPBMacroblockPrediction::Intra(intra));
+        }
         let mut sub_types = Vec::new();
         if (!is_b_slice && matches!(macroblock_type, 3 | 4))
             || (is_b_slice && macroblock_type == 22)
@@ -4532,7 +4638,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
         *contexts = trial_contexts;
-        Ok(result)
+        Ok(CabacPBMacroblockPrediction::Inter(result))
     }
 
     fn decode_inter_residuals(
@@ -4687,7 +4793,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     input.luma_4x4_top_edge,
                 );
                 let (levels, coded) =
-                    self.decode_residual_block(0, cond_left, cond_top, contexts)?;
+                    self.decode_residual_block(2, cond_left, cond_top, contexts)?;
                 luma_coded_flags[block_index] = coded;
                 if !coded {
                     continue;
@@ -7328,6 +7434,51 @@ mod tests {
     }
 
     #[test]
+    fn p_skip_predictor_keeps_available_intra_neighbor_for_median() {
+        let mut decoder = decoder_with_state(&[0; 128], 510, 0);
+        let mut contexts = [CabacContextModel {
+            state_index: 63,
+            value_mps: false,
+        }; CABAC_CONTEXT_COUNT];
+        contexts[11..14]
+            .iter_mut()
+            .for_each(|model| model.value_mps = true);
+        let candidate = crate::MotionVectorCandidate {
+            reference_index: Some(0),
+            vector: crate::MotionVector { x: 8, y: 4 },
+        };
+        let input = CabacPSkipMacroblockInput {
+            slice_type: 0,
+            macroblock_x: 1,
+            macroblock_y: 1,
+            left_available: true,
+            left_skipped: false,
+            top_available: true,
+            top_skipped: false,
+            left_candidate: Some(candidate),
+            top_candidate: None,
+            top_right_candidate: None,
+            top_left_candidate: None,
+            reference_frame: crate::Yuv420Frame {
+                width: 32,
+                height: 32,
+                y_stride: 32,
+                u_stride: 16,
+                v_stride: 16,
+                y: vec![64; 32 * 32],
+                u: vec![96; 16 * 16],
+                v: vec![160; 16 * 16],
+            },
+        };
+        let mut builder = crate::Yuv420FrameBuilder::new(2, 2, 0, 0, 0, 0).unwrap();
+        let result = decoder
+            .decode_p_skip_macroblock(input, &mut contexts, &mut builder, 3)
+            .unwrap();
+        assert!(result.skipped);
+        assert_eq!(result.motion_vector, candidate.vector);
+    }
+
+    #[test]
     fn p_skip_macroblock_builder_failure_rolls_back_cabac_state() {
         let mut decoder = decoder_with_state(&[0; 128], 510, 0);
         let mut contexts = [CabacContextModel {
@@ -7720,10 +7871,10 @@ mod tests {
             (77, true),
             (81, false),
             (60, false),
-            (85, true),
-            (105, true),
-            (166, true),
-            (228, false),
+            (93, true),
+            (134, true),
+            (195, true),
+            (248, false),
         ] {
             encoder.encode_bin_string(
                 &mut encoder_contexts,
@@ -7733,9 +7884,9 @@ mod tests {
         }
         encoder.bypass(false);
         for (context_index, bit) in [
-            (86, false),
-            (87, false),
-            (85, false),
+            (94, false),
+            (95, false),
+            (93, false),
             (97, true),
             (149, true),
             (210, true),
@@ -8023,6 +8174,7 @@ mod tests {
             left_skipped: false,
             top_skipped: false,
             b_skip_input: None,
+            intra_input: None,
         };
         let mut builder = crate::Yuv420FrameBuilder::new(1, 1, 0, 0, 0, 0).unwrap();
         let result = decoder
@@ -8066,6 +8218,7 @@ mod tests {
             left_skipped: false,
             top_skipped: false,
             b_skip_input: Some(direct_input),
+            intra_input: None,
         };
         let mut builder = crate::Yuv420FrameBuilder::new(1, 1, 0, 0, 0, 0).unwrap();
         let result = decoder
@@ -8114,6 +8267,7 @@ mod tests {
             left_skipped: false,
             top_skipped: false,
             b_skip_input: None,
+            intra_input: None,
         };
         let data = encoder.data();
         let mut decoder = CabacArithmeticDecoder::new(&data).unwrap();
@@ -8195,6 +8349,7 @@ mod tests {
                     left_skipped: previous_was_skipped,
                     top_skipped: false,
                     b_skip_input: None,
+                    intra_input: None,
                 },
             ))
         };
@@ -8502,6 +8657,13 @@ mod tests {
         )
         .unwrap();
         assert!(b_state.left_b_skip_or_direct && b_state.top_b_skip_or_direct);
+        assert_eq!(
+            b_state.partition_neighbors.list1.top_right_candidate,
+            Some(crate::MotionVectorCandidate {
+                reference_index: None,
+                vector: crate::MotionVector::default(),
+            })
+        );
 
         let mut b_skip_history = history.clone();
         b_skip_history[4].result =
@@ -8567,6 +8729,29 @@ mod tests {
         assert_eq!(result.luma, [30; 256]);
         assert_eq!(result.cb, [30; 64]);
         assert_eq!(result.cr, [30; 64]);
+    }
+
+    #[test]
+    fn b_direct_spatial_direct_zero_forces_zero_motion_vectors() {
+        let candidate = crate::MotionVectorCandidate {
+            reference_index: Some(0),
+            vector: crate::MotionVector { x: 12, y: -8 },
+        };
+        let list_neighbors = CabacInterListNeighbors {
+            top_left_candidate: Some(candidate),
+            ..CabacInterListNeighbors::default()
+        };
+        let neighbors = CabacInterPartitionNeighbors {
+            list0: list_neighbors,
+            list1: list_neighbors,
+            ..CabacInterPartitionNeighbors::default()
+        };
+        let input = b_direct_input(vec![b_reference(10, 0)], vec![b_reference(90, 2)]);
+
+        let result = cabac_spatial_b_direct_prediction(&input, neighbors, 0, 0, false).unwrap();
+
+        assert_eq!(result.reference_indices, [0, 0]);
+        assert_eq!(result.motion_vectors, [crate::MotionVector::default(); 2]);
     }
 
     #[test]

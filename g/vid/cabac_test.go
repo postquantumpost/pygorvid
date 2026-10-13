@@ -3103,6 +3103,36 @@ func TestCABACDecodePSkipMacroblockPredictsNonzeroNeighborMotion(t *testing.T) {
 	}
 }
 
+func TestCABACDecodePSkipMacroblockPredictsWithAvailableIntraNeighbor(t *testing.T) {
+	contexts := [CABACContextCount]CABACContextModel{}
+	for index := range contexts {
+		contexts[index] = CABACContextModel{stateIndex: 63}
+	}
+	for index := 11; index < 14; index++ {
+		contexts[index].valueMPS = true
+	}
+	decoder, _ := NewCABACArithmeticDecoder(make([]byte, 128))
+	plane := make([]uint8, 32*32)
+	chroma := make([]uint8, 16*16)
+	reference := Yuv420Frame{Width: 32, Height: 32, YStride: 32, UStride: 16, VStride: 16, Y: plane, U: chroma, V: chroma}
+	left := MotionVectorCandidate{Available: true, RefIdx: 0, Vector: MotionVector{X: 8, Y: 4}}
+	topIntra := MotionVectorCandidate{Available: true, RefIdx: -1}
+	input := CABACPSkipMacroblockInput{
+		SliceType: 0, MacroblockX: 1, MacroblockY: 1,
+		LeftAvailable: true, TopAvailable: true,
+		Left: left, Top: topIntra,
+		ReferenceFrame: reference,
+	}
+	builder, _ := NewYuv420FrameBuilder(2, 2, 0, 0, 0, 0)
+	result, err := decoder.DecodePSkipMacroblock(input, &contexts, builder, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Skipped || result.MotionVector != left.Vector {
+		t.Fatalf("P_Skip MV = %+v; want available-neighbor predictor %+v", result.MotionVector, left.Vector)
+	}
+}
+
 func TestCABACDecodePSkipMacroblockBuilderFailureRollsBack(t *testing.T) {
 	contexts := [CABACContextCount]CABACContextModel{}
 	for index := range contexts {

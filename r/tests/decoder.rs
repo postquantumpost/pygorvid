@@ -2,10 +2,51 @@ use std::path::PathBuf;
 
 use pygorvid::{
     CabacDecodedSliceMacroblock, CabacInterMacroblockPartition, CabacInterMacroblockResult,
-    CabacPBMacroblockLayerResult, CabacPBMacroblockPrediction, CabacSliceMacroblockInput,
-    CabacSliceMacroblockResult, DecodeError, H264Decoder, MotionVector, PresentationOrderBuffer,
-    PresentationPicture, ReferencePicture, VideoSampleReader, Yuv420Frame, Yuv420FrameBuilder,
+    CabacPBMacroblockLayerResult, CabacPBMacroblockPrediction, CabacPSkipMacroblockResult,
+    CabacSliceMacroblockInput, CabacSliceMacroblockResult, DecodeError, H264Decoder, MotionVector,
+    PresentationOrderBuffer, PresentationPicture, ReferencePicture, VideoSampleReader, Yuv420Frame,
+    Yuv420FrameBuilder,
 };
+
+#[test]
+fn a_decoder_smoke_16x16() {
+    assert_decoder_smoke_fixture(
+        "decoder-smoke-16x16.mp4",
+        16,
+        [0xcabf755e2a6b7d56, 0x29631735ff370504],
+    );
+}
+
+#[test]
+fn b_decoder_smoke_64x64() {
+    assert_decoder_smoke_fixture(
+        "decoder-smoke-64x64.mp4",
+        64,
+        [0xdd69fba2006d59e0, 0x93ecf9bed15545a5],
+    );
+}
+
+fn assert_decoder_smoke_fixture(name: &str, dimension: usize, expected_hashes: [u64; 2]) {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../samples")
+        .join(name);
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    for (frame_index, expected_hash) in expected_hashes.into_iter().enumerate() {
+        let frame = decoder.decode_frame(frame_index as u64).unwrap();
+        assert_eq!(
+            (frame.width, frame.height),
+            (dimension, dimension),
+            "{name} frame {frame_index}"
+        );
+        let hash = [&frame.y, &frame.u, &frame.v]
+            .into_iter()
+            .flatten()
+            .fold(0xcbf29ce484222325_u64, |hash, sample| {
+                (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+            });
+        assert_eq!(hash, expected_hash, "{name} frame {frame_index} YUV");
+    }
+}
 
 #[test]
 fn h264_decoder_tracks_reader_state() {
@@ -188,17 +229,45 @@ fn decoder_reconstructs_complete_idr_row_against_unfiltered_reference() {
 
 #[test]
 fn decoder_assembles_complete_native_idr_picture() {
-    for (name, width, height, expected) in [(
-        "high42-1080p.mp4",
-        1920,
-        1080,
-        [0xb145f5f14c00f7d0, 0x9b481b664ec50ee2, 0x26868f6247d8e216],
-    )] {
+    for (name, width, height, expected) in [
+        (
+            "high42-1080p.mp4",
+            1920,
+            1080,
+            [0xb145f5f14c00f7d0, 0x9b481b664ec50ee2, 0x26868f6247d8e216],
+        ),
+        (
+            "high52-2160p.mp4",
+            3840,
+            2160,
+            [0x012e6eca5b23190d, 0xeddc31b90090f325, 0xeddc31b90090f325],
+        ),
+    ] {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../testdata/h264")
             .join(name);
         let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
-        let frame = decoder.decode_frame(0).unwrap();
+        let pictures = decoder.dependency_slice_pictures(0).unwrap();
+        let sps = &decoder.sequence_parameter_sets[0];
+        let mut builder = Yuv420FrameBuilder::new(
+            sps.coded_width as usize / 16,
+            sps.coded_height as usize / 16,
+            sps.frame_crop_left as usize,
+            sps.frame_crop_top as usize,
+            sps.frame_crop_right as usize,
+            sps.frame_crop_bottom as usize,
+        )
+        .unwrap();
+        for dependency_slice in &pictures[0] {
+            decoder
+                .decode_dependency_slice_data(dependency_slice, &mut builder, |address, history| {
+                    decoder
+                        .intra_macroblock_input_from_history(dependency_slice, address, history)
+                        .map(CabacSliceMacroblockInput::Intra)
+                })
+                .unwrap();
+        }
+        let frame = builder.finish().unwrap();
         assert_eq!((frame.width, frame.height), (width, height));
         assert_eq!(frame.y.len(), width * height);
         assert_eq!(frame.u.len(), width * height / 4);
@@ -209,8 +278,198 @@ fn decoder_assembles_complete_native_idr_picture() {
             })
         });
         assert_eq!(hashes, expected, "{name}: unfiltered IDR plane mismatch");
+    }
+}
+
+#[test]
+fn decoder_filtered_idr_matches_reference_planes() {
+    for (name, width, height, expected) in [
+        (
+            "high42-1080p.mp4",
+            1920,
+            1080,
+            [0x5336845088ae484d, 0x2340c7e52129a24b, 0xe6ca68150dff6267],
+        ),
+        (
+            "high52-2160p.mp4",
+            3840,
+            2160,
+            [0x012e6eca5b23190d, 0xeddc31b90090f325, 0xeddc31b90090f325],
+        ),
+    ] {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../testdata/h264")
+            .join(name);
+        let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+        let frame = decoder.decode_frame(0).unwrap();
+        assert_eq!((frame.width, frame.height), (width, height));
+        let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
+            plane.iter().fold(0xcbf29ce484222325_u64, |hash, sample| {
+                (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+            })
+        });
+        assert_eq!(hashes, expected, "{name}: filtered IDR plane mismatch");
         assert_eq!(decoder.decode_frame(0).unwrap(), frame);
     }
+}
+
+#[test]
+fn decoder_filtered_p_picture_matches_reference_planes() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high42-1080p.mp4");
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    let pictures = decoder.dependency_slice_pictures(3).unwrap();
+    for picture in &pictures {
+        for slice in picture {
+            eprintln!(
+                "sample={} nal_bytes={} data_bit_offset={} type={}",
+                slice.sample_index,
+                slice.nal_unit.len(),
+                slice.header.slice_data_bit_offset,
+                slice.header.slice_type % 5
+            );
+        }
+    }
+    let p_slice = &pictures[1][0];
+    let rbsp = pygorvid::ebsp_to_rbsp(&p_slice.nal_unit[1..]).unwrap();
+    let tail_start = 4 + 28_137_usize.div_ceil(8);
+    let tail = &rbsp[tail_start..];
+    eprintln!(
+        "P RBSP bytes={} tail_bytes={} tail_nonzero={} first_tail={:02x?} last_nonzero={:?}",
+        rbsp.len(),
+        tail.len(),
+        tail.iter().filter(|&&byte| byte != 0).count(),
+        &tail[..tail.len().min(16)],
+        tail.iter().rposition(|&byte| byte != 0)
+    );
+    let frame = decoder.decode_frame(3).unwrap();
+    assert_eq!((frame.width, frame.height), (1920, 1080));
+    let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
+        plane.iter().fold(0xcbf29ce484222325_u64, |hash, sample| {
+            (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+        })
+    });
+    assert_eq!(
+        hashes,
+        [0xa0513f65f6b02a72, 0xb0a2e9bbb5949342, 0x784053d21fb83a58,],
+        "filtered P-picture planes differ from the independent reference"
+    );
+    assert_eq!(
+        decoder
+            .reference_pictures()
+            .iter()
+            .map(|reference| reference.identifier)
+            .collect::<Vec<_>>(),
+        [0, 3]
+    );
+    assert_eq!(decoder.decode_frame(3).unwrap(), frame);
+}
+
+#[test]
+fn decoder_filtered_b_picture_matches_reference_planes() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high42-1080p.mp4");
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    let frame = decoder.decode_frame(1).unwrap();
+    assert_eq!((frame.width, frame.height), (1920, 1080));
+    let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
+        plane.iter().fold(0xcbf29ce484222325_u64, |hash, sample| {
+            (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+        })
+    });
+    assert_eq!(
+        hashes,
+        [0xa99464d2dff09478, 0x8451b5e0f15cb528, 0x0be48dcfbba71067c,],
+        "filtered B-picture plane mismatch"
+    );
+    assert_eq!(
+        decoder
+            .reference_pictures()
+            .iter()
+            .map(|reference| reference.identifier)
+            .collect::<Vec<_>>(),
+        [0, 3]
+    );
+    assert_eq!(decoder.decode_frame(1).unwrap(), frame);
+}
+
+#[test]
+fn debug_rust_p_slice_with_slice_qp_history() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high42-1080p.mp4");
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    let mut input_decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    input_decoder.decode_frame(0).unwrap();
+    let pictures = decoder.dependency_slice_pictures(3).unwrap();
+    let p_slice = &pictures[1][0];
+    let sps = decoder.sequence_parameter_sets[0].clone();
+    let width = sps.width as usize;
+    let height = sps.height as usize;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let reference = Yuv420Frame {
+        width,
+        height,
+        y_stride: width,
+        u_stride: chroma_width,
+        v_stride: chroma_width,
+        y: vec![0; width * height],
+        u: vec![0; chroma_width * chroma_height],
+        v: vec![0; chroma_width * chroma_height],
+    };
+    decoder
+        .store_reference_picture(
+            ReferencePicture {
+                identifier: 0,
+                frame_num: 0,
+                picture_order_cnt: 0,
+                long_term_frame_idx: None,
+            },
+            &reference,
+        )
+        .unwrap();
+    input_decoder
+        .store_reference_picture(
+            ReferencePicture {
+                identifier: 0,
+                frame_num: 0,
+                picture_order_cnt: 0,
+                long_term_frame_idx: None,
+            },
+            &reference,
+        )
+        .unwrap();
+    let pps = decoder.picture_parameter_sets[0];
+    let slice_qpy = 26 + pps.pic_init_qp_minus26 as i32 + p_slice.header.slice_qp_delta as i32;
+    let mut builder = Yuv420FrameBuilder::new(
+        sps.coded_width as usize / 16,
+        sps.coded_height as usize / 16,
+        0,
+        0,
+        0,
+        0,
+    )
+    .unwrap();
+    let history = decoder
+        .decode_dependency_slice_data(p_slice, &mut builder, |address, history| {
+            let CabacSliceMacroblockInput::Inter(mut input) =
+                input_decoder.macroblock_input_from_history(p_slice, address, history)?
+            else {
+                panic!("P slice produced a non-inter input")
+            };
+            input.residual_input.previous_qpy = slice_qpy;
+            input.residual_input.previous_qp_delta = 0;
+            if let Some(intra) = &mut input.intra_input {
+                intra.previous_qpy = slice_qpy;
+                intra.previous_qp_delta = 0;
+            }
+            Ok(CabacSliceMacroblockInput::Inter(input))
+        })
+        .unwrap();
+    eprintln!(
+        "forced slice-QP input decoded {} P macroblocks",
+        history.len()
+    );
 }
 
 #[test]
@@ -370,6 +629,86 @@ fn decoder_builds_p_and_spatial_b_macroblock_inputs_from_reference_state() {
             .x,
         4
     );
+}
+
+#[test]
+fn decoder_resets_previous_qp_delta_after_a_skipped_macroblock() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("testdata")
+        .join("h264")
+        .join("high42-1080p.mp4");
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder = H264Decoder::new(reader);
+    let pictures = decoder.dependency_slice_pictures(1).unwrap();
+    let p_slice = &pictures[1][0];
+    let frame = Yuv420Frame {
+        width: 16,
+        height: 16,
+        y_stride: 16,
+        u_stride: 8,
+        v_stride: 8,
+        y: vec![0; 256],
+        u: vec![0; 64],
+        v: vec![0; 64],
+    };
+    decoder
+        .store_reference_picture(
+            ReferencePicture {
+                identifier: 10,
+                frame_num: 0,
+                picture_order_cnt: 0,
+                long_term_frame_idx: None,
+            },
+            &frame,
+        )
+        .unwrap();
+
+    let preceding_inter = CabacInterMacroblockResult {
+        macroblock_type: 0,
+        sub_macroblock_types: Vec::new(),
+        partitions: Vec::new(),
+        luma: [0; 256],
+        cb: [0; 64],
+        cr: [0; 64],
+        coded_block_pattern_luma: 0,
+        coded_block_pattern_chroma: 0,
+        transform_size_8x8: false,
+        qpy: 29,
+        qp_delta: 3,
+        luma_4x4_coded_block_flags: [false; 16],
+        chroma_dc_coded: [false; 2],
+        chroma_ac_coded_flags: [[false; 4]; 2],
+    };
+    let history = [
+        CabacDecodedSliceMacroblock {
+            address: 0,
+            result: CabacSliceMacroblockResult::Inter(CabacPBMacroblockLayerResult {
+                skipped: false,
+                macroblock: CabacPBMacroblockPrediction::Inter(preceding_inter),
+            }),
+        },
+        CabacDecodedSliceMacroblock {
+            address: 1,
+            result: CabacSliceMacroblockResult::Inter(CabacPBMacroblockLayerResult {
+                skipped: true,
+                macroblock: CabacPBMacroblockPrediction::PSkip(CabacPSkipMacroblockResult {
+                    skipped: true,
+                    ..CabacPSkipMacroblockResult::default()
+                }),
+            }),
+        },
+    ];
+
+    let CabacSliceMacroblockInput::Inter(input) = decoder
+        .macroblock_input_from_history(p_slice, 2, &history)
+        .unwrap()
+    else {
+        panic!("P slice did not produce an inter macroblock input");
+    };
+
+    assert_eq!(input.residual_input.previous_qpy, 29);
+    assert_eq!(input.residual_input.previous_qp_delta, 0);
 }
 
 #[test]

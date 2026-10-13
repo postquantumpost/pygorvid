@@ -56,7 +56,13 @@ from .cabac import (
     residual_context_bases,
     derive_coded_block_flag_cond_term,
 )
-from .decoder import DecoderError, DecoderReferenceMismatch, DependencySlice, H264Decoder
+from .decoder import (
+    DecoderError,
+    DecoderReferenceMismatch,
+    DecoderTimeLimitExceeded,
+    DependencySlice,
+    H264Decoder,
+)
 from .mp4file import Mp4File
 from .nal import NALHeader, NALUnitError, ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals
 from .colorconv import PixelConversionError, PixelConverter

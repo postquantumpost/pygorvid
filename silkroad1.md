@@ -97,13 +97,32 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
                                     36.2.5.2.2.2.2.12.1.2. [x] Build P/B macroblock inputs from reference-picture state and resolve partition dependencies within the current macroblock in Python and Rust.
                                 36.2.5.2.2.2.2.12.2. [x] Correct slice-unavailable and I_PCM neighbor CBP masks in Python/Rust history providers per clause 9.3.3.1.1.4: luma context terms are zero for unavailable/I_PCM neighbors, chroma terms are zero for unavailable neighbors and one for I_PCM. Decode the first two real 1080p IDR macroblocks with top-left luma 29 and chroma DC prediction; complete-picture plane validation remains pending.
                                 36.2.5.2.2.2.2.12.3. [x] Correct Table 9-45 LPS transitions, route I_16x16 DC to ctxBlockCat 0, decode both chroma DC blocks before AC, include the flat chroma DC scaling weight, and correct 4x4 DDR/VR/HD/HU prediction. Python and Rust decode the complete 1080p IDR natively and match all unfiltered Y/U/V reference samples; checked-in row and complete-picture regressions invoke no runtime FFmpeg. Port the primitive corrections and vectors to Go.
-                                36.2.5.2.2.2.2.12.4. [ ] Complete 2160p unfiltered IDR reference validation in Python and Rust. The 8x8 six-bit inverse-scaling normalization and inverse-transform f5 sign are corrected, but the first remaining luma mismatch is at (2037, 1040); chroma planes already match the unfiltered reference.
-                                36.2.5.2.2.2.2.12.5. [ ] Apply progressive picture-level luma and chroma deblocking with per-macroblock QP, coefficient/motion strengths, transform flags, and slice-boundary rules; compare complete IDR planes with the existing filtered reference vectors.
-                                36.2.5.2.2.2.2.12.6. [ ] Decode complete P dependency pictures using decoded reference planes and normative reference marking/list updates; validate the selected P frame's filtered Y/U/V planes.
-                                36.2.5.2.2.2.2.12.7. [ ] Decode complete spatial/temporal-direct and partitioned B dependency pictures with correct list selection and coded/presentation ordering; validate the selected B frame's filtered Y/U/V planes.
+                                36.2.5.2.2.2.2.12.4. [x] Complete 2160p unfiltered IDR reference validation in Python and Rust. Correct Intra_8x8 DDR reference centering, VR/HD interpolation phases and negative-phase indices, and HU final-left-sample extension per clauses 8.3.2.2.6-10; port matching fixes/vectors to Go. Complete 1080p/2160p native IDR Y/U/V planes match independent unfiltered reference hashes, with cached reuse, packed dimensions/planes, and Python subprocess rejection verified. Filtered-picture validation remains in `.12.5`.
+                                36.2.5.2.2.2.2.12.5. [x] Apply owned coded-picture luma/chroma deblocking in Python and Rust before SPS cropping and IDR reference/cache storage. Derive edge strengths from intra/coefficient/prediction facts, average per-edge luma and component chroma QPs, honor 8x8 transforms and IDC 0/1/2 slice controls, and dispatch chroma strong/weak filters. Correct Table 8-16 beta indexing and Table 8-17 bS=3/indexA=17 in all three languages. Complete 1080p/2160p filtered IDR Y/U/V planes match the existing reference vectors; synthetic motion/coefficient, unequal-QP, offset/slice, ownership, and invalid-metadata regressions pass. P/B full-picture reference-plane validation remains pending in `.12.6`/`.12.7`.
+                                36.2.5.2.2.2.2.12.6. [x] Decode complete P dependency pictures using decoded reference planes and normative reference marking/list updates; validate the selected P frame's filtered Y/U/V planes. Python and Rust full-resolution `high42-1080p.mp4` frame-3 hashes pass, as do the ordered 16x16/64x64 smoke checks across Rust, Go, and Python. Correct Python inter luma residual dispatch to `ctxBlockCat` 2; the generated 16x16 non-skip P frame matches Y/U/V exactly.
+                                    36.2.5.2.2.2.2.12.6.1. [x] Validate Python's full-resolution `high42-1080p.mp4` P frame 3 against filtered Y/U/V reference hashes; the ordered 16x16/64x64 smoke checks also pass in Rust, Go, and Python.
+                                    36.2.5.2.2.2.2.12.6.2. [x] Complete Rust full-picture P dependency decoding and validate its filtered Y/U/V reference hashes.
+                                36.2.5.2.2.2.2.12.7. [x] Decode complete spatial/temporal-direct and partitioned B dependency pictures with correct list selection and coded/presentation ordering; validate the selected B frame's filtered Y/U/V planes. Rust and Python full-resolution `high42-1080p.mp4` frame-1 hashes, reference state, and repeated-index/cache reuse pass.
+                                    36.2.5.2.2.2.2.12.7.1. [x] Validate Rust's full-resolution `high42-1080p.mp4` B frame 1 against filtered Y/U/V reference hashes; repeated-index/cache reuse matches.
+                                    36.2.5.2.2.2.2.12.7.2. [x] Validate Python's full-resolution `high42-1080p.mp4` B frame 1 against filtered Y/U/V reference hashes; reference state and repeated-index/cache reuse pass using the saved decoder checkpoint.
                                 36.2.5.2.2.2.2.12.8. [ ] Run final I/P/B reference-plane, ownership, repeated-index/cache, and runtime-FFmpeg-absent checks in Python and Rust for both compact fixtures before marking step 36.2.5.2.2.2.2.12 complete.
         36.2.6. [ ] Re-run the relevant Go/Python/Rust decoder regressions for each increment before marking the broader port complete.
     36.3. [ ] Re-run the relevant Go/Python/Rust regression checks for each ported increment before broadening the supported H.264 feature union.
+        36.4. [ ] Add default-off per-frame progress reporting to Rust's full-resolution decoder tests, emitting 0%-100% in 10% increments to live stderr and the test log; replace the unconditional macroblock-specific CABAC diagnostics.
+        36.5. [ ] Once Go has a complete frame-decode test path, add matching default-off per-frame progress reporting for full-resolution tests.
+        36.6. [ ] Investigate whether decoder-scoped SPS/PPS parse caching benefits Go and Rust; profile repeated parameter-set parsing on their full-frame paths before porting.
+        36.7. [ ] Investigate Rust equivalents of Python's immutable reference-plane validation fast path, no-op deblocking edge skip, and residual-context range validation; profile before porting.
+        36.8. [ ] Investigate Go equivalents of Python's immutable reference-plane validation fast path, no-op deblocking edge skip, and residual-context range validation; profile before porting.
+        36.9. [ ] In timeout-enabled luma interpolation, retain chunk-level deadline polls but skip repeated sample-range scans for immutable `bytes` reference planes.
+        36.10. [ ] Return an existing packed Y/U/V plane when its stride equals its width instead of copying rows into a new byte string.
+        36.11. [ ] Profile and cache reusable quarter-sample neighborhoods or interpolation tiles across adjacent output pixels and macroblocks.
+        36.12. [ ] Batch eligible deblocking edge segments per macroblock and use a validated internal fast path while preserving normative edge order.
+        36.13. [ ] Profile and cache deblocking thresholds and QP-derived parameters shared by adjacent edges.
+        36.14. [ ] Precompute reusable boundary-strength and neighbor-prediction facts rather than deriving them repeatedly during deblocking.
+        36.15. [ ] Profile CABAC transaction cloning after selective residual-context cloning; evaluate a mutation journal/checkpoint rollback path with transactional regressions.
+        36.16. [ ] Fuse luma 4x4 inverse scaling and inverse transform where vectors confirm identical rounding and output.
+        36.17. [ ] Reduce repeated validation and type checks inside trusted pixel/deblocking loops while retaining strict public-boundary checks.
+        36.18. [ ] Profile and reduce temporary per-macroblock prediction lists and repeated full-plane packing/copying.
 
 **Phase 5: Pixel conversion and native PNG encoder**
 37. Define a common frame-buffer contract and convert 8-bit 4:2:0 YUV to RGB with documented range and rounding behavior.
@@ -509,6 +528,9 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - `scripts/inventory_streams.py` — filters by the 15 MB limit before hashing/probing; records oversized exclusions and active stream metadata.
 - `silkroad1-streams.json` — generated inventory for eligible samples and size/reason records for excluded samples.
 - `scripts/prepare_fixtures.py` — reproducibly creates and validates small stream-copy decoder fixtures.
+- `scripts/prepare_decoder_smoke_fixtures.py` — builds small High Profile CABAC I/P/P smoke MP4s from `samples/boss0.mp4`.
+- `scripts/test_decoder_smoke.sh` and `samples/decoder-smoke-16x16.mp4`, `samples/decoder-smoke-64x64.mp4` — run ordered fail-fast decoder smoke tests, testing 16x16 across Rust/Go/Python before 64x64.
+- `scripts/run_python_p_frame_full.sh` — runs the smoke suite first, then the long Python P-frame plane test, preserving output and final status under `tmp/test-runs/` for later review.
 - `testdata/h264/` — compact H.264 fixtures and their metadata/hash manifest.
 - `silkroad1-feature-matrix.md` — evidence-backed active H.264 feature scope and conservative exclusions.
 - `silkroad1-contract.md` — cross-language input, frame, RGB, ownership, error, and output-safety contract, including `VideoSampleReader` semantics.
@@ -543,9 +565,10 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - `README.md` — document the supported native codec subset and remove the runtime FFmpeg requirement after integration.
 
 **Verification**
+- Run Python decoder tests with the cooperative `PYGORVID_TEST_TIME_LIMIT=240` or less timeout. If a long run time is necessary, confirm with the user before running any Python test for longer than 240 seconds. Don't try to optimize the code to get under the timeout. Use a tool like 'timeout' to wrap the runtime of the test with a 120% time value. Wait for the long running tests to complete. Don't do other work that uses tokens.
 1. Keep demux tests independent of decoding and assert every sample offset/size lies within `mdat`.
 2. Validate each bitstream primitive using fixed input/output vectors before integrating it into the decoder.
-3. Compare decoder planes/RGB against checked-in references for IDR, P, and B frames.
+3. Run `scripts/test_decoder_smoke.sh` before full-size decoder regressions; it runs 16x16 across Rust/Go/Python, then 64x64. Compare decoder planes/RGB against checked-in references for IDR, P, and B frames afterward.
 4. Validate PNG with signature/chunk/CRC checks and JPEG with marker/length/byte-stuffing checks plus an independent decode during development.
 5. Run identical selected-frame cases through Go, Python, and Rust and compare dimensions and pixel data.
 6. Run the active corpus in an environment without FFmpeg on `PATH`; extraction must still work for supported files and clearly reject unsupported features. Confirm oversized files remain excluded.

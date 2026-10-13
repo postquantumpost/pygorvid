@@ -28,10 +28,10 @@ var lumaAlphaTable = [52]uint8{
 }
 
 var lumaBetaTable = [52]uint8{
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7,
 	8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
-	16, 16, 17, 18,
+	16, 16, 17, 17, 18, 18,
 }
 
 var lumaTC0Table = [3][52]uint8{
@@ -44,8 +44,9 @@ var lumaTC0Table = [3][52]uint8{
 		1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 5, 6, 7, 8, 8, 10, 11, 12, 13, 15, 17,
 	},
 	{
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-		1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 23, 25,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+		2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 23, 25,
 	},
 }
 
@@ -2333,7 +2334,7 @@ func predictLumaIntra8x8DiagonalDownRight(top [16]uint8, left [8]uint8, topLeft 
 	}
 	for row := 0; row < 8; row++ {
 		for column := 0; column < 8; column++ {
-			position := column - row
+			position := column - row - 1
 			value := (referenceAt(position-1) + 2*referenceAt(position) + referenceAt(position+1) + 2) >> 2
 			prediction[row*8+column] = uint8(value)
 		}
@@ -2355,20 +2356,19 @@ func predictLumaIntra8x8VerticalRight(top [16]uint8, left [8]uint8, topLeft uint
 			switch {
 			case phase >= 0 && phase%2 == 0:
 				center := phase / 2
-				value = (topReferenceAt(center-1) + 2*topReferenceAt(center) + topReferenceAt(center+1) + 2) >> 2
+				value = (topReferenceAt(center-1) + topReferenceAt(center) + 1) >> 1
 			case phase >= 0:
 				center := (phase - 1) / 2
-				value = (topReferenceAt(center-1) + topReferenceAt(center) + 1) >> 1
+				value = (topReferenceAt(center-1) + 2*topReferenceAt(center) + topReferenceAt(center+1) + 2) >> 2
 			case phase == -1:
-				value = (int(left[0]) + int(topLeft) + 1) >> 1
-			case phase == -2:
 				value = (int(left[0]) + 2*int(topLeft) + int(top[0]) + 2) >> 2
-			case -phase%2 == 1:
-				center := (-phase - 3) / 2
-				value = (int(left[center]) + int(left[center+1]) + 1) >> 1
 			default:
-				center := (-phase - 4) / 2
-				value = (int(left[center]) + 2*int(left[center+1]) + int(left[center+2]) + 2) >> 2
+				center := -phase - 2
+				previous := int(topLeft)
+				if center > 0 {
+					previous = int(left[center-1])
+				}
+				value = (previous + 2*int(left[center]) + int(left[center+1]) + 2) >> 2
 			}
 			prediction[row*8+column] = uint8(value)
 		}
@@ -2405,6 +2405,9 @@ func predictLumaIntra8x8VerticalLeft(top [16]uint8) (prediction [64]uint8) {
 }
 
 func predictLumaIntra8x8HorizontalUp(left [16]uint8) (prediction [64]uint8) {
+	for index := 8; index < len(left); index++ {
+		left[index] = left[7]
+	}
 	verticalPrediction := predictLumaIntra8x8VerticalLeft(left)
 	for row := 0; row < 8; row++ {
 		for column := 0; column < 8; column++ {

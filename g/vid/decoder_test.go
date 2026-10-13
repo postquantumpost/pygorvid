@@ -10,6 +10,47 @@ import (
 	"testing"
 )
 
+func TestADecoderSmoke16x16(t *testing.T) {
+	assertDecoderSmokeFixture(t, "decoder-smoke-16x16.mp4", 16, [2]uint64{0xcabf755e2a6b7d56, 0x29631735ff370504})
+}
+
+func TestBDecoderSmoke64x64(t *testing.T) {
+	assertDecoderSmokeFixture(t, "decoder-smoke-64x64.mp4", 64, [2]uint64{0xdd69fba2006d59e0, 0x93ecf9bed15545a5})
+}
+
+func assertDecoderSmokeFixture(t *testing.T, name string, dimension int, hashes [2]uint64) {
+	t.Helper()
+	path := filepath.Join("..", "..", "samples", name)
+	reader, err := OpenVideoSampleReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	decoder := NewH264Decoder(reader)
+	for frameIndex, wantHash := range hashes {
+		frame, err := decoder.DecodeFrame(uint64(frameIndex))
+		if err != nil {
+			t.Fatalf("DecodeFrame(%d): %v", frameIndex, err)
+		}
+		if frame.Width != dimension || frame.Height != dimension {
+			t.Fatalf("frame %d size = %dx%d; want %dx%d", frameIndex, frame.Width, frame.Height, dimension, dimension)
+		}
+		if got := h264SmokeFrameHash(frame); got != wantHash {
+			t.Fatalf("frame %d YUV FNV64 = %016x; want %016x", frameIndex, got, wantHash)
+		}
+	}
+}
+
+func h264SmokeFrameHash(frame Yuv420Frame) uint64 {
+	hash := uint64(14695981039346656037)
+	for _, plane := range [][]uint8{frame.Y, frame.U, frame.V} {
+		for _, sample := range plane {
+			hash = (hash ^ uint64(sample)) * 1099511628211
+		}
+	}
+	return hash
+}
+
 func TestH264DecoderTracksReaderState(t *testing.T) {
 	reader := &VideoSampleReader{samples: []sampleLocation{{}, {}}}
 	decoder := NewH264Decoder(reader)

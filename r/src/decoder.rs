@@ -48,6 +48,349 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+fn apply_adaptive_reference_marking(
+    buffer: &mut crate::reconstruction::ReferencePictureBuffer,
+    current_frame_num: u32,
+    maximum_frame_num: u32,
+    operations: &[crate::slice::MemoryManagementOperation],
+    maximum_long_term_frame_idx: &mut Option<u32>,
+) -> io::Result<(Option<u32>, bool)> {
+    if maximum_frame_num == 0 || current_frame_num >= maximum_frame_num {
+        return Err(invalid("current frame number is outside MaxFrameNum"));
+    }
+    let mut current_long_term_frame_idx = None;
+    let mut reset_frame_num = false;
+    for command in operations {
+        let operand = |index: usize| {
+            command
+                .operands
+                .get(index)
+                .copied()
+                .ok_or_else(|| invalid("decoded-reference marking operand is missing"))
+        };
+        match command.operation {
+            1 | 3 => {
+                let difference = i64::from(operand(0)?) + 1;
+                let picture_number = i64::from(current_frame_num)
+                    .checked_sub(difference)
+                    .ok_or_else(|| invalid("decoded-reference picture number overflows"))?;
+                let target = buffer.references().into_iter().find(|reference| {
+                    if reference.long_term_frame_idx.is_some()
+                        || reference.frame_num >= maximum_frame_num
+                    {
+                        return false;
+                    }
+                    let frame_num_wrap = if reference.frame_num > current_frame_num {
+                        i64::from(reference.frame_num) - i64::from(maximum_frame_num)
+                    } else {
+                        i64::from(reference.frame_num)
+                    };
+                    frame_num_wrap == picture_number
+                });
+                let target = target.ok_or_else(|| {
+                    invalid("decoded-reference marking short-term target is unavailable")
+                })?;
+                if command.operation == 1 {
+                    buffer.remove(target.identifier);
+                } else {
+                    let long_term_frame_idx = operand(1)?;
+                    if !maximum_long_term_frame_idx
+                        .is_some_and(|maximum| long_term_frame_idx <= maximum)
+                    {
+                        return Err(invalid("long-term frame index exceeds MaxLongTermFrameIdx"));
+                    }
+                    for reference in buffer.references() {
+                        if reference.long_term_frame_idx == Some(long_term_frame_idx) {
+                            buffer.remove(reference.identifier);
+                        }
+                    }
+                    if !buffer.set_long_term_frame_idx(target.identifier, Some(long_term_frame_idx))
+                    {
+                        return Err(invalid("decoded-reference marking target disappeared"));
+                    }
+                }
+            }
+            2 => {
+                let long_term_pic_num = operand(0)?;
+                let target = buffer
+                    .references()
+                    .into_iter()
+                    .find(|reference| reference.long_term_frame_idx == Some(long_term_pic_num))
+                    .ok_or_else(|| {
+                        invalid("decoded-reference marking long-term target is unavailable")
+                    })?;
+                buffer.remove(target.identifier);
+            }
+            4 => {
+                let maximum_plus_one = operand(0)?;
+                *maximum_long_term_frame_idx = maximum_plus_one.checked_sub(1);
+                for reference in buffer.references() {
+                    if reference.long_term_frame_idx.is_some_and(|frame_idx| {
+                        maximum_long_term_frame_idx.map_or(true, |maximum| frame_idx > maximum)
+                    }) {
+                        buffer.remove(reference.identifier);
+                    }
+                }
+            }
+            5 => {
+                buffer.clear();
+                *maximum_long_term_frame_idx = None;
+                current_long_term_frame_idx = None;
+                reset_frame_num = true;
+            }
+            6 => {
+                let long_term_frame_idx = operand(0)?;
+                if !maximum_long_term_frame_idx
+                    .is_some_and(|maximum| long_term_frame_idx <= maximum)
+                {
+                    return Err(invalid("long-term frame index exceeds MaxLongTermFrameIdx"));
+                }
+                for reference in buffer.references() {
+                    if reference.long_term_frame_idx == Some(long_term_frame_idx) {
+                        buffer.remove(reference.identifier);
+                    }
+                }
+                current_long_term_frame_idx = Some(long_term_frame_idx);
+            }
+            _ => return Err(invalid("decoded-reference marking operation is invalid")),
+        }
+    }
+    Ok((current_long_term_frame_idx, reset_frame_num))
+}
+
+fn picture_deblocking_macroblock(
+    entry: &crate::CabacDecodedSliceMacroblock,
+    header: &crate::SliceHeader,
+    pps: &crate::PpsInfo,
+    reference_lists: [&[crate::ReferencePicture]; 2],
+    slice_id: usize,
+    current_qpy: i32,
+) -> io::Result<(
+    crate::reconstruction::PictureDeblockingMacroblock,
+    Option<i32>,
+)> {
+    use crate::{CabacPBMacroblockPrediction, CabacSliceMacroblockResult};
+
+    let mut nonzero = [false; 16];
+    let mut predictions: [Vec<crate::LumaPredictionVector>; 16] = Default::default();
+    let (qpy, updated_qpy, intra, transform_size_8x8) = match &entry.result {
+        CabacSliceMacroblockResult::Intra(macroblock) => {
+            let scan = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+            for (index, raster) in scan.into_iter().enumerate() {
+                nonzero[raster] = macroblock.luma_4x4_coded_block_flags[index]
+                    || macroblock.luma_ac_coded_block_flags[index];
+            }
+            let qpy = if macroblock.macroblock_type == 25 {
+                0
+            } else {
+                macroblock.qpy
+            };
+            (qpy, Some(qpy), true, macroblock.transform_size_8x8)
+        }
+        CabacSliceMacroblockResult::Inter(layer) => {
+            let (qpy, transform_size_8x8, partitions, intra, updated_qpy): (
+                i32,
+                bool,
+                Vec<(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    [bool; 2],
+                    [i32; 2],
+                    [crate::MotionVector; 2],
+                )>,
+                bool,
+                Option<i32>,
+            ) = match &layer.macroblock {
+                CabacPBMacroblockPrediction::PSkip(macroblock) => (
+                    current_qpy,
+                    false,
+                    vec![(
+                        0,
+                        0,
+                        16,
+                        16,
+                        [true, false],
+                        [macroblock.reference_index, -1],
+                        [macroblock.motion_vector, crate::MotionVector::default()],
+                    )],
+                    false,
+                    None,
+                ),
+                CabacPBMacroblockPrediction::BSkip(macroblock) => (
+                    current_qpy,
+                    false,
+                    vec![(
+                        0,
+                        0,
+                        16,
+                        16,
+                        macroblock.prediction_flags,
+                        macroblock.reference_indices,
+                        macroblock.motion_vectors,
+                    )],
+                    false,
+                    None,
+                ),
+                CabacPBMacroblockPrediction::Intra(macroblock) => {
+                    let scan = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+                    for (index, raster) in scan.into_iter().enumerate() {
+                        nonzero[raster] = macroblock.luma_4x4_coded_block_flags[index]
+                            || macroblock.luma_ac_coded_block_flags[index];
+                    }
+                    let qpy = if macroblock.macroblock_type == 25 {
+                        0
+                    } else {
+                        macroblock.qpy
+                    };
+                    (
+                        qpy,
+                        macroblock.transform_size_8x8,
+                        Vec::new(),
+                        true,
+                        Some(qpy),
+                    )
+                }
+                CabacPBMacroblockPrediction::Inter(macroblock) => {
+                    for (index, raster) in [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        nonzero[raster] = macroblock.luma_4x4_coded_block_flags[index];
+                    }
+                    (
+                        macroblock.qpy,
+                        macroblock.transform_size_8x8,
+                        macroblock
+                            .partitions
+                            .iter()
+                            .map(|partition| {
+                                (
+                                    partition.x,
+                                    partition.y,
+                                    partition.width,
+                                    partition.height,
+                                    partition.prediction_flags,
+                                    partition.reference_indices,
+                                    partition.motion_vectors,
+                                )
+                            })
+                            .collect(),
+                        false,
+                        Some(macroblock.qpy),
+                    )
+                }
+            };
+            if intra {
+                (qpy, updated_qpy, true, transform_size_8x8)
+            } else {
+                for cell in 0..16 {
+                    let x = (cell % 4) * 4;
+                    let y = (cell / 4) * 4;
+                    let partition = partitions
+                        .iter()
+                        .find(|(px, py, width, height, _, _, _)| {
+                            *px <= x && x < px + width && *py <= y && y < py + height
+                        })
+                        .ok_or_else(|| {
+                            invalid("decoded inter macroblock has incomplete partitions")
+                        })?;
+                    for list_index in 0..2 {
+                        if !partition.4[list_index] {
+                            continue;
+                        }
+                        let reference_index = usize::try_from(partition.5[list_index])
+                            .map_err(|_| invalid("decoded inter reference index is negative"))?;
+                        let reference = reference_lists[list_index]
+                            .get(reference_index)
+                            .ok_or_else(|| {
+                                invalid("decoded inter reference index is unavailable")
+                            })?;
+                        predictions[cell].push(crate::LumaPredictionVector {
+                            reference_picture_id: reference.identifier,
+                            motion_vector: partition.6[list_index],
+                        });
+                    }
+                }
+                (qpy, updated_qpy, false, transform_size_8x8)
+            }
+        }
+    };
+
+    Ok((
+        crate::reconstruction::PictureDeblockingMacroblock {
+            qpy,
+            intra,
+            transform_size_8x8,
+            nonzero,
+            predictions,
+            slice_id,
+            disable_idc: header.disable_deblocking_filter_idc.unwrap_or(0),
+            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+            beta_offset_div2: header.slice_beta_offset_div2,
+            chroma_qp_offsets: [
+                pps.chroma_qp_index_offset as i32,
+                pps.second_chroma_qp_index_offset as i32,
+            ],
+        },
+        updated_qpy,
+    ))
+}
+
+fn slice_reference_lists(
+    references: &[crate::ReferencePicture],
+    header: &crate::SliceHeader,
+    pps: &crate::PpsInfo,
+    sps: &crate::SpsInfo,
+    picture_order_count: i64,
+) -> io::Result<(Vec<crate::ReferencePicture>, Vec<crate::ReferencePicture>)> {
+    let max_frame_num = 1_u32
+        .checked_shl(sps.log2_max_frame_num_minus4 + 4)
+        .ok_or_else(|| invalid("MaxFrameNum is outside the supported range"))?;
+    let (mut list0, mut list1) = if header.slice_type % 5 == 0 {
+        (
+            crate::build_p_reference_list(references, header.frame_num, max_frame_num)?,
+            Vec::new(),
+        )
+    } else {
+        crate::build_b_reference_lists(references, picture_order_count)
+    };
+    list0 = crate::apply_reference_list_modifications(
+        &list0,
+        references,
+        header.frame_num,
+        max_frame_num,
+        &header.ref_pic_list_reordering_l0,
+    )?;
+    if header.slice_type % 5 == 1 {
+        list1 = crate::apply_reference_list_modifications(
+            &list1,
+            references,
+            header.frame_num,
+            max_frame_num,
+            &header.ref_pic_list_reordering_l1,
+        )?;
+    }
+    let active_l0 = if header.num_ref_idx_active_override {
+        header.num_ref_idx_l0_active_minus1
+    } else {
+        pps.num_ref_idx_l0_default_active_minus1
+    };
+    let active_l1 = if header.num_ref_idx_active_override {
+        header.num_ref_idx_l1_active_minus1
+    } else {
+        pps.num_ref_idx_l1_default_active_minus1
+    };
+    list0.truncate(active_l0 as usize + 1);
+    if header.slice_type % 5 == 1 {
+        list1.truncate(active_l1 as usize + 1);
+    } else {
+        list1.clear();
+    }
+    Ok((list0, list1))
+}
+
 fn slice_history_entry<'a>(
     history: &'a [crate::CabacDecodedSliceMacroblock],
     index: Option<usize>,
@@ -95,6 +438,7 @@ fn colocated_motion_facts(
     match result {
         crate::CabacSliceMacroblockResult::Intra(_) => {}
         crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+            crate::CabacPBMacroblockPrediction::Intra(_) => {}
             crate::CabacPBMacroblockPrediction::PSkip(decoded) => {
                 let fact = crate::ColocatedMotionFact {
                     reference_index: decoded.reference_index,
@@ -471,7 +815,52 @@ impl H264Decoder {
             &mut contexts,
             builder,
             |address, history| {
-                self.macroblock_input_from_history(dependency_slice, address, history)
+                let input =
+                    self.macroblock_input_from_history(dependency_slice, address, history)?;
+                if (345..=349).contains(&address) {
+                    if let crate::CabacSliceMacroblockInput::Inter(layer) = &input {
+                        eprintln!(
+                            "input mb={address} hist={} inter_qpy={}/{} intra_qpy={:?}/{:?} cbp={}/{}",
+                            history.len(),
+                            layer.residual_input.previous_qpy,
+                            layer.residual_input.previous_qp_delta,
+                            layer.intra_input.map(|intra| intra.previous_qpy),
+                            layer.intra_input.map(|intra| intra.previous_qp_delta),
+                            layer.residual_input.left_luma_cbp,
+                            layer.residual_input.top_luma_cbp
+                        );
+                        if address == 349 {
+                            if let Some(intra) = layer.intra_input {
+                                eprintln!(
+                                    "mb349 intra neighbors left={:?} top={:?} dc_edges left={:?} top={:?} chroma_left={:?} chroma_top={:?}",
+                                    history.last().map(|entry| match &entry.result {
+                                        crate::CabacSliceMacroblockResult::Intra(mb) => format!("intra:{}", mb.macroblock_type),
+                                        crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+                                            crate::CabacPBMacroblockPrediction::Inter(mb) => format!("inter:{}", mb.macroblock_type),
+                                            crate::CabacPBMacroblockPrediction::Intra(mb) => format!("wrapped-intra:{}", mb.macroblock_type),
+                                            crate::CabacPBMacroblockPrediction::PSkip(_) => "p-skip".to_owned(),
+                                            crate::CabacPBMacroblockPrediction::BSkip(_) => "b-skip".to_owned(),
+                                        },
+                                    }),
+                                    history.iter().find(|entry| entry.address + (sps.coded_width as usize / 16) == address).map(|entry| match &entry.result {
+                                        crate::CabacSliceMacroblockResult::Intra(mb) => format!("intra:{}", mb.macroblock_type),
+                                        crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+                                            crate::CabacPBMacroblockPrediction::Inter(mb) => format!("inter:{}", mb.macroblock_type),
+                                            crate::CabacPBMacroblockPrediction::Intra(mb) => format!("wrapped-intra:{}", mb.macroblock_type),
+                                            crate::CabacPBMacroblockPrediction::PSkip(_) => "p-skip".to_owned(),
+                                            crate::CabacPBMacroblockPrediction::BSkip(_) => "b-skip".to_owned(),
+                                        },
+                                    }),
+                                    intra.luma_16x16_left_edge,
+                                    intra.luma_16x16_top_edge,
+                                    intra.chroma_left_edges,
+                                    intra.chroma_top_edges
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(input)
             },
         )
     }
@@ -553,8 +942,10 @@ impl H264Decoder {
         macroblock_address: usize,
         history: &[crate::CabacDecodedSliceMacroblock],
     ) -> io::Result<crate::CabacIIntraMacroblockInput> {
-        if dependency_slice.header.slice_type % 5 != 2 {
-            return Err(invalid("history input builder requires an I-slice"));
+        if !matches!(dependency_slice.header.slice_type % 5, 0 | 1 | 2) {
+            return Err(invalid(
+                "history input builder requires an I-, P-, or B-slice",
+            ));
         }
         let pps = self
             .picture_parameter_sets
@@ -755,14 +1146,32 @@ impl H264Decoder {
         let slice_qpy = 26_i64 + pps.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta;
         let slice_qpy = i32::try_from(slice_qpy)
             .map_err(|_| invalid("dependency slice QP is outside the supported range"))?;
-        let (previous_qpy, previous_qp_delta) = if let Some(previous) = history.last() {
-            let crate::CabacSliceMacroblockResult::Intra(previous) = &previous.result else {
-                return Err(invalid("I-slice history contains a non-intra macroblock"));
-            };
-            (previous.qpy, previous.qp_delta)
-        } else {
-            (slice_qpy, 0)
-        };
+        let (mut previous_qpy, mut previous_qp_delta) = (slice_qpy, 0);
+        for previous in history {
+            match &previous.result {
+                crate::CabacSliceMacroblockResult::Intra(previous) => {
+                    previous_qpy = previous.qpy;
+                    previous_qp_delta = previous.qp_delta;
+                }
+                crate::CabacSliceMacroblockResult::Inter(layer) if layer.skipped => {
+                    previous_qp_delta = 0;
+                }
+                crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+                    crate::CabacPBMacroblockPrediction::Intra(previous) => {
+                        previous_qpy = previous.qpy;
+                        previous_qp_delta = previous.qp_delta;
+                    }
+                    crate::CabacPBMacroblockPrediction::Inter(previous) => {
+                        previous_qpy = previous.qpy;
+                        previous_qp_delta = previous.qp_delta;
+                    }
+                    crate::CabacPBMacroblockPrediction::PSkip(_)
+                    | crate::CabacPBMacroblockPrediction::BSkip(_) => {
+                        previous_qp_delta = 0;
+                    }
+                },
+            }
+        }
         let mut input = crate::CabacIIntraMacroblockInput {
             slice_type: dependency_slice.header.slice_type,
             left_available: left_entry.is_some(),
@@ -1041,21 +1450,32 @@ impl H264Decoder {
         let mut previous_qpy = slice_qpy;
         let mut previous_qp_delta = 0;
         for entry in history.iter().rev() {
-            let values = match &entry.result {
-                crate::CabacSliceMacroblockResult::Intra(decoded) => {
-                    Some((decoded.qpy, decoded.qp_delta))
-                }
+            let qpy = match &entry.result {
+                crate::CabacSliceMacroblockResult::Intra(decoded) => Some(decoded.qpy),
                 crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
-                    crate::CabacPBMacroblockPrediction::Inter(decoded) => {
-                        Some((decoded.qpy, decoded.qp_delta))
-                    }
-                    _ => None,
+                    crate::CabacPBMacroblockPrediction::Inter(decoded) => Some(decoded.qpy),
+                    crate::CabacPBMacroblockPrediction::Intra(decoded) => Some(decoded.qpy),
+                    crate::CabacPBMacroblockPrediction::PSkip(_)
+                    | crate::CabacPBMacroblockPrediction::BSkip(_) => None,
                 },
             };
-            if let Some((qpy, qp_delta)) = values {
+            if let Some(qpy) = qpy {
                 previous_qpy = qpy;
-                previous_qp_delta = qp_delta;
                 break;
+            }
+        }
+        if let Some(entry) = history.last() {
+            previous_qp_delta = match &entry.result {
+                crate::CabacSliceMacroblockResult::Intra(decoded) => decoded.qp_delta,
+                crate::CabacSliceMacroblockResult::Inter(layer) if !layer.skipped => {
+                    match &layer.macroblock {
+                        crate::CabacPBMacroblockPrediction::Inter(decoded) => decoded.qp_delta,
+                        crate::CabacPBMacroblockPrediction::Intra(decoded) => decoded.qp_delta,
+                        crate::CabacPBMacroblockPrediction::PSkip(_)
+                        | crate::CabacPBMacroblockPrediction::BSkip(_) => 0,
+                    }
+                }
+                crate::CabacSliceMacroblockResult::Inter(_) => 0,
             }
         }
 
@@ -1182,6 +1602,11 @@ impl H264Decoder {
             left_skipped,
             top_skipped,
             b_skip_input,
+            intra_input: Some(self.intra_macroblock_input_from_history(
+                dependency_slice,
+                macroblock_address,
+                history,
+            )?),
         })
     }
 
@@ -1292,6 +1717,7 @@ impl H264Decoder {
         self.poc_type0_state = crate::PocType0State::default();
         self.poc_type12_state = crate::PocType12State::default();
         self.poc_cache = None;
+        let mut maximum_long_term_frame_idx = None;
 
         let mut target_frame = None;
         for picture in picture_groups {
@@ -1324,6 +1750,7 @@ impl H264Decoder {
                 self.poc_type0_state = crate::PocType0State::default();
                 self.poc_type12_state = crate::PocType12State::default();
                 self.poc_cache = None;
+                maximum_long_term_frame_idx = header.long_term_reference.then_some(0);
             }
             let picture_order_count = self
                 .picture_order_count(&header, &sps)
@@ -1332,25 +1759,112 @@ impl H264Decoder {
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             let height_in_mbs = usize::try_from(sps.coded_height / 16)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-            let mut builder = crate::Yuv420FrameBuilder::new(
-                width_in_mbs,
-                height_in_mbs,
-                sps.frame_crop_left as usize,
-                sps.frame_crop_top as usize,
-                sps.frame_crop_right as usize,
-                sps.frame_crop_bottom as usize,
-            )
-            .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let mut builder =
+                crate::Yuv420FrameBuilder::new(width_in_mbs, height_in_mbs, 0, 0, 0, 0)
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             let mut picture_history = Vec::new();
-            for dependency_slice in &picture {
+            let mut deblocking = vec![None; width_in_mbs * height_in_mbs];
+            for (slice_id, dependency_slice) in picture.iter().enumerate() {
+                let references = self.reference_picture_buffer.references();
+                let (list0, list1) = slice_reference_lists(
+                    &references,
+                    &dependency_slice.header,
+                    &pps,
+                    &sps,
+                    picture_order_count,
+                )
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                let mut current_qpy = 26
+                    + pps.pic_init_qp_minus26 as i32
+                    + dependency_slice.header.slice_qp_delta as i32;
                 let mut slice_history = self
                     .decode_dependency_slice_data_from_history(dependency_slice, &mut builder)
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                for entry in &slice_history {
+                    let (metadata, updated_qpy) = picture_deblocking_macroblock(
+                        entry,
+                        &dependency_slice.header,
+                        &pps,
+                        [&list0, &list1],
+                        slice_id,
+                        current_qpy,
+                    )
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                    deblocking[entry.address] = Some(metadata);
+                    if let Some(qpy) = updated_qpy {
+                        current_qpy = qpy;
+                    }
+                }
                 picture_history.append(&mut slice_history);
             }
-            let frame = builder
-                .finish()
-                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let missing_addresses: Vec<_> = deblocking
+                .iter()
+                .enumerate()
+                .filter_map(|(address, metadata)| metadata.is_none().then_some(address))
+                .take(8)
+                .collect();
+            let last_decoded_macroblock = picture_history.last().map(|entry| {
+                let kind = match &entry.result {
+                    crate::CabacSliceMacroblockResult::Intra(macroblock) => {
+                        format!("intra:{}", macroblock.macroblock_type)
+                    }
+                    crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
+                        crate::CabacPBMacroblockPrediction::Intra(macroblock) => {
+                            format!("wrapped-intra:{}", macroblock.macroblock_type)
+                        }
+                        crate::CabacPBMacroblockPrediction::Inter(macroblock) => {
+                            format!("inter:{}", macroblock.macroblock_type)
+                        }
+                        crate::CabacPBMacroblockPrediction::PSkip(_) => "p-skip".to_owned(),
+                        crate::CabacPBMacroblockPrediction::BSkip(_) => "b-skip".to_owned(),
+                    },
+                };
+                (entry.address, kind)
+            });
+            let deblocking = deblocking
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    DecodeError::DecodeFailure(format!(
+                        "picture deblocking metadata is incomplete at {missing_addresses:?}; last decoded macroblock {last_decoded_macroblock:?}"
+                    ))
+                })?;
+            let coded_frame = crate::reconstruction::deblock_yuv420_picture(
+                &builder
+                    .finish()
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?,
+                &deblocking,
+            )
+            .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let width = sps.width as usize;
+            let height = sps.height as usize;
+            let mut planes = Vec::new();
+            for (plane, divisor) in [
+                (&coded_frame.y, 1),
+                (&coded_frame.u, 2),
+                (&coded_frame.v, 2),
+            ] {
+                let stride = coded_frame.width / divisor;
+                let left = sps.frame_crop_left as usize / divisor;
+                let top = sps.frame_crop_top as usize / divisor;
+                let mut packed = Vec::with_capacity(width * height / (divisor * divisor));
+                for row in 0..height / divisor {
+                    let start = (top + row) * stride + left;
+                    packed.extend_from_slice(&plane[start..start + width / divisor]);
+                }
+                planes.push(packed);
+            }
+            let mut planes = planes.into_iter();
+            let frame = Yuv420Frame {
+                width,
+                height,
+                y_stride: width,
+                u_stride: width / 2,
+                v_stride: width / 2,
+                y: planes.next().unwrap(),
+                u: planes.next().unwrap(),
+                v: planes.next().unwrap(),
+            };
             let sample_index = usize::try_from(first_slice.sample_index)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             let display_index = self
@@ -1361,19 +1875,127 @@ impl H264Decoder {
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             self.decoded_frames.insert(display_index, frame.clone());
             if header.nal_ref_idc != 0 {
+                let (stored_frame_num, long_term_frame_idx, reset_poc_state) = if header.idr {
+                    (
+                        header.frame_num,
+                        header.long_term_reference.then_some(0),
+                        false,
+                    )
+                } else if header.adaptive_ref_pic_marking {
+                    let max_frame_num = 1_u32
+                        .checked_shl(sps.log2_max_frame_num_minus4 + 4)
+                        .ok_or_else(|| {
+                            DecodeError::DecodeFailure(
+                                "MaxFrameNum is outside the supported range".into(),
+                            )
+                        })?;
+                    let (long_term_frame_idx, reset_frame_num) = apply_adaptive_reference_marking(
+                        &mut self.reference_picture_buffer,
+                        header.frame_num,
+                        max_frame_num,
+                        &header.memory_management_operations,
+                        &mut maximum_long_term_frame_idx,
+                    )
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                    (
+                        if reset_frame_num { 0 } else { header.frame_num },
+                        long_term_frame_idx,
+                        reset_frame_num,
+                    )
+                } else {
+                    (header.frame_num, None, false)
+                };
+                let stored_picture_order_count = if reset_poc_state {
+                    0
+                } else {
+                    picture_order_count
+                };
+                let maximum_references = usize::try_from(sps.max_num_ref_frames.max(1))
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                let references = self.reference_picture_buffer.references();
+                if !header.idr
+                    && !header.adaptive_ref_pic_marking
+                    && references.len() >= maximum_references
+                {
+                    let max_frame_num = 1_u32
+                        .checked_shl(sps.log2_max_frame_num_minus4 + 4)
+                        .ok_or_else(|| {
+                            DecodeError::DecodeFailure(
+                                "MaxFrameNum is outside the supported range".into(),
+                            )
+                        })?;
+                    let oldest = references
+                        .iter()
+                        .filter(|reference| reference.long_term_frame_idx.is_none())
+                        .min_by_key(|reference| {
+                            if reference.frame_num > header.frame_num {
+                                i64::from(reference.frame_num) - i64::from(max_frame_num)
+                            } else {
+                                i64::from(reference.frame_num)
+                            }
+                        })
+                        .ok_or_else(|| {
+                            DecodeError::DecodeFailure(
+                                "sliding-window marking found no short-term reference to evict"
+                                    .into(),
+                            )
+                        })?;
+                    self.reference_picture_buffer.remove(oldest.identifier);
+                }
                 let identifier = u32::try_from(display_index)
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
                 let reference = crate::ReferencePicture {
                     identifier,
-                    frame_num: header.frame_num,
-                    picture_order_cnt: picture_order_count,
-                    long_term_frame_idx: (header.idr && header.long_term_reference).then_some(0),
+                    frame_num: stored_frame_num,
+                    picture_order_cnt: stored_picture_order_count,
+                    long_term_frame_idx,
                 };
-                self.store_reference_picture_with_macroblocks(reference, &frame, &picture_history)
-                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                self.store_reference_picture_with_macroblocks(
+                    reference,
+                    &coded_frame,
+                    &picture_history,
+                )
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                if reset_poc_state {
+                    if sps.pic_order_cnt_type == 0 {
+                        let top_order_count = self
+                            .poc_type0_state
+                            .previous_pic_order_cnt_msb
+                            .checked_add(i64::from(header.pic_order_cnt_lsb))
+                            .ok_or_else(|| {
+                                DecodeError::DecodeFailure(
+                                    "MMCO 5 picture order count overflows".into(),
+                                )
+                            })?;
+                        let bottom_order_count = top_order_count
+                            .checked_add(header.delta_pic_order_bottom)
+                            .ok_or_else(|| {
+                                DecodeError::DecodeFailure(
+                                    "MMCO 5 picture order count overflows".into(),
+                                )
+                            })?;
+                        let normalized_top_order_count = top_order_count
+                            .checked_sub(top_order_count.min(bottom_order_count))
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| {
+                                DecodeError::DecodeFailure(
+                                    "MMCO 5 normalized picture order count is invalid".into(),
+                                )
+                            })?;
+                        self.poc_type0_state = crate::PocType0State {
+                            previous_pic_order_cnt_msb: 0,
+                            previous_pic_order_cnt_lsb: normalized_top_order_count,
+                        };
+                    } else {
+                        self.poc_type0_state = crate::PocType0State::default();
+                    }
+                    self.poc_type12_state = crate::PocType12State::default();
+                    self.poc_cache = None;
+                }
             }
             if sample_index == target_sample_index && display_index == requested_index {
                 target_frame = Some(frame);
+                break;
             }
         }
         target_frame.ok_or_else(|| {
@@ -1381,5 +2003,105 @@ impl H264Decoder {
                 "requested presentation frame {requested_index} is absent from its dependency window"
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod adaptive_reference_marking_tests {
+    use super::apply_adaptive_reference_marking;
+    use crate::slice::MemoryManagementOperation;
+    use crate::{ReferencePicture, ReferencePictureBuffer, Yuv420Frame};
+
+    fn frame() -> Yuv420Frame {
+        Yuv420Frame {
+            width: 1,
+            height: 1,
+            y_stride: 1,
+            u_stride: 1,
+            v_stride: 1,
+            y: vec![0],
+            u: vec![0],
+            v: vec![0],
+        }
+    }
+
+    fn operation(operation: u32, operands: &[u32]) -> MemoryManagementOperation {
+        MemoryManagementOperation {
+            operation,
+            operands: operands.to_vec(),
+        }
+    }
+
+    #[test]
+    fn adaptive_marking_applies_all_frame_operations_in_order() {
+        let mut buffer = ReferencePictureBuffer::default();
+        for (identifier, frame_num, long_term_frame_idx) in [
+            (14, 14, None),
+            (15, 15, None),
+            (50, 2, Some(1)),
+            (51, 3, Some(3)),
+            (52, 4, Some(2)),
+        ] {
+            buffer
+                .store(
+                    ReferencePicture {
+                        identifier,
+                        frame_num,
+                        picture_order_cnt: i64::from(frame_num),
+                        long_term_frame_idx,
+                    },
+                    &frame(),
+                )
+                .unwrap();
+        }
+        let operations = [
+            operation(1, &[2]),
+            operation(4, &[3]),
+            operation(3, &[1, 1]),
+            operation(2, &[1]),
+            operation(6, &[2]),
+        ];
+        let mut maximum_long_term_frame_idx = None;
+        let result = apply_adaptive_reference_marking(
+            &mut buffer,
+            1,
+            16,
+            &operations,
+            &mut maximum_long_term_frame_idx,
+        )
+        .unwrap();
+
+        assert_eq!(result, (Some(2), false));
+        assert_eq!(maximum_long_term_frame_idx, Some(2));
+        assert!(buffer.references().is_empty());
+    }
+
+    #[test]
+    fn adaptive_marking_mmco5_clears_references_and_resets_current_frame_number() {
+        let mut buffer = ReferencePictureBuffer::default();
+        buffer
+            .store(
+                ReferencePicture {
+                    identifier: 1,
+                    frame_num: 1,
+                    picture_order_cnt: 2,
+                    long_term_frame_idx: None,
+                },
+                &frame(),
+            )
+            .unwrap();
+        let mut maximum_long_term_frame_idx = Some(3);
+        let result = apply_adaptive_reference_marking(
+            &mut buffer,
+            2,
+            16,
+            &[operation(5, &[])],
+            &mut maximum_long_term_frame_idx,
+        )
+        .unwrap();
+
+        assert_eq!(result, (None, true));
+        assert_eq!(maximum_long_term_frame_idx, None);
+        assert!(buffer.references().is_empty());
     }
 }

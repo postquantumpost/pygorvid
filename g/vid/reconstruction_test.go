@@ -86,10 +86,10 @@ func TestLookupLumaDeblockingThresholdsMatchesTableVectors(t *testing.T) {
 		want           LumaDeblockingThresholds
 	}{
 		{0, 0, LumaDeblockingThresholds{Alpha: 0, Beta: 0}},
-		{16, 17, LumaDeblockingThresholds{Alpha: 4, Beta: 0}},
+		{16, 17, LumaDeblockingThresholds{Alpha: 4, Beta: 2}},
 		{18, 18, LumaDeblockingThresholds{Alpha: 5, Beta: 2}},
-		{26, 26, LumaDeblockingThresholds{Alpha: 15, Beta: 4}},
-		{40, 40, LumaDeblockingThresholds{Alpha: 80, Beta: 12}},
+		{26, 26, LumaDeblockingThresholds{Alpha: 15, Beta: 6}},
+		{40, 40, LumaDeblockingThresholds{Alpha: 80, Beta: 13}},
 		{51, 51, LumaDeblockingThresholds{Alpha: 255, Beta: 18}},
 	}
 	for _, test := range tests {
@@ -111,6 +111,7 @@ func TestLookupLumaTC0MatchesTableVectors(t *testing.T) {
 		{0, 1, 0},
 		{23, 1, 1},
 		{21, 2, 1},
+		{17, 3, 1},
 		{18, 3, 1},
 		{33, 1, 2},
 		{51, 1, 13},
@@ -2451,7 +2452,6 @@ func TestPredictLumaIntra8x8DiagonalDownRightUsesAllFilteredReferenceRegions(t *
 	top := [16]uint8{20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250, 230, 210, 190}
 	left := [8]uint8{60, 100, 140, 180, 220, 240, 200, 160}
 	want := [64]uint8{
-		28, 40, 60, 80, 100, 120, 140, 160,
 		35, 28, 40, 60, 80, 100, 120, 140,
 		63, 35, 28, 40, 60, 80, 100, 120,
 		100, 63, 35, 28, 40, 60, 80, 100,
@@ -2459,6 +2459,7 @@ func TestPredictLumaIntra8x8DiagonalDownRightUsesAllFilteredReferenceRegions(t *
 		180, 140, 100, 63, 35, 28, 40, 60,
 		215, 180, 140, 100, 63, 35, 28, 40,
 		225, 215, 180, 140, 100, 63, 35, 28,
+		200, 225, 215, 180, 140, 100, 63, 35,
 	}
 	if got := predictLumaIntra8x8DiagonalDownRight(top, left, 30); got != want {
 		t.Fatalf("diagonal-down-right 8x8 prediction = %v; want %v", got, want)
@@ -2469,14 +2470,14 @@ func TestPredictLumaIntra8x8VerticalRightUsesAllFilteredReferenceRegions(t *test
 	top := [16]uint8{20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250, 230, 210, 190}
 	left := [8]uint8{60, 100, 140, 180, 220, 240, 200, 160}
 	want := [64]uint8{
-		28, 40, 60, 80, 100, 120, 140, 160,
-		45, 25, 30, 50, 70, 90, 110, 130,
+		25, 30, 50, 70, 90, 110, 130, 150,
 		35, 28, 40, 60, 80, 100, 120, 140,
-		80, 45, 25, 30, 50, 70, 90, 110,
+		63, 25, 30, 50, 70, 90, 110, 130,
 		100, 35, 28, 40, 60, 80, 100, 120,
-		120, 80, 45, 25, 30, 50, 70, 90,
-		140, 100, 35, 28, 40, 60, 80, 100,
-		160, 120, 80, 45, 25, 30, 50, 70,
+		140, 63, 25, 30, 50, 70, 90, 110,
+		180, 100, 35, 28, 40, 60, 80, 100,
+		215, 140, 63, 25, 30, 50, 70, 90,
+		225, 180, 100, 35, 28, 40, 60, 80,
 	}
 	if got := predictLumaIntra8x8VerticalRight(top, left, 30); got != want {
 		t.Fatalf("vertical-right 8x8 prediction = %v; want %v", got, want)
@@ -2487,14 +2488,14 @@ func TestPredictLumaIntra8x8HorizontalDownTransposesVerticalRight(t *testing.T) 
 	top := [8]uint8{60, 100, 140, 180, 220, 240, 200, 160}
 	left := [16]uint8{20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250, 230, 210, 190}
 	want := [64]uint8{
-		28, 45, 35, 80, 100, 120, 140, 160,
-		40, 25, 28, 45, 35, 80, 100, 120,
-		60, 30, 40, 25, 28, 45, 35, 80,
-		80, 50, 60, 30, 40, 25, 28, 45,
-		100, 70, 80, 50, 60, 30, 40, 25,
-		120, 90, 100, 70, 80, 50, 60, 30,
-		140, 110, 120, 90, 100, 70, 80, 50,
-		160, 130, 140, 110, 120, 90, 100, 70,
+		25, 35, 63, 100, 140, 180, 215, 225,
+		30, 28, 25, 35, 63, 100, 140, 180,
+		50, 40, 30, 28, 25, 35, 63, 100,
+		70, 60, 50, 40, 30, 28, 25, 35,
+		90, 80, 70, 60, 50, 40, 30, 28,
+		110, 100, 90, 80, 70, 60, 50, 40,
+		130, 120, 110, 100, 90, 80, 70, 60,
+		150, 140, 130, 120, 110, 100, 90, 80,
 	}
 	if got := predictLumaIntra8x8HorizontalDown(top, left, 30); got != want {
 		t.Fatalf("horizontal-down 8x8 prediction = %v; want %v", got, want)
@@ -2524,11 +2525,11 @@ func TestPredictLumaIntra8x8HorizontalUpTransposesVerticalLeft(t *testing.T) {
 		15, 20, 25, 30, 35, 40, 45, 50,
 		25, 30, 35, 40, 45, 50, 55, 60,
 		35, 40, 45, 50, 55, 60, 65, 70,
-		45, 50, 55, 60, 65, 70, 75, 80,
-		55, 60, 65, 70, 75, 80, 85, 90,
-		65, 70, 75, 80, 85, 90, 95, 100,
-		75, 80, 85, 90, 95, 100, 105, 110,
-		85, 90, 95, 100, 105, 110, 115, 120,
+		45, 50, 55, 60, 65, 70, 75, 78,
+		55, 60, 65, 70, 75, 78, 80, 80,
+		65, 70, 75, 78, 80, 80, 80, 80,
+		75, 78, 80, 80, 80, 80, 80, 80,
+		80, 80, 80, 80, 80, 80, 80, 80,
 	}
 	if got := predictLumaIntra8x8HorizontalUp(left); got != want {
 		t.Fatalf("horizontal-up 8x8 prediction = %v; want %v", got, want)
