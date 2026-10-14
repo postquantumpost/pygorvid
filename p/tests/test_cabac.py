@@ -1304,6 +1304,32 @@ def test_p_skip_macroblock_predicts_nonzero_neighbor_motion():
     assert result.motion_vector == (4, -8)
 
 
+def test_partition_top_right_motion_candidate_uses_aligned_top_cell():
+    from pygorvid import MotionVector, MotionVectorCandidate
+    from pygorvid.cabac import (
+        CABACInterListNeighbors,
+        CABACInterPartitionNeighbors,
+        _aligned_partition_top_candidate,
+    )
+
+    wrong_candidate = MotionVectorCandidate(0, MotionVector(16, 16))
+    expected_candidate = MotionVectorCandidate(0, MotionVector(1, 0))
+    partition_neighbors = [CABACInterPartitionNeighbors() for _ in range(16)]
+    partition_neighbors[0] = CABACInterPartitionNeighbors(
+        list0=CABACInterListNeighbors(top_right_candidate=wrong_candidate)
+    )
+    partition_neighbors[2] = CABACInterPartitionNeighbors(
+        list0=CABACInterListNeighbors(top_candidate=expected_candidate)
+    )
+
+    handled, candidate = _aligned_partition_top_candidate(
+        partition_neighbors, 0, 8, -1
+    )
+
+    assert handled
+    assert candidate == expected_candidate
+
+
 def test_p_skip_macroblock_uses_available_intra_neighbor_for_motion_prediction():
     decoder = CABACArithmeticDecoder(bytes(128))
     contexts = [_model(63, False) for _ in range(460)]

@@ -1,5 +1,7 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     exit(run(std::env::args().skip(1).collect()));
@@ -164,13 +166,99 @@ fn prefixed_output(output: &str, prefix: Option<&str>) -> String {
         .to_string()
 }
 
-fn extract_frame(_input: &str, _frame: usize, output: &str) -> Result<(), String> {
-    let _extension = Path::new(output)
+fn extract_frame(input: &str, frame: usize, output: &str) -> Result<(), String> {
+    let extension = Path::new(output)
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase)
         .filter(|value| value == "png" || value == "jpg")
         .ok_or_else(|| "--output must end in .png or .jpg".to_string())?;
 
-    Err("native frame extraction is not available in this build; ffmpeg is no longer invoked by the extraction path".to_string())
+    let reader = pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
+    let mut decoder = pygorvid::H264Decoder::new_with_environment_checkpoint(reader)
+        .map_err(|error| error.to_string())?;
+    let decoded = decoder
+        .decode_frame(frame as u64)
+        .map_err(|error| error.to_string())?;
+    let payload = if extension == "png" {
+        pygorvid::encode_png_frame(&decoded)
+    } else {
+        pygorvid::encode_jpeg_frame(&decoded)
+    }
+    .map_err(|error| error.to_string())?;
+    write_output(Path::new(output), &payload).map_err(|error| error.to_string())
+}
+
+struct TemporaryOutputDirectory(PathBuf);
+
+impl Drop for TemporaryOutputDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn write_output(output: &Path, payload: &[u8]) -> std::io::Result<()> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_nanos();
+    let mut temporary = None;
+    for attempt in 0..100 {
+        let directory = parent.join(format!(
+            ".pygorvid-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&directory) {
+            Ok(()) => {
+                temporary = Some(TemporaryOutputDirectory(directory));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let temporary = temporary.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "cannot create temporary output directory",
+        )
+    })?;
+    let image = temporary.0.join("image");
+    fs::write(&image, payload)?;
+    fs::rename(image, output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_native_images_and_preserves_output_on_failure() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../tmp/native-cli-rust-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let cleanup = TemporaryOutputDirectory(directory.clone());
+        let input =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
+        for extension in ["PNG", "JPG"] {
+            let output = directory.join(format!("image with spaces.{extension}"));
+            extract_frame(input.to_str().unwrap(), 1, output.to_str().unwrap()).unwrap();
+            let payload = fs::read(&output).unwrap();
+            if extension == "PNG" {
+                assert_eq!(&payload[..8], b"\x89PNG\r\n\x1a\n");
+                assert_eq!(&payload[16..24], &[0, 0, 0, 16, 0, 0, 0, 16]);
+            } else {
+                assert_eq!(&payload[..2], &[0xff, 0xd8]);
+                assert_eq!(&payload[payload.len() - 2..], &[0xff, 0xd9]);
+            }
+            assert!(extract_frame(input.to_str().unwrap(), 999, output.to_str().unwrap()).is_err());
+            assert_eq!(fs::read(&output).unwrap(), payload);
+        }
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        drop(cleanup);
+    }
 }

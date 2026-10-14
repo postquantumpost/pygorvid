@@ -253,7 +253,9 @@ def test_h264_decoder_reconstructs_filtered_p_picture_planes():
             reader,
             debug_progress=os.environ.get("PYGORVID_DEBUG_PROGRESS") == "1",
             time_limit_seconds=_test_time_limit_seconds(),
-            checkpoint_dir=ROOT / "tmp" / "checkpoints",
+            checkpoint_dir=Path(
+                os.environ.get("PYGORVID_CHECKPOINT_DIR", ROOT / "tmp" / "checkpoints")
+            ),
         )
         try:
             frame = decoder.decode_frame(3)
@@ -277,7 +279,9 @@ def test_h264_decoder_reconstructs_filtered_b_picture_planes():
             reader,
             debug_progress=os.environ.get("PYGORVID_DEBUG_PROGRESS") == "1",
             time_limit_seconds=_test_time_limit_seconds(),
-            checkpoint_dir=ROOT / "tmp" / "checkpoints",
+            checkpoint_dir=Path(
+                os.environ.get("PYGORVID_CHECKPOINT_DIR", ROOT / "tmp" / "checkpoints")
+            ),
         )
         try:
             frame = decoder.decode_frame(1)
@@ -289,6 +293,64 @@ def test_h264_decoder_reconstructs_filtered_b_picture_planes():
         assert hashlib.sha256(frame.v).hexdigest() == "94910e086498b34d635417f29773dbc811afed0e2e9b530abc5cd4fd22d31969"
         assert {reference.identifier for reference in decoder.reference_picture_buffer.references()} == {0, 3}
         assert decoder.decode_frame(1) == frame
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize(("picture_type", "frame_index"), (("P", 4), ("B", 1)))
+def test_h264_decoder_reconstructs_high52_filtered_inter_planes(
+    picture_type, frame_index, monkeypatch
+):
+    import json
+
+    def reject_subprocess(*args, **kwargs):
+        raise AssertionError("native decoder invoked a subprocess")
+
+    monkeypatch.setattr(subprocess, "Popen", reject_subprocess)
+    monkeypatch.setattr(subprocess, "run", reject_subprocess)
+    monkeypatch.setattr(subprocess, "check_output", reject_subprocess)
+    monkeypatch.setenv("PATH", "")
+
+    fixture = "high52-2160p.mp4"
+    reference = next(
+        record for record in json.loads(
+            (ROOT / "silkroad1-reference-vectors.json").read_text()
+        )["reference_frames"]
+        if record["fixture"] == fixture
+    )
+    picture_reference = reference["frame_references"][picture_type]
+    assert picture_reference["index"] == frame_index
+
+    reader = VideoSampleReader(ROOT / "testdata" / "h264" / fixture)
+    try:
+        decoder = H264Decoder(
+            reader,
+            debug_progress=os.environ.get("PYGORVID_DEBUG_PROGRESS") == "1",
+            time_limit_seconds=_test_time_limit_seconds(),
+            checkpoint_dir=Path(
+                os.environ.get("PYGORVID_CHECKPOINT_DIR", ROOT / "tmp" / "checkpoints")
+            ),
+        )
+        try:
+            frame = decoder.decode_frame(frame_index)
+        except DecoderTimeLimitExceeded as error:
+            pytest.skip(str(error))
+
+        assert (frame.width, frame.height) == (reference["width"], reference["height"])
+        assert all(isinstance(plane, bytes) for plane in (frame.y, frame.u, frame.v))
+        for name, plane in (("y", frame.y), ("u", frame.u), ("v", frame.v)):
+            assert hashlib.sha256(plane).hexdigest() == picture_reference["planes"][name]["sha256"]
+
+        references_before = tuple(
+            (item.identifier, decoder.reference_picture_buffer.get(item.identifier).frame)
+            for item in decoder.reference_picture_buffer.references()
+        )
+        assert decoder.decode_frame(frame_index) == frame
+        assert tuple(
+            (item.identifier, decoder.reference_picture_buffer.get(item.identifier).frame)
+            for item in decoder.reference_picture_buffer.references()
+        ) == references_before
+        assert reader._next_index == 0
     finally:
         reader.close()
 
@@ -595,7 +657,12 @@ def test_decoder_filtered_idr_matches_reference_planes(fixture, monkeypatch):
     )["frame_references"]["I"]["planes"]
     reader = VideoSampleReader(ROOT / "testdata" / "h264" / fixture)
     try:
-        decoder = H264Decoder(reader)
+        decoder = H264Decoder(
+            reader,
+            checkpoint_dir=Path(
+                os.environ.get("PYGORVID_CHECKPOINT_DIR", ROOT / "tmp" / "checkpoints")
+            ),
+        )
         frame = decoder.decode_frame(0)
         for name, plane in (("y", frame.y), ("u", frame.u), ("v", frame.v)):
             assert hashlib.sha256(plane).hexdigest() == reference[name]["sha256"], name
@@ -706,16 +773,19 @@ def test_h264_decoder_does_not_invoke_runtime_subprocesses(monkeypatch, frame_in
     def reject_subprocess(*args, **kwargs):
         raise AssertionError("decoder invoked a runtime subprocess")
 
+    monkeypatch.setattr(subprocess, "Popen", reject_subprocess)
     monkeypatch.setattr(subprocess, "check_output", reject_subprocess)
     monkeypatch.setattr(subprocess, "run", reject_subprocess)
+    monkeypatch.setenv("PATH", "")
     reader = VideoSampleReader(FIXTURE)
     try:
-        decoder = H264Decoder(reader)
-        try:
-            frame = decoder.decode_frame(frame_index)
-        except DecoderError as error:
-            assert "ffmpeg" not in str(error).lower()
-        else:
-            assert frame.width > 0 and frame.height > 0
+        decoder = H264Decoder(
+            reader,
+            checkpoint_dir=Path(
+                os.environ.get("PYGORVID_CHECKPOINT_DIR", ROOT / "tmp" / "checkpoints")
+            ),
+        )
+        frame = decoder.decode_frame(frame_index)
+        assert (frame.width, frame.height) == (1920, 1080)
     finally:
         reader.close()

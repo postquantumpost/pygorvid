@@ -116,6 +116,8 @@ func TestParseSliceHeaderPOCModesAndFieldFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	spsPOC1 := makePOC1SPS(true)
+	fieldSPS := parseTestSPS(t, makeCompleteSPS(66, 0, 30, "1", 0, 0, true, [4]uint32{}))
+	fieldSPS.FrameMbsOnly = false
 	for _, test := range []struct {
 		name  string
 		sps   SPSInfo
@@ -141,7 +143,7 @@ func TestParseSliceHeaderPOCModesAndFieldFlags(t *testing.T) {
 		},
 		{
 			name: "field-coded-bottom-field",
-			sps:  parseTestSPS(t, makeCompleteSPS(66, 0, 30, "1", 0, 0, false, [4]uint32{})),
+			sps:  fieldSPS,
 			pps:  ppsWithBottomFieldPOC,
 			nal:  makeSliceNAL(0x01, 0, 0, 0, fixedSliceBits(3, 4)+"11"+fixedSliceBits(5, 4)),
 			check: func(header SliceHeader) bool {

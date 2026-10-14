@@ -971,6 +971,7 @@ type CABACIIntraMacroblockResult struct {
 	Cb                      [64]uint8
 	Cr                      [64]uint8
 	Luma4x4CodedBlockFlags  [16]bool
+	Luma16x16DCCoded        bool
 	ChromaDCCoded           [2]bool
 	ChromaACCodedFlags      [2][4]bool
 }
@@ -1331,6 +1332,10 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 // DecodeIIntraMacroblock decodes one I-slice macroblock in syntax order and places its Y/U/V planes atomically.
 // Per-block sample references and neighbor CBF/CBP facts are caller-gathered from already decoded neighbors.
 func (decoder *CABACArithmeticDecoder) DecodeIIntraMacroblock(input CABACIIntraMacroblockInput, contexts *[CABACContextCount]CABACContextModel, builder *Yuv420FrameBuilder, address int) (CABACIIntraMacroblockResult, error) {
+	return decoder.decodeIntraMacroblock(input, contexts, builder, address, nil)
+}
+
+func (decoder *CABACArithmeticDecoder) decodeIntraMacroblock(input CABACIIntraMacroblockInput, contexts *[CABACContextCount]CABACContextModel, builder *Yuv420FrameBuilder, address int, parsedType *uint8) (CABACIIntraMacroblockResult, error) {
 	var result CABACIIntraMacroblockResult
 	if decoder == nil || decoder.bits == nil || contexts == nil || builder == nil || input.PreviousQPY < 0 || input.PreviousQPY > 51 {
 		return result, ErrCABACContextState
@@ -1339,13 +1344,19 @@ func (decoder *CABACArithmeticDecoder) DecodeIIntraMacroblock(input CABACIIntraM
 	trial := *decoder
 	trial.bits = &readerCopy
 	trialContexts := *contexts
-	var mbTypeContexts [8]CABACContextModel
-	copy(mbTypeContexts[:], trialContexts[3:11])
-	mbType, err := trial.DecodeIIntraMBType(input.SliceType, &mbTypeContexts, input.LeftAvailable, input.LeftIntra16OrPCM, input.TopAvailable, input.TopIntra16OrPCM)
-	if err != nil {
-		return result, err
+	var mbType uint8
+	var err error
+	if parsedType == nil {
+		var mbTypeContexts [8]CABACContextModel
+		copy(mbTypeContexts[:], trialContexts[3:11])
+		mbType, err = trial.DecodeIIntraMBType(input.SliceType, &mbTypeContexts, input.LeftAvailable, input.LeftIntra16OrPCM, input.TopAvailable, input.TopIntra16OrPCM)
+		if err != nil {
+			return result, err
+		}
+		copy(trialContexts[3:11], mbTypeContexts[:])
+	} else {
+		mbType = *parsedType
 	}
-	copy(trialContexts[3:11], mbTypeContexts[:])
 	result.MacroblockType = mbType
 	result.QPY = input.PreviousQPY
 	if mbType == 25 {
@@ -1518,6 +1529,8 @@ func (decoder *CABACArithmeticDecoder) DecodeIIntraMacroblock(input CABACIIntraM
 			return CABACIIntraMacroblockResult{}, err
 		}
 		result.Luma = lumaResult.Samples
+		result.Luma4x4CodedBlockFlags = lumaResult.ACCodedBlockFlags
+		result.Luma16x16DCCoded = lumaResult.DCCoded
 		chromaResult, err := trial.DecodeIntraChroma420Macroblock(&trialContexts, chromaMode, true, mbType, true, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
 		if err != nil {
 			return CABACIIntraMacroblockResult{}, err
@@ -1579,7 +1592,7 @@ func decodeIntraNxN4x4LumaResiduals(decoder *CABACArithmeticDecoder, contexts *[
 		}
 	}
 	var err error
-	result.Samples, err = ReconstructLumaIntra4x4Macroblock(blocks)
+	result.Samples, err = reconstructLumaIntra4x4Macroblock(blocks, true)
 	return result, err
 }
 
@@ -1604,7 +1617,7 @@ func decodeIntraNxN8x8LumaResiduals(decoder *CABACArithmeticDecoder, contexts *[
 		result.Residuals[blockIndex] = blocks[blockIndex].Residual
 	}
 	var err error
-	result.Samples, err = ReconstructLumaIntra8x8Macroblock(blocks)
+	result.Samples, err = reconstructLumaIntra8x8Macroblock(blocks, true)
 	return result, err
 }
 

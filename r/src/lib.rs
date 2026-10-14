@@ -5,6 +5,8 @@ mod bitreader;
 mod cabac;
 mod cabac_init;
 mod decoder;
+mod imageencoder;
+mod jpegencoder;
 mod mp4boxes;
 mod mp4file;
 mod nal;
@@ -43,6 +45,7 @@ pub use cabac::{
     CABAC_CONTEXT_COUNT,
 };
 pub use decoder::{DecodeError, DependencySlice, H264Decoder};
+pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use mp4boxes::AvcConfiguration;
 pub use mp4file::Mp4File;
 pub use nal::{ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals, NalHeader};

@@ -1,6 +1,61 @@
-use std::{collections::HashMap, fmt, io};
+use std::{
+    collections::HashMap,
+    env, fmt, fs,
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::reconstruction::Yuv420Frame;
+use bincode::Options;
+
+const CHECKPOINT_MAGIC: &[u8; 16] = b"PYGORVID-RS-CKPT";
+const CHECKPOINT_VERSION: u32 = 1;
+const MAX_CHECKPOINT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DecoderCheckpoint {
+    magic: [u8; 16],
+    version: u32,
+    sample_count: Option<usize>,
+    sequence_parameter_sets: Vec<Vec<u8>>,
+    picture_parameter_sets: Vec<Vec<u8>>,
+    gop_sync_sample_index: Option<u64>,
+    last_decoded_sample_index: Option<u64>,
+    maximum_long_term_frame_idx: Option<u32>,
+    poc_type0_state: crate::PocType0State,
+    poc_type12_state: crate::PocType12State,
+    decoded_frames: Vec<(usize, Yuv420Frame)>,
+    reference_pictures: Vec<crate::DecodedReferencePicture>,
+}
+
+fn invalid_checkpoint(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn validate_checkpoint_frame(frame: &Yuv420Frame) -> io::Result<()> {
+    let valid_plane = |plane: &[u8], width: usize, height: usize, stride: usize| {
+        width > 0
+            && height > 0
+            && stride >= width
+            && height
+                .checked_sub(1)
+                .and_then(|rows| rows.checked_mul(stride))
+                .and_then(|length| length.checked_add(width))
+                .is_some_and(|required| plane.len() >= required)
+    };
+    let chroma_width = frame.width / 2 + frame.width % 2;
+    let chroma_height = frame.height / 2 + frame.height % 2;
+    if valid_plane(&frame.y, frame.width, frame.height, frame.y_stride)
+        && valid_plane(&frame.u, chroma_width, chroma_height, frame.u_stride)
+        && valid_plane(&frame.v, chroma_width, chroma_height, frame.v_stride)
+    {
+        Ok(())
+    } else {
+        Err(invalid_checkpoint("checkpoint frame layout is invalid"))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencySlice {
@@ -500,6 +555,11 @@ pub struct H264Decoder {
     sample_reader: Option<crate::videosamplereader::VideoSampleReader>,
     first_sync_sample_index: Option<u64>,
     unsupported_feature: bool,
+    checkpoint_parameter_sets: (Vec<Vec<u8>>, Vec<Vec<u8>>),
+    checkpoint_path: Option<PathBuf>,
+    gop_sync_sample_index: Option<u64>,
+    last_decoded_sample_index: Option<u64>,
+    maximum_long_term_frame_idx: Option<u32>,
     poc_type0_state: crate::PocType0State,
     poc_type12_state: crate::PocType12State,
     poc_cache: Option<(crate::PictureIdentity, i64)>,
@@ -524,6 +584,10 @@ impl H264Decoder {
             .iter()
             .filter_map(|nal| crate::pps::parse_pps(nal).ok())
             .collect();
+        let checkpoint_parameter_sets = (
+            configuration.sequence_parameter_sets.clone(),
+            configuration.picture_parameter_sets.clone(),
+        );
         Self {
             sample_count: Some(sample_count),
             sequence_parameter_sets,
@@ -533,11 +597,56 @@ impl H264Decoder {
             sample_reader: Some(sample_reader),
             first_sync_sample_index,
             unsupported_feature,
+            checkpoint_parameter_sets,
+            checkpoint_path: None,
+            gop_sync_sample_index: None,
+            last_decoded_sample_index: None,
+            maximum_long_term_frame_idx: None,
             poc_type0_state: crate::PocType0State::default(),
             poc_type12_state: crate::PocType12State::default(),
             poc_cache: None,
             decoded_frames: HashMap::new(),
         }
+    }
+
+    pub fn new_with_checkpoint_path<P: AsRef<Path>>(
+        sample_reader: crate::videosamplereader::VideoSampleReader,
+        path: P,
+    ) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut decoder = Self::new(sample_reader);
+        decoder.checkpoint_path = Some(path.clone());
+        if path.is_file() {
+            decoder.load_checkpoint(path)?;
+        }
+        Ok(decoder)
+    }
+
+    pub fn new_with_checkpoint_dir<P: AsRef<Path>>(
+        sample_reader: crate::videosamplereader::VideoSampleReader,
+        directory: P,
+    ) -> io::Result<Self> {
+        let stem = sample_reader
+            .path()
+            .and_then(Path::file_stem)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "decoder".to_owned());
+        Self::new_with_checkpoint_path(
+            sample_reader,
+            directory.as_ref().join(format!("{stem}.ckpt")),
+        )
+    }
+
+    pub fn new_with_environment_checkpoint(
+        sample_reader: crate::videosamplereader::VideoSampleReader,
+    ) -> io::Result<Self> {
+        if let Some(path) = env::var_os("PYGORVID_CHECKPOINT_PATH") {
+            return Self::new_with_checkpoint_path(sample_reader, path);
+        }
+        if let Some(directory) = env::var_os("PYGORVID_CHECKPOINT_DIR") {
+            return Self::new_with_checkpoint_dir(sample_reader, directory);
+        }
+        Ok(Self::new(sample_reader))
     }
 
     pub fn with_sample_count(sample_count: usize) -> Self {
@@ -550,6 +659,11 @@ impl H264Decoder {
             sample_reader: None,
             first_sync_sample_index: None,
             unsupported_feature: false,
+            checkpoint_parameter_sets: (Vec::new(), Vec::new()),
+            checkpoint_path: None,
+            gop_sync_sample_index: None,
+            last_decoded_sample_index: None,
+            maximum_long_term_frame_idx: None,
             poc_type0_state: crate::PocType0State::default(),
             poc_type12_state: crate::PocType12State::default(),
             poc_cache: None,
@@ -559,6 +673,161 @@ impl H264Decoder {
 
     pub fn sample_count(&self) -> usize {
         self.sample_count.unwrap_or(0)
+    }
+
+    pub fn save_checkpoint<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let target = path.as_ref();
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = target
+            .file_name()
+            .ok_or_else(|| invalid_checkpoint("checkpoint path has no file name"))?
+            .to_string_lossy();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary = parent.join(format!(".{name}.tmp.{}.{}", std::process::id(), nonce));
+        let result = (|| {
+            let mut file = File::create(&temporary)?;
+            let mut frame_indices: Vec<_> = self.decoded_frames.keys().copied().collect();
+            frame_indices.sort_unstable();
+            let state = DecoderCheckpoint {
+                magic: *CHECKPOINT_MAGIC,
+                version: CHECKPOINT_VERSION,
+                sample_count: self.sample_count,
+                sequence_parameter_sets: self.checkpoint_parameter_sets.0.clone(),
+                picture_parameter_sets: self.checkpoint_parameter_sets.1.clone(),
+                gop_sync_sample_index: self.gop_sync_sample_index,
+                last_decoded_sample_index: self.last_decoded_sample_index,
+                maximum_long_term_frame_idx: self.maximum_long_term_frame_idx,
+                poc_type0_state: self.poc_type0_state,
+                poc_type12_state: self.poc_type12_state,
+                decoded_frames: frame_indices
+                    .into_iter()
+                    .map(|index| (index, self.decoded_frames[&index].clone()))
+                    .collect(),
+                reference_pictures: self
+                    .reference_picture_buffer
+                    .references()
+                    .into_iter()
+                    .filter_map(|reference| self.reference_picture_buffer.get(reference.identifier))
+                    .collect(),
+            };
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(MAX_CHECKPOINT_BYTES)
+                .serialize_into(&mut file, &state)
+                .map_err(|error| {
+                    invalid_checkpoint(&format!("checkpoint encode failed: {error}"))
+                })?;
+            file.sync_all()?;
+            fs::rename(&temporary, target)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn load_checkpoint<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+        let file = File::open(path)?;
+        if file.metadata()?.len() > MAX_CHECKPOINT_BYTES {
+            return Err(invalid_checkpoint("checkpoint file exceeds the size limit"));
+        }
+        let state: DecoderCheckpoint = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(MAX_CHECKPOINT_BYTES)
+            .reject_trailing_bytes()
+            .deserialize_from(file)
+            .map_err(|error| invalid_checkpoint(&format!("checkpoint decode failed: {error}")))?;
+        if state.magic != *CHECKPOINT_MAGIC {
+            return Err(invalid_checkpoint("invalid checkpoint file format"));
+        }
+        if state.version != CHECKPOINT_VERSION {
+            return Err(invalid_checkpoint("unsupported checkpoint version"));
+        }
+        if state.sample_count != self.sample_count {
+            return Err(invalid_checkpoint(
+                "checkpoint sample count does not match the loaded video stream",
+            ));
+        }
+        if self.sample_reader.is_some()
+            && (state.sequence_parameter_sets != self.checkpoint_parameter_sets.0
+                || state.picture_parameter_sets != self.checkpoint_parameter_sets.1)
+        {
+            return Err(invalid_checkpoint(
+                "checkpoint parameter sets do not match the loaded video stream",
+            ));
+        }
+        if let (Some(gop_sync), Some(last_decoded)) =
+            (state.gop_sync_sample_index, state.last_decoded_sample_index)
+        {
+            if last_decoded < gop_sync
+                || self
+                    .sample_count
+                    .is_some_and(|count| last_decoded >= count as u64)
+            {
+                return Err(invalid_checkpoint("checkpoint decode position is invalid"));
+            }
+        } else if state.gop_sync_sample_index.is_some() || state.last_decoded_sample_index.is_some()
+        {
+            return Err(invalid_checkpoint(
+                "checkpoint decode position is incomplete",
+            ));
+        }
+
+        let mut decoded_frames = HashMap::new();
+        for (index, frame) in state.decoded_frames {
+            if self.sample_count.is_some_and(|count| index >= count)
+                || decoded_frames.contains_key(&index)
+            {
+                return Err(invalid_checkpoint("checkpoint frame index is invalid"));
+            }
+            validate_checkpoint_frame(&frame)?;
+            decoded_frames.insert(index, frame);
+        }
+
+        let mut reference_picture_buffer = crate::ReferencePictureBuffer::default();
+        for picture in state.reference_pictures {
+            if self
+                .sample_count
+                .is_some_and(|count| picture.reference.identifier as usize >= count)
+                || reference_picture_buffer
+                    .references()
+                    .iter()
+                    .any(|reference| reference.identifier == picture.reference.identifier)
+            {
+                return Err(invalid_checkpoint(
+                    "checkpoint reference identifier is invalid",
+                ));
+            }
+            validate_checkpoint_frame(&picture.frame)?;
+            if picture
+                .motion_field
+                .windows(2)
+                .any(|pair| pair[0].0 >= pair[1].0)
+            {
+                return Err(invalid_checkpoint("checkpoint motion field is invalid"));
+            }
+            reference_picture_buffer
+                .store_with_motion_field(picture.reference, &picture.frame, picture.motion_field)
+                .map_err(|_| invalid_checkpoint("checkpoint reference picture is invalid"))?;
+        }
+
+        self.decoded_frames = decoded_frames;
+        self.reference_picture_buffer = reference_picture_buffer;
+        self.gop_sync_sample_index = state.gop_sync_sample_index;
+        self.last_decoded_sample_index = state.last_decoded_sample_index;
+        self.maximum_long_term_frame_idx = state.maximum_long_term_frame_idx;
+        self.poc_type0_state = state.poc_type0_state;
+        self.poc_type12_state = state.poc_type12_state;
+        self.poc_cache = None;
+        Ok(())
     }
 
     pub fn reference_pictures(&self) -> Vec<crate::reconstruction::ReferencePicture> {
@@ -1713,17 +1982,49 @@ impl H264Decoder {
         let picture_groups = self
             .dependency_slice_pictures(requested_index)
             .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-        self.reference_picture_buffer.clear();
-        self.poc_type0_state = crate::PocType0State::default();
-        self.poc_type12_state = crate::PocType12State::default();
-        self.poc_cache = None;
-        let mut maximum_long_term_frame_idx = None;
+        let gop_sync_sample_index = picture_groups
+            .first()
+            .and_then(|picture| picture.first())
+            .map(|slice| slice.sample_index)
+            .ok_or_else(|| DecodeError::DecodeFailure("dependency window is empty".into()))?;
+        if self.gop_sync_sample_index != Some(gop_sync_sample_index)
+            || self.last_decoded_sample_index.is_none()
+        {
+            self.reference_picture_buffer.clear();
+            self.poc_type0_state = crate::PocType0State::default();
+            self.poc_type12_state = crate::PocType12State::default();
+            self.poc_cache = None;
+            self.maximum_long_term_frame_idx = None;
+            self.gop_sync_sample_index = Some(gop_sync_sample_index);
+            self.last_decoded_sample_index = None;
+        }
 
         let mut target_frame = None;
         for picture in picture_groups {
             let first_slice = picture
                 .first()
                 .ok_or_else(|| DecodeError::DecodeFailure("dependency picture is empty".into()))?;
+            let sample_index = first_slice.sample_index;
+            let sample_index_usize = usize::try_from(sample_index)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            let display_index = self
+                .sample_reader
+                .as_ref()
+                .ok_or(DecodeError::MissingSampleReader)?
+                .presentation_index_for_sample_index(sample_index_usize)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            if self
+                .last_decoded_sample_index
+                .is_some_and(|last| sample_index <= last)
+            {
+                if sample_index == target_sample_index as u64 && display_index == requested_index {
+                    target_frame = self.decoded_frames.get(&display_index).cloned();
+                    if target_frame.is_some() {
+                        break;
+                    }
+                }
+                continue;
+            }
             let header = first_slice.header.clone();
             let pps = self
                 .picture_parameter_sets
@@ -1750,7 +2051,7 @@ impl H264Decoder {
                 self.poc_type0_state = crate::PocType0State::default();
                 self.poc_type12_state = crate::PocType12State::default();
                 self.poc_cache = None;
-                maximum_long_term_frame_idx = header.long_term_reference.then_some(0);
+                self.maximum_long_term_frame_idx = header.long_term_reference.then_some(0);
             }
             let picture_order_count = self
                 .picture_order_count(&header, &sps)
@@ -1865,14 +2166,6 @@ impl H264Decoder {
                 u: planes.next().unwrap(),
                 v: planes.next().unwrap(),
             };
-            let sample_index = usize::try_from(first_slice.sample_index)
-                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-            let display_index = self
-                .sample_reader
-                .as_ref()
-                .ok_or(DecodeError::MissingSampleReader)?
-                .presentation_index_for_sample_index(sample_index)
-                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             self.decoded_frames.insert(display_index, frame.clone());
             if header.nal_ref_idc != 0 {
                 let (stored_frame_num, long_term_frame_idx, reset_poc_state) = if header.idr {
@@ -1894,7 +2187,7 @@ impl H264Decoder {
                         header.frame_num,
                         max_frame_num,
                         &header.memory_management_operations,
-                        &mut maximum_long_term_frame_idx,
+                        &mut self.maximum_long_term_frame_idx,
                     )
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
                     (
@@ -1993,7 +2286,11 @@ impl H264Decoder {
                     self.poc_cache = None;
                 }
             }
-            if sample_index == target_sample_index && display_index == requested_index {
+            self.last_decoded_sample_index = Some(sample_index);
+            if let Some(path) = self.checkpoint_path.clone() {
+                let _ = self.save_checkpoint(path);
+            }
+            if sample_index == target_sample_index as u64 && display_index == requested_index {
                 target_frame = Some(frame);
                 break;
             }

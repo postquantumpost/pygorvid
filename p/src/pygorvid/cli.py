@@ -1,8 +1,16 @@
 import argparse
 import math
 import sys
+import tempfile
 from pathlib import Path
 
+from .colorconv import PixelConverter
+from .decoder import DecoderError, H264Decoder
+from .jpegencoder import JPEGEncoder
+from .mp4boxes import Mp4FormatError
+from .pixelbuffer import PixelColorRange
+from .pngencoder import PNGEncoder
+from .videosamplereader import VideoSampleReader
 from .vidfile import openfile
 
 
@@ -28,12 +36,24 @@ def _nonnegative_int(value: str) -> int:
 
 
 def _extract_frame(input_path: str, frame: int, output_path: str) -> None:
-    extension = Path(output_path).suffix.lower()
+    output = Path(output_path)
+    extension = output.suffix.lower()
     if extension not in {".png", ".jpg"}:
         raise ValueError("--output must end in .png or .jpg")
-    raise ValueError(
-        "native frame extraction is not available in this build; ffmpeg is no longer invoked by the extraction path"
+    reader = VideoSampleReader(input_path)
+    try:
+        decoded = H264Decoder(reader).decode_frame(frame)
+    finally:
+        reader.close()
+    rgb = PixelConverter(PixelColorRange.LIMITED).convert_yuv420_to_rgb(
+        decoded.width, decoded.height, decoded.y, decoded.u, decoded.v,
+        decoded.y_stride, decoded.u_stride, decoded.v_stride,
     )
+    payload = PNGEncoder().encode(rgb) if extension == ".png" else JPEGEncoder().encode(rgb)
+    with tempfile.TemporaryDirectory(prefix=".pygorvid-", dir=output.parent) as directory:
+        temporary = Path(directory) / "image"
+        temporary.write_bytes(payload)
+        temporary.replace(output)
 
 
 def main(argv=None) -> int:
@@ -62,7 +82,7 @@ def main(argv=None) -> int:
             output = output.with_name(args.prefix + output.name)
         try:
             _extract_frame(files[0], args.extractframe, str(output))
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, DecoderError, Mp4FormatError) as e:
             print(f"{files[0]}: {e}", file=sys.stderr)
             return 1
         print(f"{files[0]}: extracted frame {args.extractframe} to {output}")

@@ -2,7 +2,7 @@ use std::io::{self, ErrorKind};
 
 use crate::slice::RefPicListModification;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReferencePicture {
     pub identifier: u32,
     pub frame_num: u32,
@@ -10,7 +10,7 @@ pub struct ReferencePicture {
     pub long_term_frame_idx: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PocType0State {
     pub previous_pic_order_cnt_msb: i64,
     pub previous_pic_order_cnt_lsb: u32,
@@ -72,7 +72,7 @@ impl PocType0State {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PocType12State {
     pub previous_frame_num: u32,
     pub previous_frame_num_offset: i64,
@@ -218,7 +218,7 @@ fn sum_poc_offsets(offsets: &[i64]) -> io::Result<i64> {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Yuv420Frame {
     pub width: usize,
     pub height: usize,
@@ -1489,14 +1489,14 @@ impl PresentationOrderBuffer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DecodedReferencePicture {
     pub reference: ReferencePicture,
     pub frame: Yuv420Frame,
     pub motion_field: Vec<(usize, [ColocatedMotionFact; 16])>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColocatedMotionFact {
     pub reference_index: i32,
     pub motion_vector: MotionVector,
@@ -1851,27 +1851,32 @@ pub fn build_b_reference_lists(
     pictures: &[ReferencePicture],
     current_picture_order_cnt: i64,
 ) -> (Vec<ReferencePicture>, Vec<ReferencePicture>) {
-    let mut before_or_equal = Vec::new();
+    let mut before = Vec::new();
+    let mut equal = Vec::new();
     let mut after = Vec::new();
     let mut long_term = Vec::new();
     for picture in pictures {
         if picture.long_term_frame_idx.is_some() {
             long_term.push(*picture);
-        } else if picture.picture_order_cnt <= current_picture_order_cnt {
-            before_or_equal.push(*picture);
+        } else if picture.picture_order_cnt < current_picture_order_cnt {
+            before.push(*picture);
+        } else if picture.picture_order_cnt == current_picture_order_cnt {
+            equal.push(*picture);
         } else {
             after.push(*picture);
         }
     }
-    before_or_equal.sort_by(|left, right| right.picture_order_cnt.cmp(&left.picture_order_cnt));
+    before.sort_by(|left, right| right.picture_order_cnt.cmp(&left.picture_order_cnt));
     after.sort_by(|left, right| left.picture_order_cnt.cmp(&right.picture_order_cnt));
     long_term.sort_by_key(|picture| picture.long_term_frame_idx);
 
-    let mut list0 = before_or_equal.clone();
+    let mut list0 = before.clone();
+    list0.extend_from_slice(&equal);
     list0.extend_from_slice(&after);
     list0.extend_from_slice(&long_term);
     let mut list1 = after;
-    list1.extend_from_slice(&before_or_equal);
+    list1.extend_from_slice(&equal);
+    list1.extend_from_slice(&before);
     list1.extend_from_slice(&long_term);
     if list0 == list1 && list1.len() > 1 {
         list1.swap(0, 1);
@@ -2009,7 +2014,7 @@ pub fn build_p_reference_list(
         .collect())
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MotionVector {
     pub x: i32,
     pub y: i32,
@@ -5286,7 +5291,7 @@ mod tests {
                 .store(replacement, &invalid_frame)
                 .unwrap_err()
                 .kind(),
-            ErrorKind::InvalidData
+            ErrorKind::InvalidInput
         );
     }
 
@@ -5778,7 +5783,7 @@ mod tests {
                 .iter()
                 .map(|picture| picture.identifier)
                 .collect::<Vec<_>>(),
-            [5, 1, 3, 2, 4, 6, 7]
+            [1, 3, 5, 2, 4, 6, 7]
         );
         assert_eq!(
             list1

@@ -1264,7 +1264,7 @@ func TestBuildBReferenceListsOrdersByPictureOrderCount(t *testing.T) {
 		{ID: 7, IsLongTerm: true, LongTermFrameIdx: 4},
 	}
 	lists := BuildBReferenceLists(pictures, 10)
-	for index, wantID := range []uint32{5, 1, 3, 2, 4, 6, 7} {
+	for index, wantID := range []uint32{1, 3, 5, 2, 4, 6, 7} {
 		if lists.List0[index].ID != wantID {
 			t.Errorf("list0[%d].ID = %d; want %d", index, lists.List0[index].ID, wantID)
 		}

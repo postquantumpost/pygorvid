@@ -1360,7 +1360,7 @@ def test_build_b_reference_lists_orders_poc_partitions_and_long_term_references(
         ReferencePicture(7, long_term_frame_idx=4),
     ]
     list0, list1 = build_b_reference_lists(pictures, 10)
-    assert [picture.identifier for picture in list0] == [5, 1, 3, 2, 4, 6, 7]
+    assert [picture.identifier for picture in list0] == [1, 3, 5, 2, 4, 6, 7]
     assert [picture.identifier for picture in list1] == [2, 4, 5, 1, 3, 6, 7]
 
 

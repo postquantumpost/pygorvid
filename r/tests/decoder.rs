@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf, sync::Mutex};
 
 use pygorvid::{
     CabacDecodedSliceMacroblock, CabacInterMacroblockPartition, CabacInterMacroblockResult,
@@ -7,6 +7,17 @@ use pygorvid::{
     PresentationOrderBuffer, PresentationPicture, ReferencePicture, VideoSampleReader, Yuv420Frame,
     Yuv420FrameBuilder,
 };
+
+fn decoder_checkpoint_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tmp/checkpoints/12-8-rust")
+        .join(name)
+}
+
+fn decoder_checkpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[test]
 fn a_decoder_smoke_16x16() {
@@ -46,6 +57,58 @@ fn assert_decoder_smoke_fixture(name: &str, dimension: usize, expected_hashes: [
             });
         assert_eq!(hash, expected_hash, "{name} frame {frame_index} YUV");
     }
+}
+
+#[test]
+fn h264_decoder_checkpoint_auto_saves_and_restores_cached_frames() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples");
+    let checkpoint_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../tmp/checkpoints/rust-roundtrip-{}",
+        std::process::id()
+    ));
+    let checkpoint_path = checkpoint_dir.join("smoke16.ckpt");
+
+    let reader = VideoSampleReader::open(fixture_dir.join("decoder-smoke-16x16.mp4")).unwrap();
+    let mut first = H264Decoder::new_with_checkpoint_path(reader, &checkpoint_path).unwrap();
+    let frame_zero = first.decode_frame(0).unwrap();
+    assert!(checkpoint_path.is_file());
+    let reference_pictures = first.reference_pictures();
+    assert!(!reference_pictures.is_empty());
+    drop(first);
+
+    let reader = VideoSampleReader::open(fixture_dir.join("decoder-smoke-16x16.mp4")).unwrap();
+    let mut restored = H264Decoder::new_with_checkpoint_path(reader, &checkpoint_path).unwrap();
+    assert_eq!(restored.reference_pictures(), reference_pictures);
+    assert_eq!(restored.decode_frame(0).unwrap(), frame_zero);
+    let frame_one = restored.decode_frame(1).unwrap();
+    let hash = [&frame_one.y, &frame_one.u, &frame_one.v]
+        .into_iter()
+        .flatten()
+        .fold(0xcbf29ce484222325_u64, |hash, sample| {
+            (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+        });
+    assert_eq!(hash, 0x29631735ff370504);
+
+    let other_reader =
+        VideoSampleReader::open(fixture_dir.join("decoder-smoke-64x64.mp4")).unwrap();
+    let incompatible = H264Decoder::new_with_checkpoint_path(other_reader, &checkpoint_path);
+    assert!(matches!(
+        incompatible,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+
+    let cached_frame = restored.decode_frame(0).unwrap();
+    fs::write(&checkpoint_path, b"not a valid checkpoint").unwrap();
+    assert_eq!(
+        restored
+            .load_checkpoint(&checkpoint_path)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(restored.decode_frame(0).unwrap(), cached_frame);
+
+    fs::remove_dir_all(checkpoint_dir).unwrap();
 }
 
 #[test]
@@ -283,6 +346,7 @@ fn decoder_assembles_complete_native_idr_picture() {
 
 #[test]
 fn decoder_filtered_idr_matches_reference_planes() {
+    let _checkpoint_lock = decoder_checkpoint_test_lock();
     for (name, width, height, expected) in [
         (
             "high42-1080p.mp4",
@@ -300,8 +364,10 @@ fn decoder_filtered_idr_matches_reference_planes() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../testdata/h264")
             .join(name);
-        let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
-        let frame = decoder.decode_frame(0).unwrap();
+        let reader = VideoSampleReader::open(&fixture).unwrap();
+        let mut decoder =
+            H264Decoder::new_with_checkpoint_dir(reader, decoder_checkpoint_path("idr")).unwrap();
+        let mut frame = decoder.decode_frame(0).unwrap();
         assert_eq!((frame.width, frame.height), (width, height));
         let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
             plane.iter().fold(0xcbf29ce484222325_u64, |hash, sample| {
@@ -309,15 +375,20 @@ fn decoder_filtered_idr_matches_reference_planes() {
             })
         });
         assert_eq!(hashes, expected, "{name}: filtered IDR plane mismatch");
-        assert_eq!(decoder.decode_frame(0).unwrap(), frame);
+        let expected = frame.clone();
+        frame.y[0] ^= 1;
+        assert_eq!(decoder.decode_frame(0).unwrap(), expected);
     }
 }
 
 #[test]
 fn decoder_filtered_p_picture_matches_reference_planes() {
+    let _checkpoint_lock = decoder_checkpoint_test_lock();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high42-1080p.mp4");
-    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder =
+        H264Decoder::new_with_checkpoint_dir(reader, decoder_checkpoint_path("idr")).unwrap();
     let pictures = decoder.dependency_slice_pictures(3).unwrap();
     for picture in &pictures {
         for slice in picture {
@@ -366,10 +437,87 @@ fn decoder_filtered_p_picture_matches_reference_planes() {
 }
 
 #[test]
+fn decoder_high52_filtered_p_picture_matches_reference_planes() {
+    let _checkpoint_lock = decoder_checkpoint_test_lock();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high52-2160p.mp4");
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder =
+        H264Decoder::new_with_checkpoint_dir(reader, decoder_checkpoint_path("idr")).unwrap();
+    let references_before = decoder.reference_pictures();
+    let restored_p_picture = references_before.iter().any(|reference| reference.identifier == 4);
+    let mut frame = decoder.decode_frame(4).unwrap();
+    assert_eq!((frame.width, frame.height), (3840, 2160));
+    let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
+        plane.iter().fold(0xcbf29ce484222325_u64, |hash, sample| {
+            (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+        })
+    });
+    assert_eq!(
+        hashes,
+        [0xadf923704a54e720, 0xeddc31b90090f325, 0xeddc31b90090f325],
+        "high52 filtered P-picture planes differ from the independent reference"
+    );
+    if restored_p_picture {
+        assert_eq!(decoder.reference_pictures(), references_before);
+    } else {
+        assert_eq!(
+            decoder
+                .reference_pictures()
+                .iter()
+                .map(|reference| reference.identifier)
+                .collect::<Vec<_>>(),
+            [0, 4]
+        );
+    }
+    let references_before_repeat = decoder.reference_pictures();
+    let expected = frame.clone();
+    frame.y[0] ^= 1;
+    assert_eq!(decoder.decode_frame(4).unwrap(), expected);
+    assert_eq!(decoder.reference_pictures(), references_before_repeat);
+}
+
+#[test]
+fn decoder_high52_filtered_b_picture_matches_reference_planes() {
+    let _checkpoint_lock = decoder_checkpoint_test_lock();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high52-2160p.mp4");
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder =
+        H264Decoder::new_with_checkpoint_dir(reader, decoder_checkpoint_path("idr")).unwrap();
+    let mut frame = decoder.decode_frame(1).unwrap();
+    assert_eq!((frame.width, frame.height), (3840, 2160));
+    let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
+        plane.iter().fold(0xcbf29ce484222325_u64, |hash, sample| {
+            (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+        })
+    });
+    assert_eq!(
+        hashes,
+        [0xfb6aab2d0b56d8e2, 0xeddc31b90090f325, 0xeddc31b90090f325],
+        "high52 filtered B-picture planes differ from the independent reference"
+    );
+    assert_eq!(
+        decoder
+            .reference_pictures()
+            .iter()
+            .map(|reference| reference.identifier)
+            .collect::<Vec<_>>(),
+        [0, 4, 2]
+    );
+    let expected = frame.clone();
+    frame.y[0] ^= 1;
+    assert_eq!(decoder.decode_frame(1).unwrap(), expected);
+}
+
+#[test]
 fn decoder_filtered_b_picture_matches_reference_planes() {
+    let _checkpoint_lock = decoder_checkpoint_test_lock();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/high42-1080p.mp4");
-    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    let reader = VideoSampleReader::open(&fixture).unwrap();
+    let mut decoder =
+        H264Decoder::new_with_checkpoint_dir(reader, decoder_checkpoint_path("idr")).unwrap();
     let frame = decoder.decode_frame(1).unwrap();
     assert_eq!((frame.width, frame.height), (1920, 1080));
     let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {
@@ -922,18 +1070,20 @@ fn h264_decoder_parses_dependency_slice_headers_without_advancing_reader() {
 
 #[test]
 fn h264_decoder_rejects_runtime_ffmpeg_subprocesses() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("testdata")
-        .join("h264")
-        .join("high42-1080p.mp4");
-    let reader = VideoSampleReader::open(&fixture).unwrap();
-    let mut decoder = H264Decoder::new(reader);
-    match decoder.decode_frame(0) {
-        Ok(frame) => assert!(frame.width > 0 && frame.height > 0),
-        Err(DecodeError::DecodeFailure(message)) => {
-            assert!(!message.to_lowercase().contains("ffmpeg"));
+    for name in ["high42-1080p.mp4", "high52-2160p.mp4"] {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join("h264")
+            .join(name);
+        let reader = VideoSampleReader::open(&fixture).unwrap();
+        let mut decoder = H264Decoder::new(reader);
+        match decoder.decode_frame(0) {
+            Ok(frame) => assert!(frame.width > 0 && frame.height > 0, "{name}"),
+            Err(DecodeError::DecodeFailure(message)) => {
+                assert!(!message.to_lowercase().contains("ffmpeg"), "{name}");
+            }
+            Err(error) => panic!("{name}: unexpected native decode error: {error}"),
         }
-        Err(error) => panic!("unexpected native decode error: {error}"),
     }
 }

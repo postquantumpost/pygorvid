@@ -234,7 +234,9 @@ fn parses_poc_modes_and_field_picture_identity() {
         0,
         &(fixed_bits(3, 4) + "11" + &fixed_bits(5, 4)),
     );
-    let header = parse_slice_header(&field, &make_sps(0, false, false), &pps_bottom).unwrap();
+    let mut field_sps = make_sps(0, false, true);
+    field_sps.frame_mbs_only = false;
+    let header = parse_slice_header(&field, &field_sps, &pps_bottom).unwrap();
     assert!(header.field_pic_flag && header.bottom_field_flag);
     assert_eq!(header.pic_order_cnt_lsb, 5);
     assert!(!header.has_delta_pic_order_bottom);

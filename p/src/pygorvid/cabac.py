@@ -115,6 +115,19 @@ class CABACInterPartitionNeighbors:
     direct_prediction: CABACBDirectMacroblockResult | None = None
 
 
+def _aligned_partition_top_candidate(
+    partition_neighbors: Sequence[CABACInterPartitionNeighbors],
+    list_index: int,
+    sample_x: int,
+    sample_y: int,
+) -> tuple[bool, object | None]:
+    if len(partition_neighbors) != 16 or sample_y >= 0 or not 0 <= sample_x < 16:
+        return False, None
+    cell = partition_neighbors[sample_x // 4]
+    list_neighbors = cell.list0 if list_index == 0 else cell.list1
+    return True, list_neighbors.top_candidate
+
+
 @dataclass(frozen=True)
 class CABACInterMacroblockInput:
     slice_type: int
@@ -3397,6 +3410,12 @@ class CABACArithmeticDecoder:
                         if 0 <= sample_x < 16 and 0 <= sample_y < 16:
                             fact = current_fact(sample_x, sample_y, list_index)
                             return CABACInterNeighbor(), None if fact is None else fact[1]
+                        if name == "top_right":
+                            handled, candidate = _aligned_partition_top_candidate(
+                                input.partition_neighbors, list_index, sample_x, sample_y
+                            )
+                            if handled:
+                                return CABACInterNeighbor(), candidate
                         if name == "top_right" and sample_x >= 16 and len(input.partition_neighbors) == 16:
                             edge_row = min(max(y // 4, 0), 3)
                             edge = input.partition_neighbors[edge_row * 4 + 3]

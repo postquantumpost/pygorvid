@@ -153,7 +153,7 @@ def test_poc_one_zero_deltas_poc_two_and_field_picture():
     field = make_slice(0x41, 0, 0, 0, fixed_bits(3, 4) + "11" + fixed_bits(5, 4))
     header = parse_with(
         field,
-        sps=parse_slice_sps(frame_mbs_only=False),
+        sps=replace(parse_slice_sps(), frame_mbs_only=False),
         pps=parse_slice_pps(bottom_field_poc=True),
     )
     assert header.field_pic_flag and header.bottom_field_flag

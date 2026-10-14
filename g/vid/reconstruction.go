@@ -1350,20 +1350,23 @@ func BuildPReferenceList(pictures []ReferencePicture, currentFrameNum, maximumFr
 
 // BuildBReferenceLists constructs the initial progressive-frame B-slice lists.
 func BuildBReferenceLists(pictures []ReferencePicture, currentPictureOrderCnt int64) BReferenceLists {
-	beforeOrEqual := make([]ReferencePicture, 0, len(pictures))
+	before := make([]ReferencePicture, 0, len(pictures))
+	equal := make([]ReferencePicture, 0, len(pictures))
 	after := make([]ReferencePicture, 0, len(pictures))
 	longTerm := make([]ReferencePicture, 0, len(pictures))
 	for _, picture := range pictures {
 		if picture.IsLongTerm {
 			longTerm = append(longTerm, picture)
-		} else if picture.PictureOrderCnt <= currentPictureOrderCnt {
-			beforeOrEqual = append(beforeOrEqual, picture)
+		} else if picture.PictureOrderCnt < currentPictureOrderCnt {
+			before = append(before, picture)
+		} else if picture.PictureOrderCnt == currentPictureOrderCnt {
+			equal = append(equal, picture)
 		} else {
 			after = append(after, picture)
 		}
 	}
-	sort.SliceStable(beforeOrEqual, func(left, right int) bool {
-		return beforeOrEqual[left].PictureOrderCnt > beforeOrEqual[right].PictureOrderCnt
+	sort.SliceStable(before, func(left, right int) bool {
+		return before[left].PictureOrderCnt > before[right].PictureOrderCnt
 	})
 	sort.SliceStable(after, func(left, right int) bool {
 		return after[left].PictureOrderCnt < after[right].PictureOrderCnt
@@ -1372,12 +1375,14 @@ func BuildBReferenceLists(pictures []ReferencePicture, currentPictureOrderCnt in
 		return longTerm[left].LongTermFrameIdx < longTerm[right].LongTermFrameIdx
 	})
 	list0 := make([]ReferencePicture, 0, len(pictures))
-	list0 = append(list0, beforeOrEqual...)
+	list0 = append(list0, before...)
+	list0 = append(list0, equal...)
 	list0 = append(list0, after...)
 	list0 = append(list0, longTerm...)
 	list1 := make([]ReferencePicture, 0, len(pictures))
 	list1 = append(list1, after...)
-	list1 = append(list1, beforeOrEqual...)
+	list1 = append(list1, equal...)
+	list1 = append(list1, before...)
 	list1 = append(list1, longTerm...)
 	identical := len(list0) == len(list1)
 	for index := range list0 {
@@ -2534,10 +2539,43 @@ type LumaIntra4x4Block struct {
 
 // ReconstructLumaIntra4x4Macroblock reconstructs luma blocks in syntax scan order and places them in raster order.
 func ReconstructLumaIntra4x4Macroblock(blocks [16]LumaIntra4x4Block) ([256]uint8, error) {
+	return reconstructLumaIntra4x4Macroblock(blocks, false)
+}
+
+func reconstructLumaIntra4x4Macroblock(blocks [16]LumaIntra4x4Block, gatherInternal bool) ([256]uint8, error) {
 	var macroblock [256]uint8
+	var written [256]bool
 	blockX := [16]int{0, 4, 0, 4, 8, 12, 8, 12, 0, 4, 0, 4, 8, 12, 8, 12}
 	blockY := [16]int{0, 0, 4, 4, 0, 0, 4, 4, 8, 8, 12, 12, 8, 8, 12, 12}
 	for blockIndex, block := range blocks {
+		originX, originY := blockX[blockIndex], blockY[blockIndex]
+		if gatherInternal {
+			if originY > 0 {
+				block.TopAvailable = true
+				for index := range block.Top {
+					column := originX + index
+					if column < 16 && written[(originY-1)*16+column] {
+						block.Top[index] = macroblock[(originY-1)*16+column]
+					} else if index > 0 {
+						block.Top[index] = block.Top[index-1]
+					}
+				}
+			}
+			if originX > 0 {
+				block.LeftAvailable = true
+				for index := range block.Left {
+					row := originY + index
+					if row < 16 && written[row*16+originX-1] {
+						block.Left[index] = macroblock[row*16+originX-1]
+					} else if index > 0 {
+						block.Left[index] = block.Left[index-1]
+					}
+				}
+			}
+			if originX > 0 && originY > 0 {
+				block.TopLeftAvailable, block.TopLeft = true, macroblock[(originY-1)*16+originX-1]
+			}
+		}
 		var prediction [16]uint8
 		switch block.Mode {
 		case 0:
@@ -2592,7 +2630,6 @@ func ReconstructLumaIntra4x4Macroblock(blocks [16]LumaIntra4x4Block) ([256]uint8
 		default:
 			return [256]uint8{}, ErrLumaIntra4x4Macroblock
 		}
-		originX, originY := blockX[blockIndex], blockY[blockIndex]
 		for row := 0; row < 4; row++ {
 			for column := 0; column < 4; column++ {
 				sampleIndex := row*4 + column
@@ -2606,6 +2643,7 @@ func ReconstructLumaIntra4x4Macroblock(blocks [16]LumaIntra4x4Block) ([256]uint8
 					value += residual
 				}
 				macroblock[(originY+row)*16+originX+column] = uint8(value)
+				written[(originY+row)*16+originX+column] = true
 			}
 		}
 	}
@@ -2628,8 +2666,71 @@ var ErrLumaIntra8x8Macroblock = errors.New("Intra_8x8 macroblock references or m
 // ReconstructLumaIntra8x8Macroblock reconstructs four 8x8 blocks in raster order.
 // Top and left references must already be filtered per clause 8.3.2.2.1.
 func ReconstructLumaIntra8x8Macroblock(blocks [4]LumaIntra8x8Block) ([256]uint8, error) {
+	return reconstructLumaIntra8x8Macroblock(blocks, false)
+}
+
+func reconstructLumaIntra8x8Macroblock(blocks [4]LumaIntra8x8Block, gatherInternal bool) ([256]uint8, error) {
 	var macroblock [256]uint8
+	var written [256]bool
 	for blockIndex, block := range blocks {
+		originX, originY := (blockIndex%2)*8, (blockIndex/2)*8
+		if gatherInternal {
+			if originY > 0 {
+				block.TopAvailable = true
+				for index := range block.Top {
+					column := originX + index
+					if column < 16 && written[(originY-1)*16+column] {
+						block.Top[index] = macroblock[(originY-1)*16+column]
+					} else if index > 0 {
+						block.Top[index] = block.Top[index-1]
+					}
+				}
+			}
+			if originX > 0 {
+				block.LeftAvailable = true
+				for index := 0; index < 8; index++ {
+					block.Left[index] = macroblock[(originY+index)*16+originX-1]
+				}
+			}
+			if originX > 0 && originY > 0 {
+				block.TopLeftAvailable, block.TopLeft = true, macroblock[(originY-1)*16+originX-1]
+			}
+			rawTop, rawLeft, corner := block.Top, block.Left, int(block.TopLeft)
+			if block.TopAvailable {
+				previous := int(rawTop[0])
+				if block.TopLeftAvailable {
+					previous = corner
+				}
+				block.Top[0] = uint8((previous + 2*int(rawTop[0]) + int(rawTop[1]) + 2) >> 2)
+				for index := 1; index < 15; index++ {
+					block.Top[index] = uint8((int(rawTop[index-1]) + 2*int(rawTop[index]) + int(rawTop[index+1]) + 2) >> 2)
+				}
+				block.Top[15] = uint8((int(rawTop[14]) + 3*int(rawTop[15]) + 2) >> 2)
+			}
+			if block.LeftAvailable {
+				previous := int(rawLeft[0])
+				if block.TopLeftAvailable {
+					previous = corner
+				}
+				block.Left[0] = uint8((previous + 2*int(rawLeft[0]) + int(rawLeft[1]) + 2) >> 2)
+				for index := 1; index < 7; index++ {
+					block.Left[index] = uint8((int(rawLeft[index-1]) + 2*int(rawLeft[index]) + int(rawLeft[index+1]) + 2) >> 2)
+				}
+				block.Left[7] = uint8((int(rawLeft[6]) + 3*int(rawLeft[7]) + 2) >> 2)
+				for index := 8; index < 16; index++ {
+					block.Left[index] = block.Left[7]
+				}
+			}
+			if block.TopLeftAvailable {
+				if block.TopAvailable && block.LeftAvailable {
+					block.TopLeft = uint8((int(rawTop[0]) + 2*corner + int(rawLeft[0]) + 2) >> 2)
+				} else if block.TopAvailable {
+					block.TopLeft = uint8((3*corner + int(rawTop[0]) + 2) >> 2)
+				} else if block.LeftAvailable {
+					block.TopLeft = uint8((3*corner + int(rawLeft[0]) + 2) >> 2)
+				}
+			}
+		}
 		var prediction [64]uint8
 		top8 := [8]uint8(block.Top[:8])
 		left8 := [8]uint8(block.Left[:8])
@@ -2691,7 +2792,6 @@ func ReconstructLumaIntra8x8Macroblock(blocks [4]LumaIntra8x8Block) ([256]uint8,
 		default:
 			return [256]uint8{}, ErrLumaIntra8x8Macroblock
 		}
-		originX, originY := (blockIndex%2)*8, (blockIndex/2)*8
 		for row := 0; row < 8; row++ {
 			for column := 0; column < 8; column++ {
 				sampleIndex := row*8 + column
@@ -2705,6 +2805,7 @@ func ReconstructLumaIntra8x8Macroblock(blocks [4]LumaIntra8x8Block) ([256]uint8,
 					value += residual
 				}
 				macroblock[(originY+row)*16+originX+column] = uint8(value)
+				written[(originY+row)*16+originX+column] = true
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -58,9 +59,45 @@ func TestExtractFrameRejectsUnsupportedImageExtension(t *testing.T) {
 	}
 }
 
-func TestExtractFrameRejectsJPEGUntilImplemented(t *testing.T) {
-	if err := extractFrame("sample.mp4", 0, "out.jpg"); err == nil {
-		t.Fatal("extractFrame() unexpectedly accepted JPEG output before implementation")
+func TestExtractFrameWritesJPEGForFixture(t *testing.T) {
+	t.Setenv("PATH", "")
+	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
+	for _, extension := range []string{".jpg", ".JPG"} {
+		for _, frame := range []int{0, 1} {
+			t.Run(extension+string(rune('0'+frame)), func(t *testing.T) {
+				output := prefixedOutput(filepath.Join(t.TempDir(), "image with spaces"+extension), "native_")
+				if err := extractFrame(path, frame, output); err != nil {
+					t.Fatalf("extractFrame() err = %v; want native JPEG output", err)
+				}
+				file, err := os.Open(output)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				image, err := jpeg.Decode(file)
+				if err != nil {
+					t.Fatalf("jpeg.Decode() err = %v; want a valid JPEG image", err)
+				}
+				if image.Bounds().Dx() != 16 || image.Bounds().Dy() != 16 {
+					t.Fatalf("image size = %dx%d; want 16x16", image.Bounds().Dx(), image.Bounds().Dy())
+				}
+				original, err := os.ReadFile(output)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := extractFrame(path, 999, output); err == nil {
+					t.Fatal("extractFrame() accepted an out-of-range frame")
+				}
+				preserved, err := os.ReadFile(output)
+				if err != nil || string(preserved) != string(original) {
+					t.Fatal("failed extraction changed existing output")
+				}
+				entries, err := os.ReadDir(filepath.Dir(output))
+				if err != nil || len(entries) != 1 {
+					t.Fatal("extraction left temporary output behind")
+				}
+			})
+		}
 	}
 }
 
@@ -71,6 +108,10 @@ func TestWriteOutputFileRejectsDirectoryDestinations(t *testing.T) {
 	}
 	if err := writeOutputFile(dir, []byte("unused")); err == nil {
 		t.Fatal("writeOutputFile() unexpectedly accepted a directory output path")
+	}
+	entries, err := os.ReadDir(filepath.Dir(dir))
+	if err != nil || len(entries) != 1 {
+		t.Fatal("failed output rename left temporary files behind")
 	}
 }
 

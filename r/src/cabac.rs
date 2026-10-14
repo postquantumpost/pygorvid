@@ -1064,6 +1064,17 @@ fn cabac_resolved_inter_partition_neighbors(
         let candidate_at = |sample_x: isize, sample_y: isize, fallback| {
             if (0..16).contains(&sample_x) && (0..16).contains(&sample_y) {
                 current_fact(sample_x, sample_y).and_then(|(_, candidate)| candidate)
+            } else if sample_y < 0
+                && (0..16).contains(&sample_x)
+                && input.partition_neighbors.len() == 16
+            {
+                let edge = input.partition_neighbors[sample_x as usize / 4];
+                let edge_list = if list_index == 0 {
+                    edge.list0
+                } else {
+                    edge.list1
+                };
+                edge_list.top_candidate
             } else if sample_x >= 16 && input.partition_neighbors.len() == 16 {
                 let row = (specification.y / 4).min(3);
                 let edge = input.partition_neighbors[row * 4 + 3];

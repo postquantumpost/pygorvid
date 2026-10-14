@@ -1,12 +1,6 @@
 package vid
 
-import (
-	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os/exec"
-)
+import "errors"
 
 var ErrDecoderMissingSampleReader = errors.New("H.264 decoder requires a sample reader")
 var ErrDecoderFrameIndexOutOfRange = errors.New("frame index is out of range")
@@ -14,9 +8,7 @@ var ErrDecoderNotImplemented = errors.New("H.264 decoder is not implemented yet"
 var ErrDecoderUnsupportedFeature = errors.New("unsupported H.264 profile, chroma format, bit depth, or interlace mode")
 var ErrDecoderReferenceMismatch = errors.New("decoded frame does not match the reference frame data")
 
-// H264Decoder is the contract for the future native decoder pipeline.
-// The current implementation intentionally blocks decode work until the
-// frame pipeline and reference management are ready.
+// H264Decoder owns native H.264 reconstruction, reference pictures, and presentation frames.
 type H264Decoder struct {
 	sampleReader            *VideoSampleReader
 	sampleCount             int
@@ -25,6 +17,14 @@ type H264Decoder struct {
 	referencePictureBuffer  *ReferencePictureBuffer
 	presentationOrderBuffer *PresentationOrderBuffer
 	unsupportedFeature      bool
+	nativeBlocks            []nativeMacroblock
+	nativeReferenceBlocks   map[uint32][]nativeMacroblock
+	decodedFrames           map[uint64]Yuv420Frame
+	nativeSyncSample        int64
+	nativeLastSample        int64
+	nativeMaximumLongTerm   int64
+	nativePOC0              POCType0State
+	nativePOC12             POCType12State
 }
 
 func NewH264Decoder(sampleReader *VideoSampleReader) *H264Decoder {
@@ -36,6 +36,11 @@ func NewH264Decoder(sampleReader *VideoSampleReader) *H264Decoder {
 		referencePictureBuffer:  &ReferencePictureBuffer{},
 		presentationOrderBuffer: NewPresentationOrderBuffer(0),
 		unsupportedFeature:      false,
+		decodedFrames:           make(map[uint64]Yuv420Frame),
+		nativeReferenceBlocks:   make(map[uint32][]nativeMacroblock),
+		nativeSyncSample:        -1,
+		nativeLastSample:        -1,
+		nativeMaximumLongTerm:   -1,
 	}
 	if sampleReader != nil {
 		decoder.sampleCount = sampleReader.SampleCount()
@@ -86,6 +91,9 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 	if index >= uint64(decoder.sampleCount) {
 		return Yuv420Frame{}, ErrDecoderFrameIndexOutOfRange
 	}
+	if cached, ok := decoder.decodedFrames[index]; ok {
+		return cloneNativeFrame(cached), nil
+	}
 	if decoder.referencePictureBuffer != nil {
 		if stored, ok := decoder.referencePictureBuffer.Get(uint32(index)); ok {
 			y, err := stored.Frame.LumaPlaneBytes()
@@ -111,22 +119,7 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 	if decoder.sampleReader.path == "" {
 		return Yuv420Frame{}, ErrDecoderNotImplemented
 	}
-	frame, err := decodeFrameFromMP4(decoder.sampleReader.path, int(index))
-	if err != nil {
-		return Yuv420Frame{}, err
-	}
-	if decoder.referencePictureBuffer == nil {
-		decoder.referencePictureBuffer = &ReferencePictureBuffer{}
-	}
-	if decoder.presentationOrderBuffer == nil {
-		decoder.presentationOrderBuffer = NewPresentationOrderBuffer(0)
-	}
-	reference := ReferencePicture{ID: uint32(index), FrameNum: uint32(index), PictureOrderCnt: int64(index)}
-	if err := decoder.StoreReferencePicture(reference, frame); err != nil {
-		return Yuv420Frame{}, err
-	}
-	decoder.QueuePresentation(PresentationPicture{PictureOrderCnt: int64(index), Frame: frame})
-	return frame, nil
+	return decoder.decodeNativeDependencies(index)
 }
 
 // DecodeFirstSyncFrame decodes the first sync sample before any non-reference or re-ordered frames.
@@ -188,66 +181,4 @@ func (decoder *H264Decoder) ValidateReferenceFrame(index uint64, yPlane, uPlane,
 		return ErrDecoderReferenceMismatch
 	}
 	return nil
-}
-
-func decodeFrameFromMP4(path string, index int) (Yuv420Frame, error) {
-	probeCmd := exec.Command(
-		"ffprobe",
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height",
-		"-of", "json",
-		path,
-	)
-	probeOut, err := probeCmd.Output()
-	if err != nil {
-		return Yuv420Frame{}, fmt.Errorf("ffprobe failed for %s: %w", path, err)
-	}
-	var probe struct {
-		Streams []struct {
-			Width  int `json:"width"`
-			Height int `json:"height"`
-		} `json:"streams"`
-	}
-	if err := json.Unmarshal(probeOut, &probe); err != nil {
-		return Yuv420Frame{}, fmt.Errorf("parse ffprobe output: %w", err)
-	}
-	if len(probe.Streams) == 0 || probe.Streams[0].Width == 0 || probe.Streams[0].Height == 0 {
-		return Yuv420Frame{}, fmt.Errorf("ffprobe did not report dimensions for %s", path)
-	}
-	width, height := probe.Streams[0].Width, probe.Streams[0].Height
-	cmd := exec.Command(
-		"ffmpeg",
-		"-nostdin",
-		"-v", "error",
-		"-i", path,
-		"-vf", fmt.Sprintf("select=eq(n\\,%d)", index),
-		"-frames:v", "1",
-		"-pix_fmt", "yuv420p",
-		"-f", "rawvideo",
-		"pipe:1",
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	raw, err := cmd.Output()
-	if err != nil {
-		return Yuv420Frame{}, fmt.Errorf("ffmpeg decode failed for %s: %w: %s", path, err, stderr.String())
-	}
-	expected := width * height * 3 / 2
-	if len(raw) != expected {
-		return Yuv420Frame{}, fmt.Errorf("decoded frame for %s had %d bytes, want %d", path, len(raw), expected)
-	}
-	ySize := width * height
-	chromaSize := ySize / 4
-	frame := Yuv420Frame{
-		Width:   width,
-		Height:  height,
-		YStride: width,
-		UStride: width / 2,
-		VStride: width / 2,
-		Y:       append([]uint8(nil), raw[:ySize]...),
-		U:       append([]uint8(nil), raw[ySize:ySize+chromaSize]...),
-		V:       append([]uint8(nil), raw[ySize+chromaSize:]...),
-	}
-	return frame, nil
 }

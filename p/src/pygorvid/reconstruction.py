@@ -2024,11 +2024,17 @@ def build_b_reference_lists(
     pictures: Sequence[ReferencePicture], current_picture_order_cnt: int
 ) -> tuple[list[ReferencePicture], list[ReferencePicture]]:
     """Build initial progressive-frame B lists using POC order and long-term indices."""
-    before_or_equal = [
+    before = [
         picture
         for picture in pictures
         if picture.long_term_frame_idx is None
-        and picture.picture_order_cnt <= current_picture_order_cnt
+        and picture.picture_order_cnt < current_picture_order_cnt
+    ]
+    equal = [
+        picture
+        for picture in pictures
+        if picture.long_term_frame_idx is None
+        and picture.picture_order_cnt == current_picture_order_cnt
     ]
     after = [
         picture
@@ -2039,12 +2045,12 @@ def build_b_reference_lists(
     long_term = [
         picture for picture in pictures if picture.long_term_frame_idx is not None
     ]
-    before_or_equal.sort(key=lambda picture: picture.picture_order_cnt, reverse=True)
+    before.sort(key=lambda picture: picture.picture_order_cnt, reverse=True)
     after.sort(key=lambda picture: picture.picture_order_cnt)
     long_term.sort(key=lambda picture: picture.long_term_frame_idx)
 
-    list0 = before_or_equal + after + long_term
-    list1 = after + before_or_equal + long_term
+    list0 = before + equal + after + long_term
+    list1 = after + equal + before + long_term
     if len(list1) > 1 and list0 == list1:
         list1[0], list1[1] = list1[1], list1[0]
     return list0, list1
