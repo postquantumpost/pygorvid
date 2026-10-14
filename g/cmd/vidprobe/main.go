@@ -23,7 +23,12 @@ func run(args []string) int {
 	output := flags.String("output", "", "output image path (.png or .jpg)")
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
 	prefix := flags.String("prefix", "", "prefix prepended to the output image filename")
+	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
 	if err := flags.Parse(flagsFirst(args)); err != nil {
+		return 2
+	}
+	if *threads < 1 {
+		fmt.Fprintln(os.Stderr, "--threads must be a positive integer")
 		return 2
 	}
 	frameSet := false
@@ -58,7 +63,7 @@ func run(args []string) int {
 			return 2
 		}
 		outputPath := prefixedOutput(*output, *prefix)
-		if err := extractFrame(paths[0], *frame, outputPath); err != nil {
+		if err := extractFrame(paths[0], *frame, outputPath, *threads); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", paths[0], err)
 			return 1
 		}
@@ -119,7 +124,7 @@ func flagsFirst(args []string) []string {
 			paths = append(paths, args[i:]...)
 			break
 		}
-		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" {
+		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" {
 			options = append(options, arg)
 			if i+1 < len(args) {
 				i++
@@ -137,7 +142,7 @@ func flagsFirst(args []string) []string {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
 func prefixedOutput(output, prefix string) string {
@@ -163,7 +168,7 @@ func writeOutputFile(output string, payload []byte) error {
 	return os.Rename(tempPath, output)
 }
 
-func extractFrame(input string, frame int, output string) error {
+func extractFrame(input string, frame int, output string, threads int) error {
 	extension := strings.ToLower(filepath.Ext(output))
 	if extension != ".png" && extension != ".jpg" {
 		return errors.New("--output must end in .png or .jpg")
@@ -174,6 +179,7 @@ func extractFrame(input string, frame int, output string) error {
 	}
 	defer reader.Close()
 	decoder := vid.NewH264Decoder(reader)
+	decoder.SetThreads(threads)
 	decoded, err := decoder.DecodeFrame(uint64(frame))
 	if err != nil {
 		return err

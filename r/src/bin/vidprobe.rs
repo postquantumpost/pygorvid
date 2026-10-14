@@ -8,7 +8,7 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> i32 {
-    let (input, output, frame, prefix, mut files) = match parse_args(&args) {
+    let (input, output, frame, prefix, threads, mut files) = match parse_args(&args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("{error}");
@@ -33,7 +33,7 @@ fn run(args: Vec<String>) -> i32 {
             return 2;
         }
         let output = prefixed_output(&output, prefix.as_deref());
-        if let Err(error) = extract_frame(&files[0], frame, &output) {
+        if let Err(error) = extract_frame(&files[0], frame, &output, threads) {
             eprintln!("{}: {error}", files[0]);
             return 1;
         }
@@ -98,6 +98,7 @@ fn parse_args(
         Option<String>,
         Option<usize>,
         Option<String>,
+        usize,
         Vec<String>,
     ),
     String,
@@ -106,6 +107,14 @@ fn parse_args(
     let mut output = None;
     let mut frame = None;
     let mut prefix = None;
+    let mut threads = pygorvid::default_decoder_threads();
+    let parse_threads = |value: &str| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|threads| *threads > 0)
+            .ok_or_else(|| "--threads must be a positive integer".to_string())
+    };
     let mut files = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -114,7 +123,12 @@ fn parse_args(
             files.extend(args[index + 1..].iter().cloned());
             break;
         }
-        if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" {
+        if arg == "--input"
+            || arg == "--output"
+            || arg == "--extractframe"
+            || arg == "--prefix"
+            || arg == "--threads"
+        {
             index += 1;
             let value = args
                 .get(index)
@@ -123,6 +137,7 @@ fn parse_args(
                 "--input" => input = Some(value.clone()),
                 "--output" => output = Some(value.clone()),
                 "--prefix" => prefix = Some(value.clone()),
+                "--threads" => threads = parse_threads(value)?,
                 _ => {
                     frame = Some(value.parse::<usize>().map_err(|_| {
                         "--extractframe must be a non-negative integer".to_string()
@@ -141,6 +156,8 @@ fn parse_args(
             );
         } else if let Some(value) = arg.strip_prefix("--prefix=") {
             prefix = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("--threads=") {
+            threads = parse_threads(value)?;
         } else if arg.starts_with('-') {
             return Err(format!("unknown option: {arg}"));
         } else {
@@ -148,11 +165,11 @@ fn parse_args(
         }
         index += 1;
     }
-    Ok((input, output, frame, prefix, files))
+    Ok((input, output, frame, prefix, threads, files))
 }
 
 fn print_usage() {
-    eprintln!("usage: vidprobe [--input FILE] [--extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
 }
 
 fn prefixed_output(output: &str, prefix: Option<&str>) -> String {
@@ -166,7 +183,7 @@ fn prefixed_output(output: &str, prefix: Option<&str>) -> String {
         .to_string()
 }
 
-fn extract_frame(input: &str, frame: usize, output: &str) -> Result<(), String> {
+fn extract_frame(input: &str, frame: usize, output: &str, threads: usize) -> Result<(), String> {
     let extension = Path::new(output)
         .extension()
         .and_then(|value| value.to_str())
@@ -177,6 +194,7 @@ fn extract_frame(input: &str, frame: usize, output: &str) -> Result<(), String> 
     let reader = pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
     let mut decoder = pygorvid::H264Decoder::new_with_environment_checkpoint(reader)
         .map_err(|error| error.to_string())?;
+    decoder.set_threads(threads);
     let decoded = decoder
         .decode_frame(frame as u64)
         .map_err(|error| error.to_string())?;
@@ -237,6 +255,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_threads_option() {
+        let args = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        let parsed = parse_args(&args(&["--threads", "3", "a.mp4"])).unwrap();
+        assert_eq!(parsed.4, 3);
+        assert_eq!(parse_args(&args(&["--threads=5", "a.mp4"])).unwrap().4, 5);
+        assert_eq!(
+            parse_args(&args(&["a.mp4"])).unwrap().4,
+            pygorvid::default_decoder_threads()
+        );
+        assert!(parse_args(&args(&["--threads", "0", "a.mp4"])).is_err());
+        assert!(parse_args(&args(&["--threads=x", "a.mp4"])).is_err());
+    }
+
+    #[test]
     fn extracts_native_images_and_preserves_output_on_failure() {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../tmp/native-cli-rust-{}", std::process::id()));
@@ -246,7 +278,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
         for extension in ["PNG", "JPG"] {
             let output = directory.join(format!("image with spaces.{extension}"));
-            extract_frame(input.to_str().unwrap(), 1, output.to_str().unwrap()).unwrap();
+            extract_frame(input.to_str().unwrap(), 1, output.to_str().unwrap(), 2).unwrap();
             let payload = fs::read(&output).unwrap();
             if extension == "PNG" {
                 assert_eq!(&payload[..8], b"\x89PNG\r\n\x1a\n");
@@ -255,7 +287,9 @@ mod tests {
                 assert_eq!(&payload[..2], &[0xff, 0xd8]);
                 assert_eq!(&payload[payload.len() - 2..], &[0xff, 0xd9]);
             }
-            assert!(extract_frame(input.to_str().unwrap(), 999, output.to_str().unwrap()).is_err());
+            assert!(
+                extract_frame(input.to_str().unwrap(), 999, output.to_str().unwrap(), 1).is_err()
+            );
             assert_eq!(fs::read(&output).unwrap(), payload);
         }
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);

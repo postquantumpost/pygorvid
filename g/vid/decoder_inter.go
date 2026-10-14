@@ -57,7 +57,7 @@ func (decoder *H264Decoder) nativeNeighbor(slice nativeSlice, address, x, y, lis
 	if neighborAddress < int(slice.header.FirstMacroblockInSlice) || neighborAddress > address {
 		return nativePrediction{}, CABACInterNeighbor{}, MotionVectorCandidate{RefIdx: -1}
 	}
-	block := decoder.nativeBlocks[neighborAddress]
+	block := &decoder.nativeBlocks[neighborAddress]
 	if block.slice.header.FirstMacroblockInSlice != slice.header.FirstMacroblockInSlice {
 		return nativePrediction{}, CABACInterNeighbor{}, MotionVectorCandidate{RefIdx: -1}
 	}
@@ -210,7 +210,7 @@ func addNativeResidual(samples *uint8, residual int64) {
 	}
 }
 
-func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, result *CABACIIntraMacroblockResult) error {
+func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, result *CABACIIntraMacroblockResult, output *nativeInterResidual) error {
 	if result.TransformSize8x8 {
 		for block := 0; block < 4; block++ {
 			if result.CodedBlockPatternLuma&(1<<block) == 0 {
@@ -227,7 +227,7 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 			residual := inverseTransformLuma8x8(coefficients)
 			for row := 0; row < 8; row++ {
 				for column := 0; column < 8; column++ {
-					addNativeResidual(&result.Luma[(block/2*8+row)*16+block%2*8+column], residual[row*8+column])
+					output.luma[(block/2*8+row)*16+block%2*8+column] = residual[row*8+column]
 				}
 			}
 		}
@@ -251,7 +251,7 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 				}
 				for blockRow := 0; blockRow < 4; blockRow++ {
 					for blockColumn := 0; blockColumn < 4; blockColumn++ {
-						addNativeResidual(&result.Luma[(row*4+blockRow)*16+column*4+blockColumn], residual[blockRow*4+blockColumn])
+						output.luma[(row*4+blockRow)*16+column*4+blockColumn] = residual[blockRow*4+blockColumn]
 					}
 				}
 			}
@@ -316,13 +316,7 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 			residualBlocks[block] = residual
 		}
 		residual := assembleChroma420ResidualMacroblock(residualBlocks)
-		for index, value := range residual {
-			target := &result.Cb[index]
-			if component == 1 {
-				target = &result.Cr[index]
-			}
-			addNativeResidual(target, value)
-		}
+		copy(output.chroma[component][:], residual[:])
 	}
 	return nil
 }
@@ -343,6 +337,8 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 	}
 	history := make([]*CABACIIntraMacroblockResult, width*height)
 	decoder.nativeBlocks = make([]nativeMacroblock, len(history))
+	pool := newNativeReconstructionPool(decoder.threads, len(history))
+	defer pool.finish()
 	for _, slice := range slices {
 		bSlice := slice.header.SliceType%5 == 1
 		lists, err := decoder.nativeReferenceLists(slice, poc)
@@ -365,8 +361,10 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 			if address >= len(history) {
 				return Yuv420Frame{}, fmt.Errorf("slice exceeds the picture")
 			}
-			input := nativeIntraInput(slice, address, history, qpy, previousDelta)
+			input := nativeIntraInput(slice, address, history, qpy, previousDelta, false)
 			current := nativeMacroblock{slice: slice, result: CABACIIntraMacroblockResult{MacroblockType: 255, QPY: qpy}}
+			var compensations []nativeCompensation
+			var residual *nativeInterResidual
 			decoder.nativeBlocks[address] = current
 			leftSkipped, topSkipped := false, false
 			if input.LeftAvailable {
@@ -399,9 +397,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 				}
 				prediction := nativePrediction{used: true, reference: lists[0][0].Reference.ID, refIndex: 0, motion: motion, referenceDecoded: true, motionDecoded: true}
 				setNativePrediction(&current, part, 0, prediction)
-				if err := compensateNativePartition(&current.result, lists[0][0].Frame, address, width, part, motion, false); err != nil {
-					return Yuv420Frame{}, err
-				}
+				compensations = append(compensations, nativeCompensation{frame: lists[0][0].Frame, part: part, motion: motion})
 				previousDelta = 0
 			} else if skipped {
 				current.direct = true
@@ -409,7 +405,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 				if err != nil {
 					return Yuv420Frame{}, err
 				}
-				if err := decoder.compensateNativeDirect(&current, slice, address, poc, parts, lists, true); err != nil {
+				if err := decoder.compensateNativeDirect(&current, &compensations, slice, address, poc, parts, lists, true); err != nil {
 					return Yuv420Frame{}, err
 				}
 				previousDelta = 0
@@ -431,6 +427,10 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 				}
 				if mbType >= intraOffset {
 					intraType := mbType - intraOffset
+					for _, neighbor := range [4]int{address - 1, address - width - 1, address - width, address - width + 1} {
+						pool.waitFor(neighbor)
+					}
+					input = nativeIntraInput(slice, address, history, qpy, previousDelta, true)
 					current.result, err = arithmetic.decodeIntraMacroblock(input, &contexts, builder, address, &intraType)
 					if err != nil {
 						return Yuv420Frame{}, err
@@ -457,7 +457,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 						return Yuv420Frame{}, err
 					}
 					current.direct = bSlice && mbType == 0
-					if err := decoder.compensateNativeDirect(&current, slice, address, poc, parts, lists, current.direct); err != nil {
+					if err := decoder.compensateNativeDirect(&current, &compensations, slice, address, poc, parts, lists, current.direct); err != nil {
 						return Yuv420Frame{}, err
 					}
 					for list := 0; list < 2; list++ {
@@ -519,9 +519,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 							prediction := nativePrediction{used: true, refIndex: part.refs[list], reference: lists[list][part.refs[list]].Reference.ID, motion: motion, difference: difference, referenceDecoded: true, motionDecoded: true}
 							setNativePrediction(&decoder.nativeBlocks[address], part, list, prediction)
 							setNativePrediction(&current, part, list, prediction)
-							if err := compensateNativePartition(&current.result, lists[list][part.refs[list]].Frame, address, width, part, motion, list == 1 && part.lists[0]); err != nil {
-								return Yuv420Frame{}, err
-							}
+							compensations = append(compensations, nativeCompensation{frame: lists[list][part.refs[list]].Frame, part: part, motion: motion, average: list == 1 && part.lists[0]})
 						}
 					}
 					var lumaContexts [4]CABACContextModel
@@ -566,18 +564,20 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 						current.result.QPDelta, previousDelta = delta, delta
 					}
 					current.result.QPY = qpy
-					if err := decodeNativeInterResidual(arithmetic, &contexts, input, &current.result); err != nil {
+					residual = &nativeInterResidual{}
+					if err := decodeNativeInterResidual(arithmetic, &contexts, input, &current.result, residual); err != nil {
 						return Yuv420Frame{}, fmt.Errorf("inter residual at macroblock %d: %w", address, err)
 					}
 				}
 			}
+			decoder.nativeBlocks[address] = current
+			history[address] = &decoder.nativeBlocks[address].result
 			if !current.intra {
-				if err := builder.PlaceMacroblock(address, current.result.Luma, current.result.Cb, current.result.Cr); err != nil {
+				job := &nativeReconstruction{result: history[address], builder: builder, address: address, width: width, compensations: compensations, residual: residual}
+				if err := pool.submit(job); err != nil {
 					return Yuv420Frame{}, err
 				}
 			}
-			decoder.nativeBlocks[address] = current
-			history[address] = &decoder.nativeBlocks[address].result
 			end, err := arithmetic.DecodeTerminateBin()
 			if err != nil {
 				return Yuv420Frame{}, err
@@ -586,6 +586,9 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 				break
 			}
 		}
+	}
+	if err := pool.finish(); err != nil {
+		return Yuv420Frame{}, err
 	}
 	frame, err := builder.Finish()
 	if err != nil {

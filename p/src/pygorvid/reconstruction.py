@@ -4,6 +4,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+import mmap
+import multiprocessing
+import os
+import time
 from typing import Optional, Sequence
 
 
@@ -916,7 +920,10 @@ def deblock_yuv420_picture(
     macroblocks: Sequence[PictureDeblockingMacroblock],
     *,
     timeout_check: Callable[[], None] | None = None,
+    threads: int = 1,
 ) -> "Yuv420Frame":
+    """Deblock a picture; with threads > 1, macroblock rows run as a wavefront in forked
+    worker processes and produce the same result as raster order."""
     if timeout_check is not None and not callable(timeout_check):
         raise DeblockingError("picture deblocking timeout check must be callable")
     if frame.width % 16 or frame.height % 16 or frame.width <= 0 or frame.height <= 0:
@@ -951,84 +958,184 @@ def deblock_yuv420_picture(
             raise DeblockingError("picture deblocking plane layout is invalid")
         planes.append(bytearray(b"".join(plane[row * stride:row * stride + width] for row in range(height))))
 
-    for address, current in enumerate(macroblocks):
+    rows = frame.height // 16
+    if threads > 1 and rows > 1 and "fork" in multiprocessing.get_all_start_methods():
         if timeout_check is not None:
             timeout_check()
-        if current.disable_idc == 1:
-            continue
-        origin_x = (address % width_in_mbs) * 16
-        origin_y = (address // width_in_mbs) * 16
-        for vertical in (True, False):
-            for edge in (0, 4, 8, 12):
-                if edge == 0 and (origin_x if vertical else origin_y) == 0:
-                    continue
-                if edge in (4, 12) and current.transform_size_8x8:
-                    continue
-                neighbor_address = address - (1 if vertical else width_in_mbs) if edge == 0 else address
-                neighbor = macroblocks[neighbor_address]
-                slice_boundary = current.slice_id != neighbor.slice_id
-                parameters = derive_luma_deblocking_parameters(
-                    neighbor.qpy, current.qpy, current.disable_idc,
-                    current.alpha_offset_div2, current.beta_offset_div2,
-                )
-                boundary_strengths = []
-                for segment in range(4):
-                    block_x, block_y = (edge // 4, segment) if vertical else (segment, edge // 4)
-                    index_q = block_y * 4 + block_x
-                    index_p = (block_y * 4 + 3 if vertical else 12 + block_x) if edge == 0 else index_q - (1 if vertical else 4)
-                    strength = derive_luma_boundary_strength(
-                        edge == 0, current.intra or neighbor.intra,
-                        current.nonzero[index_q] or neighbor.nonzero[index_p],
-                        luma_inter_prediction_differs(neighbor.predictions[index_p], current.predictions[index_q]),
-                    )
-                    if (
-                        parameters.mode is LumaDeblockingMode.DISABLED
-                        or (
-                            parameters.mode is LumaDeblockingMode.ALL_EXCEPT_SLICE_BOUNDARIES
-                            and slice_boundary
-                        )
-                    ):
-                        strength = 0
-                    boundary_strengths.append(strength)
-                if any(boundary_strengths):
-                    edge_x = origin_x + edge if vertical else origin_x
-                    edge_y = origin_y if vertical else origin_y + edge
-                    apply_luma_deblocking_plane_macroblock_edge(
-                        planes[0],
-                        frame.width,
-                        frame.height,
-                        frame.width,
-                        edge_x,
-                        edge_y,
-                        vertical,
-                        boundary_strengths,
-                        parameters,
-                        slice_boundary,
-                    )
-                if edge % 8:
-                    continue
-                for segment, strength in enumerate(boundary_strengths):
-                    if strength == 0:
-                        continue
-                    x = origin_x + (edge if vertical else segment * 4)
-                    y = origin_y + (segment * 4 if vertical else edge)
-                    for component in range(2):
-                        chroma_parameters = derive_luma_deblocking_parameters(
-                            qpc[neighbor_address][component], qpc[address][component], current.disable_idc,
-                            current.alpha_offset_div2, current.beta_offset_div2,
-                        )
-                        stride = frame.width // 2
-                        step = 1 if vertical else stride
-                        for lane in range(2):
-                            index = (y // 2 + lane) * stride + x // 2 if vertical else (y // 2) * stride + x // 2 + lane
-                            plane = planes[component + 1]
-                            samples = ChromaEdgeSamples(plane[index-step], plane[index-2*step], plane[index], plane[index+step])
-                            filtered = apply_chroma_deblocking_edge(samples, strength, chroma_parameters, slice_boundary)
-                            plane[index-step], plane[index] = filtered.p0, filtered.q0
+        if not _deblock_wavefront(planes, frame.width, macroblocks, qpc, width_in_mbs, min(threads, rows)):
+            # Re-run serially so the failure surfaces with its original exception.
+            return deblock_yuv420_picture(frame, macroblocks, timeout_check=timeout_check)
+    else:
+        for address in range(len(macroblocks)):
+            if timeout_check is not None:
+                timeout_check()
+            _deblock_picture_macroblock(
+                planes, frame.width, frame.height, 0, 0, macroblocks, qpc, width_in_mbs, address
+            )
     return Yuv420Frame(
         frame.width, frame.height, frame.width, frame.width // 2, frame.width // 2,
         bytes(planes[0]), bytes(planes[1]), bytes(planes[2]),
     )
+
+
+def _deblock_wavefront(planes, width, macroblocks, qpc, width_in_mbs, workers) -> bool:
+    """Deblock planes in place using forked workers; return False if any worker failed.
+
+    A macroblock reads and writes at most four luma samples into its left and top
+    neighbors, so it may start once the row above has finished the macroblock to its upper
+    right. Each macroblock filters a private copy of that window, so concurrently active
+    windows never overlap.
+    """
+    context = multiprocessing.get_context("fork")
+    shared = []
+    for plane in planes:
+        buffer = mmap.mmap(-1, len(plane))
+        buffer[:] = plane
+        shared.append(buffer)
+    rows = len(macroblocks) // width_in_mbs
+    progress = context.Array("q", rows)
+    failed = context.Value("b", 0)
+
+    def run(worker: int) -> None:
+        buffers = [bytearray(), bytearray(), bytearray()]
+        for row in range(worker, rows, workers):
+            for column in range(width_in_mbs):
+                if row:
+                    required = min(column + 2, width_in_mbs)
+                    while True:
+                        with progress.get_lock():
+                            if progress[row - 1] >= required:
+                                break
+                        if failed.value:
+                            return
+                        time.sleep(0.0002)
+                origin_x = max(column * 16 - 4, 0)
+                origin_y = max(row * 16 - 4, 0)
+                view_width = column * 16 + 16 - origin_x
+                view_height = row * 16 + 16 - origin_y
+                windows = (
+                    (origin_x, origin_y, view_width, view_height, width),
+                    (origin_x // 2, origin_y // 2, view_width // 2, view_height // 2, width // 2),
+                    (origin_x // 2, origin_y // 2, view_width // 2, view_height // 2, width // 2),
+                )
+                for buffer, source, (x0, y0, w, h, stride) in zip(buffers, shared, windows):
+                    buffer[:] = b"".join(
+                        source[y * stride + x0:y * stride + x0 + w] for y in range(y0, y0 + h)
+                    )
+                try:
+                    _deblock_picture_macroblock(
+                        buffers, view_width, view_height, origin_x, origin_y,
+                        macroblocks, qpc, width_in_mbs, row * width_in_mbs + column,
+                    )
+                except Exception:
+                    failed.value = 1
+                    return
+                for buffer, target, (x0, y0, w, h, stride) in zip(buffers, shared, windows):
+                    for index, y in enumerate(range(y0, y0 + h)):
+                        target[y * stride + x0:y * stride + x0 + w] = buffer[index * w:(index + 1) * w]
+                with progress.get_lock():
+                    progress[row] = column + 1
+
+    def child(worker: int) -> None:
+        status = 1
+        try:
+            run(worker)
+            status = 1 if failed.value else 0
+        except BaseException:
+            failed.value = 1
+        finally:
+            os._exit(status)
+
+    processes = [context.Process(target=child, args=(worker,)) for worker in range(workers)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join()
+    ok = not failed.value and all(process.exitcode == 0 for process in processes)
+    if ok:
+        for plane, buffer in zip(planes, shared):
+            plane[:] = buffer[:]
+    for buffer in shared:
+        buffer.close()
+    return ok
+
+
+def _deblock_picture_macroblock(
+    planes, view_width, view_height, view_x, view_y, macroblocks, qpc, width_in_mbs, address
+) -> None:
+    """Filter one macroblock's edges in planes whose top-left luma sample is (view_x, view_y)."""
+    current = macroblocks[address]
+    if current.disable_idc == 1:
+        return
+    origin_x = (address % width_in_mbs) * 16
+    origin_y = (address // width_in_mbs) * 16
+    for vertical in (True, False):
+        for edge in (0, 4, 8, 12):
+            if edge == 0 and (origin_x if vertical else origin_y) == 0:
+                continue
+            if edge in (4, 12) and current.transform_size_8x8:
+                continue
+            neighbor_address = address - (1 if vertical else width_in_mbs) if edge == 0 else address
+            neighbor = macroblocks[neighbor_address]
+            slice_boundary = current.slice_id != neighbor.slice_id
+            parameters = derive_luma_deblocking_parameters(
+                neighbor.qpy, current.qpy, current.disable_idc,
+                current.alpha_offset_div2, current.beta_offset_div2,
+            )
+            boundary_strengths = []
+            for segment in range(4):
+                block_x, block_y = (edge // 4, segment) if vertical else (segment, edge // 4)
+                index_q = block_y * 4 + block_x
+                index_p = (block_y * 4 + 3 if vertical else 12 + block_x) if edge == 0 else index_q - (1 if vertical else 4)
+                strength = derive_luma_boundary_strength(
+                    edge == 0, current.intra or neighbor.intra,
+                    current.nonzero[index_q] or neighbor.nonzero[index_p],
+                    luma_inter_prediction_differs(neighbor.predictions[index_p], current.predictions[index_q]),
+                )
+                if (
+                    parameters.mode is LumaDeblockingMode.DISABLED
+                    or (
+                        parameters.mode is LumaDeblockingMode.ALL_EXCEPT_SLICE_BOUNDARIES
+                        and slice_boundary
+                    )
+                ):
+                    strength = 0
+                boundary_strengths.append(strength)
+            if any(boundary_strengths):
+                edge_x = origin_x + edge if vertical else origin_x
+                edge_y = origin_y if vertical else origin_y + edge
+                apply_luma_deblocking_plane_macroblock_edge(
+                    planes[0],
+                    view_width,
+                    view_height,
+                    view_width,
+                    edge_x - view_x,
+                    edge_y - view_y,
+                    vertical,
+                    boundary_strengths,
+                    parameters,
+                    slice_boundary,
+                )
+            if edge % 8:
+                continue
+            for segment, strength in enumerate(boundary_strengths):
+                if strength == 0:
+                    continue
+                x = origin_x + (edge if vertical else segment * 4) - view_x
+                y = origin_y + (segment * 4 if vertical else edge) - view_y
+                for component in range(2):
+                    chroma_parameters = derive_luma_deblocking_parameters(
+                        qpc[neighbor_address][component], qpc[address][component], current.disable_idc,
+                        current.alpha_offset_div2, current.beta_offset_div2,
+                    )
+                    stride = view_width // 2
+                    step = 1 if vertical else stride
+                    for lane in range(2):
+                        index = (y // 2 + lane) * stride + x // 2 if vertical else (y // 2) * stride + x // 2 + lane
+                        plane = planes[component + 1]
+                        samples = ChromaEdgeSamples(plane[index-step], plane[index-2*step], plane[index], plane[index+step])
+                        filtered = apply_chroma_deblocking_edge(samples, strength, chroma_parameters, slice_boundary)
+                        plane[index-step], plane[index] = filtered.p0, filtered.q0
 
 
 def derive_luma_deblocking_parameters(
@@ -1416,6 +1523,10 @@ class Yuv420FrameBuilder:
         self._u = bytearray(chroma_size)
         self._v = bytearray(chroma_size)
         self._written = bytearray(picture_width_in_mbs * picture_height_in_mbs)
+
+    @property
+    def picture_width_in_mbs(self) -> int:
+        return self._picture_width_in_mbs
 
     @staticmethod
     def _samples(block: Sequence[int], expected_length: int) -> bytes:

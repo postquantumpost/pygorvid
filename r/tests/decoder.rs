@@ -41,22 +41,40 @@ fn assert_decoder_smoke_fixture(name: &str, dimension: usize, expected_hashes: [
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../samples")
         .join(name);
-    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
-    for (frame_index, expected_hash) in expected_hashes.into_iter().enumerate() {
-        let frame = decoder.decode_frame(frame_index as u64).unwrap();
-        assert_eq!(
-            (frame.width, frame.height),
-            (dimension, dimension),
-            "{name} frame {frame_index}"
-        );
-        let hash = [&frame.y, &frame.u, &frame.v]
-            .into_iter()
-            .flatten()
-            .fold(0xcbf29ce484222325_u64, |hash, sample| {
-                (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
-            });
-        assert_eq!(hash, expected_hash, "{name} frame {frame_index} YUV");
+    for threads in [1, 4] {
+        let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+        decoder.set_threads(threads);
+        for (frame_index, expected_hash) in expected_hashes.into_iter().enumerate() {
+            let frame = decoder.decode_frame(frame_index as u64).unwrap();
+            assert_eq!(
+                (frame.width, frame.height),
+                (dimension, dimension),
+                "{name} frame {frame_index}"
+            );
+            let hash = [&frame.y, &frame.u, &frame.v]
+                .into_iter()
+                .flatten()
+                .fold(0xcbf29ce484222325_u64, |hash, sample| {
+                    (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3)
+                });
+            assert_eq!(
+                hash, expected_hash,
+                "{name} frame {frame_index} YUV threads {threads}"
+            );
+        }
     }
+}
+
+#[test]
+fn decoder_threads_default_to_half_the_processors() {
+    let mut decoder = H264Decoder::with_sample_count(1);
+    let expected = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
+    assert_eq!(decoder.threads(), expected);
+    assert_eq!(pygorvid::default_decoder_threads(), expected);
+    decoder.set_threads(3);
+    assert_eq!(decoder.threads(), 3);
+    decoder.set_threads(0);
+    assert_eq!(decoder.threads(), expected);
 }
 
 #[test]
@@ -901,7 +919,7 @@ fn h264_decoder_tracks_p_frame_reference_cache_validation() {
     decoded.y[0] = 88;
     assert_eq!(decoder.decode_frame(3).unwrap(), packed);
     assert_eq!(
-        decoder.reference_picture_buffer.get(3).unwrap().frame,
+        *decoder.reference_picture_buffer.get(3).unwrap().frame,
         frame
     );
 }

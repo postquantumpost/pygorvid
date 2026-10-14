@@ -258,6 +258,37 @@ impl Yuv420Frame {
     pub fn luma_plane_bytes(&self) -> io::Result<Vec<u8>> {
         self.plane_bytes(&self.y, self.width, self.height, self.y_stride)
     }
+
+    /// Like `plane_bytes`, but borrows the plane when it is already tightly packed.
+    fn plane_view<'a>(
+        &self,
+        plane: &'a [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+    ) -> io::Result<std::borrow::Cow<'a, [u8]>> {
+        if width > 0 && height > 0 && stride == width && plane.len() >= stride * height {
+            return Ok(std::borrow::Cow::Borrowed(&plane[..width * height]));
+        }
+        self.plane_bytes(plane, width, height, stride)
+            .map(std::borrow::Cow::Owned)
+    }
+
+    pub fn luma_plane(&self) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+        self.plane_view(&self.y, self.width, self.height, self.y_stride)
+    }
+
+    pub fn u_plane(&self) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+        let chroma_width = self.width / 2 + self.width % 2;
+        let chroma_height = self.height / 2 + self.height % 2;
+        self.plane_view(&self.u, chroma_width, chroma_height, self.u_stride)
+    }
+
+    pub fn v_plane(&self) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+        let chroma_width = self.width / 2 + self.width % 2;
+        let chroma_height = self.height / 2 + self.height % 2;
+        self.plane_view(&self.v, chroma_width, chroma_height, self.v_stride)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +301,10 @@ pub struct Yuv420FrameBuilder {
 }
 
 impl Yuv420FrameBuilder {
+    pub fn picture_width_in_mbs(&self) -> usize {
+        self.picture_width_in_mbs
+    }
+
     pub fn new(
         picture_width_in_mbs: usize,
         picture_height_in_mbs: usize,
@@ -714,9 +749,20 @@ pub struct PictureDeblockingMacroblock {
     pub chroma_qp_offsets: [i32; 2],
 }
 
+#[cfg(test)]
 pub fn deblock_yuv420_picture(
     frame: &Yuv420Frame,
     macroblocks: &[PictureDeblockingMacroblock],
+) -> io::Result<Yuv420Frame> {
+    deblock_yuv420_picture_threads(frame, macroblocks, 1)
+}
+
+/// Deblocks a picture; with more than one thread, macroblock rows run as a wavefront that
+/// reproduces raster-order results.
+pub fn deblock_yuv420_picture_threads(
+    frame: &Yuv420Frame,
+    macroblocks: &[PictureDeblockingMacroblock],
+    threads: usize,
 ) -> io::Result<Yuv420Frame> {
     if frame.width == 0 || frame.height == 0 || frame.width % 16 != 0 || frame.height % 16 != 0 {
         return Err(invalid(
@@ -751,9 +797,179 @@ pub fn deblock_yuv420_picture(
         frame.u_plane_bytes()?,
         frame.v_plane_bytes()?,
     ];
-    for (address, current) in macroblocks.iter().enumerate() {
+    let height_in_mbs = frame.height / 16;
+    let threads = threads.min(height_in_mbs);
+    if threads <= 1 {
+        let [y, u, v] = &mut planes;
+        let mut view = DeblockingView {
+            planes: [y, u, v],
+            width: frame.width,
+            height: frame.height,
+            origin_x: 0,
+            origin_y: 0,
+        };
+        for address in 0..macroblocks.len() {
+            deblock_picture_macroblock(&mut view, macroblocks, &qpc, width_in_mbs, address)?;
+        }
+    } else {
+        deblock_wavefront(
+            &mut planes,
+            frame.width,
+            macroblocks,
+            &qpc,
+            width_in_mbs,
+            threads,
+        )?;
+    }
+    let [y, u, v] = planes;
+    Ok(Yuv420Frame {
+        width: frame.width,
+        height: frame.height,
+        y_stride: frame.width,
+        u_stride: frame.width / 2,
+        v_stride: frame.width / 2,
+        y,
+        u,
+        v,
+    })
+}
+
+/// A window of the picture planes whose top-left luma sample is at (origin_x, origin_y).
+struct DeblockingView<'a> {
+    planes: [&'a mut [u8]; 3],
+    width: usize,
+    height: usize,
+    origin_x: usize,
+    origin_y: usize,
+}
+
+/// Runs macroblock rows on worker threads. A macroblock reads and writes at most four luma
+/// samples into its left and top neighbors, so it may start once the row above has finished
+/// the macroblock to its upper right; concurrently active windows never overlap.
+fn deblock_wavefront(
+    planes: &mut [Vec<u8>; 3],
+    width: usize,
+    macroblocks: &[PictureDeblockingMacroblock],
+    qpc: &[[i32; 2]],
+    width_in_mbs: usize,
+    threads: usize,
+) -> io::Result<()> {
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+    let rows = macroblocks.len() / width_in_mbs;
+    // SAFETY: AtomicU8 has the same layout as u8, and the exclusive borrow of `planes` keeps
+    // every other access out while these atomic views exist.
+    let shared: [&[AtomicU8]; 3] = planes.each_mut().map(|plane| unsafe {
+        std::slice::from_raw_parts(plane.as_mut_ptr() as *const AtomicU8, plane.len())
+    });
+    let progress: Vec<AtomicUsize> = (0..rows).map(|_| AtomicUsize::new(0)).collect();
+    let failed = AtomicBool::new(false);
+    let first_error = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for worker in 0..threads {
+            let (shared, progress, failed, first_error) =
+                (&shared, &progress, &failed, &first_error);
+            scope.spawn(move || {
+                let mut buffers = [Vec::new(), Vec::new(), Vec::new()];
+                for row in (worker..rows).step_by(threads) {
+                    for column in 0..width_in_mbs {
+                        if row > 0 {
+                            let required = (column + 2).min(width_in_mbs);
+                            while progress[row - 1].load(Ordering::Acquire) < required {
+                                if failed.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                std::thread::yield_now();
+                            }
+                        }
+                        let origin_x = (column * 16).saturating_sub(4);
+                        let origin_y = (row * 16).saturating_sub(4);
+                        let view_width = column * 16 + 16 - origin_x;
+                        let view_height = row * 16 + 16 - origin_y;
+                        let windows = [
+                            (origin_x, origin_y, view_width, view_height, width),
+                            (
+                                origin_x / 2,
+                                origin_y / 2,
+                                view_width / 2,
+                                view_height / 2,
+                                width / 2,
+                            ),
+                            (
+                                origin_x / 2,
+                                origin_y / 2,
+                                view_width / 2,
+                                view_height / 2,
+                                width / 2,
+                            ),
+                        ];
+                        for (plane, (buffer, &(x0, y0, w, h, stride))) in
+                            buffers.iter_mut().zip(&windows).enumerate()
+                        {
+                            buffer.clear();
+                            for y in y0..y0 + h {
+                                buffer.extend(
+                                    shared[plane][y * stride + x0..y * stride + x0 + w]
+                                        .iter()
+                                        .map(|sample| sample.load(Ordering::Relaxed)),
+                                );
+                            }
+                        }
+                        let [y, u, v] = &mut buffers;
+                        let mut view = DeblockingView {
+                            planes: [y, u, v],
+                            width: view_width,
+                            height: view_height,
+                            origin_x,
+                            origin_y,
+                        };
+                        let address = row * width_in_mbs + column;
+                        if let Err(error) = deblock_picture_macroblock(
+                            &mut view,
+                            macroblocks,
+                            qpc,
+                            width_in_mbs,
+                            address,
+                        ) {
+                            first_error.lock().unwrap().get_or_insert(error);
+                            failed.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        for (plane, (buffer, &(x0, y0, w, h, stride))) in
+                            buffers.iter().zip(&windows).enumerate()
+                        {
+                            for (row_index, y) in (y0..y0 + h).enumerate() {
+                                for (target, &sample) in shared[plane]
+                                    [y * stride + x0..y * stride + x0 + w]
+                                    .iter()
+                                    .zip(&buffer[row_index * w..(row_index + 1) * w])
+                                {
+                                    target.store(sample, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        progress[row].store(column + 1, Ordering::Release);
+                    }
+                }
+            });
+        }
+    });
+    match first_error.into_inner().unwrap() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn deblock_picture_macroblock(
+    view: &mut DeblockingView<'_>,
+    macroblocks: &[PictureDeblockingMacroblock],
+    qpc: &[[i32; 2]],
+    width_in_mbs: usize,
+    address: usize,
+) -> io::Result<()> {
+    let current = &macroblocks[address];
+    {
         if current.disable_idc == 1 {
-            continue;
+            return Ok(());
         }
         let origin_x = (address % width_in_mbs) * 16;
         let origin_y = (address / width_in_mbs) * 16;
@@ -804,13 +1020,13 @@ pub fn deblock_yuv420_picture(
                             &current.predictions[index_q],
                         )?,
                     );
-                    let x = origin_x + if vertical { edge } else { segment * 4 };
-                    let y = origin_y + if vertical { segment * 4 } else { edge };
+                    let x = origin_x + if vertical { edge } else { segment * 4 } - view.origin_x;
+                    let y = origin_y + if vertical { segment * 4 } else { edge } - view.origin_y;
                     apply_luma_deblocking_plane_edge_segment(
-                        &mut planes[0],
-                        frame.width,
-                        frame.height,
-                        frame.width,
+                        view.planes[0],
+                        view.width,
+                        view.height,
+                        view.width,
                         x,
                         y,
                         vertical,
@@ -829,7 +1045,7 @@ pub fn deblock_yuv420_picture(
                             current.alpha_offset_div2,
                             current.beta_offset_div2,
                         )?;
-                        let stride = frame.width / 2;
+                        let stride = view.width / 2;
                         let step = if vertical { 1 } else { stride };
                         for lane in 0..2 {
                             let index = if vertical {
@@ -837,7 +1053,7 @@ pub fn deblock_yuv420_picture(
                             } else {
                                 (y / 2) * stride + x / 2 + lane
                             };
-                            let plane = &mut planes[component + 1];
+                            let plane = &mut *view.planes[component + 1];
                             let samples = ChromaEdgeSamples {
                                 p0: plane[index - step],
                                 p1: plane[index - 2 * step],
@@ -858,17 +1074,7 @@ pub fn deblock_yuv420_picture(
             }
         }
     }
-    let [y, u, v] = planes;
-    Ok(Yuv420Frame {
-        width: frame.width,
-        height: frame.height,
-        y_stride: frame.width,
-        u_stride: frame.width / 2,
-        v_stride: frame.width / 2,
-        y,
-        u,
-        v,
-    })
+    Ok(())
 }
 
 pub fn apply_luma_deblocking_edge_segment(
@@ -1492,8 +1698,8 @@ impl PresentationOrderBuffer {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DecodedReferencePicture {
     pub reference: ReferencePicture,
-    pub frame: Yuv420Frame,
-    pub motion_field: Vec<(usize, [ColocatedMotionFact; 16])>,
+    pub frame: std::sync::Arc<Yuv420Frame>,
+    pub motion_field: std::sync::Arc<Vec<(usize, [ColocatedMotionFact; 16])>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1538,8 +1744,8 @@ impl ReferencePictureBuffer {
         }
         let stored = DecodedReferencePicture {
             reference,
-            frame: frame.clone(),
-            motion_field,
+            frame: std::sync::Arc::new(frame.clone()),
+            motion_field: std::sync::Arc::new(motion_field),
         };
         if let Some(existing) = self
             .pictures
@@ -5241,7 +5447,7 @@ mod tests {
         buffer.store(second, &frame).unwrap();
 
         let mut returned = buffer.get(first.identifier).unwrap();
-        returned.frame.y[0] = 50;
+        std::sync::Arc::make_mut(&mut returned.frame).y[0] = 50;
         assert_eq!(buffer.get(first.identifier).unwrap().frame.y[0], 1);
         assert_eq!(buffer.references(), vec![first, second]);
         assert!(buffer.remove(first.identifier));

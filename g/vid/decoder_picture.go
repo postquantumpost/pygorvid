@@ -220,7 +220,7 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 		if err != nil {
 			return Yuv420Frame{}, fmt.Errorf("sample %d: %w", sample.Index, err)
 		}
-		if err := deblockNativePicture(&coded, decoder.nativeBlocks); err != nil {
+		if err := deblockNativePictureThreads(&coded, decoder.nativeBlocks, decoder.threads); err != nil {
 			return Yuv420Frame{}, err
 		}
 		displayIndex := displayIndices[sample.Index]

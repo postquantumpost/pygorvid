@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -336,23 +337,41 @@ func TestBDecoderSmoke64x64(t *testing.T) {
 func assertDecoderSmokeFixture(t *testing.T, name string, dimension int, hashes [2]uint64) {
 	t.Helper()
 	path := filepath.Join("..", "..", "samples", name)
-	reader, err := OpenVideoSampleReader(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	decoder := NewH264Decoder(reader)
-	for frameIndex, wantHash := range hashes {
-		frame, err := decoder.DecodeFrame(uint64(frameIndex))
+	for _, threads := range []int{1, 4} {
+		reader, err := OpenVideoSampleReader(path)
 		if err != nil {
-			t.Fatalf("DecodeFrame(%d): %v", frameIndex, err)
+			t.Fatal(err)
 		}
-		if frame.Width != dimension || frame.Height != dimension {
-			t.Fatalf("frame %d size = %dx%d; want %dx%d", frameIndex, frame.Width, frame.Height, dimension, dimension)
+		defer reader.Close()
+		decoder := NewH264Decoder(reader)
+		decoder.SetThreads(threads)
+		for frameIndex, wantHash := range hashes {
+			frame, err := decoder.DecodeFrame(uint64(frameIndex))
+			if err != nil {
+				t.Fatalf("threads %d DecodeFrame(%d): %v", threads, frameIndex, err)
+			}
+			if frame.Width != dimension || frame.Height != dimension {
+				t.Fatalf("frame %d size = %dx%d; want %dx%d", frameIndex, frame.Width, frame.Height, dimension, dimension)
+			}
+			if got := h264SmokeFrameHash(frame); got != wantHash {
+				t.Fatalf("threads %d frame %d YUV FNV64 = %016x; want %016x", threads, frameIndex, got, wantHash)
+			}
 		}
-		if got := h264SmokeFrameHash(frame); got != wantHash {
-			t.Fatalf("frame %d YUV FNV64 = %016x; want %016x", frameIndex, got, wantHash)
-		}
+	}
+}
+
+func TestDecoderThreadsDefaultToHalfTheProcessors(t *testing.T) {
+	decoder := NewH264Decoder(nil)
+	if got, want := decoder.Threads(), max(1, runtime.NumCPU()/2); got != want {
+		t.Fatalf("Threads() = %d; want %d", got, want)
+	}
+	decoder.SetThreads(3)
+	if decoder.Threads() != 3 {
+		t.Fatalf("Threads() = %d; want 3", decoder.Threads())
+	}
+	decoder.SetThreads(0)
+	if decoder.Threads() != DefaultDecoderThreads() {
+		t.Fatalf("SetThreads(0) gave %d; want default", decoder.Threads())
 	}
 }
 

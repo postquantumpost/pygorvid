@@ -44,7 +44,7 @@ pub use cabac::{
     Intra16x16LumaMacroblockResult, Intra4x4LumaMacroblockResult, IntraChroma420MacroblockResult,
     CABAC_CONTEXT_COUNT,
 };
-pub use decoder::{DecodeError, DependencySlice, H264Decoder};
+pub use decoder::{default_decoder_threads, DecodeError, DependencySlice, H264Decoder};
 pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use mp4boxes::AvcConfiguration;
 pub use mp4file::Mp4File;

@@ -62,6 +62,7 @@ from .decoder import (
     DecoderTimeLimitExceeded,
     DependencySlice,
     H264Decoder,
+    default_decoder_threads,
 )
 from .mp4file import Mp4File
 from .nal import NALHeader, NALUnitError, ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals
@@ -311,6 +312,7 @@ __all__ = [
     "DecoderReferenceMismatch",
     "DependencySlice",
     "H264Decoder",
+    "default_decoder_threads",
     "NALHeader",
     "NALUnitError",
     "ebsp_to_rbsp",

@@ -1,6 +1,9 @@
 package vid
 
-import "errors"
+import (
+	"errors"
+	"runtime"
+)
 
 var ErrDecoderMissingSampleReader = errors.New("H.264 decoder requires a sample reader")
 var ErrDecoderFrameIndexOutOfRange = errors.New("frame index is out of range")
@@ -25,10 +28,29 @@ type H264Decoder struct {
 	nativeMaximumLongTerm   int64
 	nativePOC0              POCType0State
 	nativePOC12             POCType12State
+	threads                 int
+}
+
+// DefaultDecoderThreads returns half the available processors, at least one.
+func DefaultDecoderThreads() int {
+	return max(1, runtime.NumCPU()/2)
+}
+
+// SetThreads sets the number of worker threads; values below one select DefaultDecoderThreads.
+func (decoder *H264Decoder) SetThreads(threads int) {
+	if threads < 1 {
+		threads = DefaultDecoderThreads()
+	}
+	decoder.threads = threads
+}
+
+func (decoder *H264Decoder) Threads() int {
+	return decoder.threads
 }
 
 func NewH264Decoder(sampleReader *VideoSampleReader) *H264Decoder {
 	decoder := &H264Decoder{
+		threads:                 DefaultDecoderThreads(),
 		sampleReader:            sampleReader,
 		sampleCount:             0,
 		sequenceParameterSets:   nil,

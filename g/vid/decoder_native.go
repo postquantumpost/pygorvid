@@ -144,7 +144,7 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 			if address >= len(history) {
 				return Yuv420Frame{}, fmt.Errorf("slice exceeds the picture")
 			}
-			input := nativeIntraInput(slice, address, history, qpy, previousDelta)
+			input := nativeIntraInput(slice, address, history, qpy, previousDelta, true)
 			result, err := arithmetic.DecodeIIntraMacroblock(input, &contexts, builder, address)
 			if err != nil {
 				return Yuv420Frame{}, fmt.Errorf("macroblock %d: %w", address, err)
@@ -195,7 +195,7 @@ func cropNativeFrame(coded Yuv420Frame, sps SPSInfo) Yuv420Frame {
 	return frame
 }
 
-func nativeCoefficients(block nativeMacroblock, raster int) bool {
+func nativeCoefficients(block *nativeMacroblock, raster int) bool {
 	if block.result.TransformSize8x8 {
 		return block.result.CodedBlockPatternLuma&(1<<(raster/8*2+(raster%4)/2)) != 0
 	}
@@ -237,11 +237,21 @@ func absInt(value int) int {
 }
 
 func deblockNativePicture(frame *Yuv420Frame, blocks []nativeMacroblock) error {
+	for address := range blocks {
+		if err := deblockNativeMacroblock(frame, blocks, address); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deblockNativeMacroblock(frame *Yuv420Frame, blocks []nativeMacroblock, address int) error {
 	width := frame.Width / 16
-	for address, current := range blocks {
+	current := &blocks[address]
+	{
 		header := current.slice.header
 		if header.DisableDeblockingFilterIDC == 1 {
-			continue
+			return nil
 		}
 		originX, originY := address%width*16, address/width*16
 		for direction := 0; direction < 2; direction++ {
@@ -261,7 +271,7 @@ func deblockNativePicture(frame *Yuv420Frame, blocks []nativeMacroblock) error {
 						neighborAddress -= width
 					}
 				}
-				neighbor := blocks[neighborAddress]
+				neighbor := &blocks[neighborAddress]
 				boundary := neighbor.slice.header.FirstMacroblockInSlice != header.FirstMacroblockInSlice
 				if edge == 0 && boundary && header.DisableDeblockingFilterIDC == 2 {
 					continue
@@ -365,7 +375,8 @@ func deblockNativePicture(frame *Yuv420Frame, blocks []nativeMacroblock) error {
 	return nil
 }
 
-func nativeIntraInput(slice nativeSlice, address int, history []*CABACIIntraMacroblockResult, qpy, previousDelta int) CABACIIntraMacroblockInput {
+// nativeIntraInput reads neighbor samples only when samples is set, so inter parsing never races reconstruction workers.
+func nativeIntraInput(slice nativeSlice, address int, history []*CABACIIntraMacroblockResult, qpy, previousDelta int, samples bool) CABACIIntraMacroblockInput {
 	width := int(slice.sps.CodedWidth / 16)
 	first := int(slice.header.FirstMacroblockInSlice)
 	neighbor := func(index int) *CABACIIntraMacroblockResult {
@@ -461,8 +472,10 @@ func nativeIntraInput(slice nativeSlice, address int, history []*CABACIIntraMacr
 			input.LeftChromaCBP = 2
 		}
 		input.ChromaLeftModeNonzero = left.ChromaPredictionMode != 0
-		for row := 0; row < 16; row++ {
-			input.Intra16x16Left[row] = left.Luma[row*16+15]
+		if samples {
+			for row := 0; row < 16; row++ {
+				input.Intra16x16Left[row] = left.Luma[row*16+15]
+			}
 		}
 	}
 	if top != nil {
@@ -476,7 +489,12 @@ func nativeIntraInput(slice nativeSlice, address int, history []*CABACIIntraMacr
 			input.TopChromaCBP = 2
 		}
 		input.ChromaTopModeNonzero = top.ChromaPredictionMode != 0
-		copy(input.Intra16x16Top[:], top.Luma[240:])
+		if samples {
+			copy(input.Intra16x16Top[:], top.Luma[240:])
+		}
+	}
+	if !samples {
+		return input
 	}
 	if topLeft != nil {
 		input.Intra16x16TopLeft, input.Intra16x16TopLeftAvailable = topLeft.Luma[255], true

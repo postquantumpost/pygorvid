@@ -17,6 +17,7 @@ This document defines behavior that Go, Python, and Rust implementations must sh
 - Extraction requires `--extractframe` and `--output` together and exactly one input file.
 - `--output` must end in `.png` or `.jpg`, case-insensitively. The suffix selects the encoder.
 - `--prefix TEXT` prepends to the output basename, preserving its directory and extension. If no image is emitted, the prefix is accepted but has no effect.
+- `--threads N` sets the positive number of decoder threads; the default is half the available processors, at least one. Decoded output is identical for every thread count.
 - Metadata-only invocation continues to process all inputs and print each complete `BasicInfo` value.
 
 ## Native Object Boundaries

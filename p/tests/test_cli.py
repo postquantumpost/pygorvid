@@ -36,6 +36,22 @@ def test_native_extraction(tmp_path, monkeypatch, extension, frame_index):
     assert sorted(path.name for path in tmp_path.iterdir()) == [written.name]
 
 
+@pytest.mark.parametrize("threads", ("1", "3"))
+def test_threads_option_extracts_identical_frames(tmp_path, threads):
+    output = tmp_path / f"threads{threads}.png"
+    assert main([str(FIXTURE), "--threads", threads, "--extractframe", "1", "--output", str(output)]) == 0
+    reference = tmp_path / "reference.png"
+    assert main([str(FIXTURE), "--threads", "1", "--extractframe", "1", "--output", str(reference)]) == 0
+    assert output.read_bytes() == reference.read_bytes()
+
+
+@pytest.mark.parametrize("threads", ("0", "-1", "x"))
+def test_threads_option_rejects_non_positive_counts(threads):
+    with pytest.raises(SystemExit) as error:
+        main([str(FIXTURE), "--threads", threads])
+    assert error.value.code == 2
+
+
 @pytest.mark.parametrize("frame_index,extension", ((999, ".png"), (0, ".gif")))
 def test_failed_extraction_preserves_output(tmp_path, frame_index, extension):
     output = tmp_path / ("existing" + extension)

@@ -160,7 +160,7 @@ pub struct CabacPSkipMacroblockInput {
     pub top_candidate: Option<crate::MotionVectorCandidate>,
     pub top_right_candidate: Option<crate::MotionVectorCandidate>,
     pub top_left_candidate: Option<crate::MotionVectorCandidate>,
-    pub reference_frame: crate::Yuv420Frame,
+    pub reference_frame: std::sync::Arc<crate::Yuv420Frame>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,7 +188,7 @@ impl Default for CabacPSkipMacroblockResult {
 
 #[derive(Debug, Clone)]
 pub struct CabacBReferencePicture {
-    pub frame: crate::Yuv420Frame,
+    pub frame: std::sync::Arc<crate::Yuv420Frame>,
     pub picture_order_count: i64,
     pub long_term: bool,
 }
@@ -2197,6 +2197,214 @@ pub struct CabacArithmeticDecoder<'a> {
     terminated: bool,
 }
 
+type MacroblockSamples = ([u8; 256], [u8; 64], [u8; 64]);
+type ReconstructionJob = Box<dyn FnOnce() -> io::Result<MacroblockSamples> + Send>;
+
+/// Per-thread state while `decode_slice_data_threaded` defers inter sample reconstruction.
+/// Parsing never reads predicted samples except through intra neighbors, which wait for them.
+struct DeferredReconstruction {
+    job: Option<ReconstructionJob>,
+    pending: Vec<bool>,
+    width_in_mbs: usize,
+}
+
+thread_local! {
+    static DEFERRED_RECONSTRUCTION: std::cell::RefCell<Option<DeferredReconstruction>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Stashes `job` for the current macroblock when deferral is active; otherwise returns it.
+fn defer_reconstruction(job: ReconstructionJob) -> Option<ReconstructionJob> {
+    DEFERRED_RECONSTRUCTION.with_borrow_mut(|state| match state {
+        Some(state) => {
+            state.job = Some(job);
+            None
+        }
+        None => Some(job),
+    })
+}
+
+fn reconstruction_is_deferred() -> bool {
+    DEFERRED_RECONSTRUCTION.with_borrow(Option::is_some)
+}
+
+#[derive(Debug)]
+struct IntraNeighborsPending;
+
+impl std::fmt::Display for IntraNeighborsPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "intra macroblock neighbors are still being reconstructed"
+        )
+    }
+}
+
+impl std::error::Error for IntraNeighborsPending {}
+
+fn intra_neighbor_addresses(address: usize, width_in_mbs: usize) -> [Option<usize>; 4] {
+    let column = address % width_in_mbs;
+    let above = address.checked_sub(width_in_mbs);
+    [
+        (column > 0).then(|| address - 1),
+        above.filter(|_| column > 0).map(|above| above - 1),
+        above,
+        above
+            .filter(|_| column + 1 < width_in_mbs)
+            .map(|above| above + 1),
+    ]
+}
+
+/// Fails with `IntraNeighborsPending` when an intra macroblock would read unfinished samples.
+fn require_intra_neighbors(address: usize) -> io::Result<()> {
+    DEFERRED_RECONSTRUCTION.with_borrow(|state| {
+        let Some(state) = state else {
+            return Ok(());
+        };
+        let pending = intra_neighbor_addresses(address, state.width_in_mbs)
+            .into_iter()
+            .flatten()
+            .any(|neighbor| state.pending.get(neighbor).copied().unwrap_or(false));
+        if pending {
+            Err(io::Error::other(IntraNeighborsPending))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn is_intra_neighbors_pending(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<IntraNeighborsPending>())
+}
+
+/// Parser-side handle for deferred reconstruction: submits jobs and applies finished samples
+/// to the slice history and frame builder.
+struct ReconstructionDriver {
+    jobs: Option<std::sync::mpsc::SyncSender<(usize, ReconstructionJob)>>,
+    results: std::sync::mpsc::Receiver<(usize, io::Result<MacroblockSamples>)>,
+    outstanding: usize,
+    first_address: usize,
+    error: Option<io::Error>,
+}
+
+impl ReconstructionDriver {
+    fn submit(&mut self, address: usize, job: ReconstructionJob) -> io::Result<()> {
+        DEFERRED_RECONSTRUCTION.with_borrow_mut(|state| {
+            if let Some(state) = state {
+                state.pending[address] = true;
+            }
+        });
+        self.jobs
+            .as_ref()
+            .ok_or_else(|| invalid("reconstruction workers are closed"))?
+            .send((address, job))
+            .map_err(|_| invalid("reconstruction workers stopped"))?;
+        self.outstanding += 1;
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        (address, samples): (usize, io::Result<MacroblockSamples>),
+        decoded: &mut [CabacDecodedSliceMacroblock],
+        builder: &mut crate::Yuv420FrameBuilder,
+    ) -> io::Result<()> {
+        self.outstanding -= 1;
+        DEFERRED_RECONSTRUCTION.with_borrow_mut(|state| {
+            if let Some(state) = state {
+                state.pending[address] = false;
+            }
+        });
+        match samples {
+            Ok(samples) => {
+                builder.place_macroblock(address, &samples.0, &samples.1, &samples.2)?;
+                let entry = decoded
+                    .get_mut(address - self.first_address)
+                    .ok_or_else(|| invalid("reconstructed macroblock is outside the slice"))?;
+                set_macroblock_samples(&mut entry.result, samples);
+            }
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn receive(
+        &mut self,
+        decoded: &mut [CabacDecodedSliceMacroblock],
+        builder: &mut crate::Yuv420FrameBuilder,
+    ) -> io::Result<()> {
+        let result = self
+            .results
+            .recv()
+            .map_err(|_| invalid("reconstruction workers stopped"))?;
+        self.apply(result, decoded, builder)
+    }
+
+    fn apply_ready(
+        &mut self,
+        decoded: &mut [CabacDecodedSliceMacroblock],
+        builder: &mut crate::Yuv420FrameBuilder,
+    ) -> io::Result<()> {
+        while let Ok(result) = self.results.try_recv() {
+            self.apply(result, decoded, builder)?;
+        }
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn wait_for_intra_neighbors(
+        &mut self,
+        address: usize,
+        decoded: &mut [CabacDecodedSliceMacroblock],
+        builder: &mut crate::Yuv420FrameBuilder,
+    ) -> io::Result<()> {
+        while require_intra_neighbors(address).is_err() {
+            self.receive(decoded, builder)?;
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        decoded: &mut [CabacDecodedSliceMacroblock],
+        builder: &mut crate::Yuv420FrameBuilder,
+    ) -> io::Result<()> {
+        self.jobs = None;
+        while self.outstanding > 0 {
+            self.receive(decoded, builder)?;
+        }
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+fn set_macroblock_samples(result: &mut CabacSliceMacroblockResult, samples: MacroblockSamples) {
+    let (luma, cb, cr) = samples;
+    let CabacSliceMacroblockResult::Inter(layer) = result else {
+        return;
+    };
+    match &mut layer.macroblock {
+        CabacPBMacroblockPrediction::PSkip(result) => {
+            (result.luma, result.cb, result.cr) = (luma, cb, cr);
+        }
+        CabacPBMacroblockPrediction::BSkip(result) => {
+            (result.luma, result.cb, result.cr) = (luma, cb, cr);
+        }
+        CabacPBMacroblockPrediction::Inter(result) => {
+            (result.luma, result.cb, result.cr) = (luma, cb, cr);
+        }
+        CabacPBMacroblockPrediction::Intra(_) => {}
+    }
+}
+
 /// Derives predIntra4x4PredMode from A/B neighbors in luma4x4BlkIdx syntax order.
 pub fn derive_intra4x4_predicted_mode(
     decoded_modes: &[u8; 16],
@@ -2446,98 +2654,19 @@ impl<'a> CabacArithmeticDecoder<'a> {
             );
         }
         let reference = input.reference_frame;
-        let ref_y = reference.luma_plane_bytes()?;
-        let ref_cb = reference.u_plane_bytes()?;
-        let ref_cr = reference.v_plane_bytes()?;
         let mut result = CabacPSkipMacroblockResult {
             skipped: true,
             reference_index: 0,
             motion_vector,
             ..CabacPSkipMacroblockResult::default()
         };
-        let motion_x = isize::try_from(motion_vector.x)
-            .map_err(|_| invalid("P_Skip motion vector is outside the supported range"))?;
-        let motion_y = isize::try_from(motion_vector.y)
-            .map_err(|_| invalid("P_Skip motion vector is outside the supported range"))?;
-        for row in 0..16 {
-            for column in 0..16 {
-                let x = input
-                    .macroblock_x
-                    .checked_mul(16)
-                    .and_then(|value| value.checked_add(column))
-                    .and_then(|value| isize::try_from(value).ok())
-                    .and_then(|value| value.checked_add(motion_x >> 2))
-                    .ok_or_else(|| {
-                        invalid("P_Skip luma coordinate is outside the supported range")
-                    })?;
-                let y = input
-                    .macroblock_y
-                    .checked_mul(16)
-                    .and_then(|value| value.checked_add(row))
-                    .and_then(|value| isize::try_from(value).ok())
-                    .and_then(|value| value.checked_add(motion_y >> 2))
-                    .ok_or_else(|| {
-                        invalid("P_Skip luma coordinate is outside the supported range")
-                    })?;
-                result.luma[row * 16 + column] =
-                    crate::reconstruction::interpolate_luma_fractional_sample(
-                        &ref_y,
-                        reference.width,
-                        reference.height,
-                        reference.width,
-                        x,
-                        y,
-                        (motion_vector.x & 3) as u8,
-                        (motion_vector.y & 3) as u8,
-                    )?;
-            }
+        let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
+        let job: ReconstructionJob =
+            Box::new(move || p_skip_samples(&reference, macroblock_x, macroblock_y, motion_vector));
+        if let Some(job) = defer_reconstruction(job) {
+            (result.luma, result.cb, result.cr) = job()?;
+            builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
         }
-        let chroma_width = reference.width / 2 + reference.width % 2;
-        let chroma_height = reference.height / 2 + reference.height % 2;
-        for row in 0..8 {
-            for column in 0..8 {
-                let x = input
-                    .macroblock_x
-                    .checked_mul(8)
-                    .and_then(|value| value.checked_add(column))
-                    .and_then(|value| isize::try_from(value).ok())
-                    .and_then(|value| value.checked_add(motion_x >> 3))
-                    .ok_or_else(|| {
-                        invalid("P_Skip chroma coordinate is outside the supported range")
-                    })?;
-                let y = input
-                    .macroblock_y
-                    .checked_mul(8)
-                    .and_then(|value| value.checked_add(row))
-                    .and_then(|value| isize::try_from(value).ok())
-                    .and_then(|value| value.checked_add(motion_y >> 3))
-                    .ok_or_else(|| {
-                        invalid("P_Skip chroma coordinate is outside the supported range")
-                    })?;
-                let index = row * 8 + column;
-                result.cb[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
-                    &ref_cb,
-                    chroma_width,
-                    chroma_height,
-                    chroma_width,
-                    x,
-                    y,
-                    (motion_vector.x & 7) as u8,
-                    (motion_vector.y & 7) as u8,
-                )?;
-                result.cr[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
-                    &ref_cr,
-                    chroma_width,
-                    chroma_height,
-                    chroma_width,
-                    x,
-                    y,
-                    (motion_vector.x & 7) as u8,
-                    (motion_vector.y & 7) as u8,
-                )?;
-            }
-        }
-        builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
         self.bits = trial.bits;
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
@@ -2757,34 +2886,22 @@ impl<'a> CabacArithmeticDecoder<'a> {
         if !prediction_flags[0] && !prediction_flags[1] {
             return Err(invalid("B_Direct has no active prediction list"));
         }
-        let prediction0 = if prediction_flags[0] {
-            let index = usize::try_from(reference_indices[0])
+        let mut references = [None, None];
+        for list_index in 0..2 {
+            if !prediction_flags[list_index] {
+                continue;
+            }
+            let list = if list_index == 0 {
+                &input.list0_references
+            } else {
+                &input.list1_references
+            };
+            let index = usize::try_from(reference_indices[list_index])
                 .ok()
-                .filter(|index| *index < input.list0_references.len())
+                .filter(|index| *index < list.len())
                 .ok_or_else(|| invalid("B_Direct selected reference index is unavailable"))?;
-            Some(compensate_b_direct_reference(
-                &input.list0_references[index].frame,
-                input.macroblock_x,
-                input.macroblock_y,
-                motion_vectors[0],
-            )?)
-        } else {
-            None
-        };
-        let prediction1 = if prediction_flags[1] {
-            let index = usize::try_from(reference_indices[1])
-                .ok()
-                .filter(|index| *index < input.list1_references.len())
-                .ok_or_else(|| invalid("B_Direct selected reference index is unavailable"))?;
-            Some(compensate_b_direct_reference(
-                &input.list1_references[index].frame,
-                input.macroblock_x,
-                input.macroblock_y,
-                motion_vectors[1],
-            )?)
-        } else {
-            None
-        };
+            references[list_index] = Some((list[index].frame.clone(), motion_vectors[list_index]));
+        }
         let mut result = CabacBDirectMacroblockResult {
             skipped,
             reference_indices,
@@ -2792,27 +2909,13 @@ impl<'a> CabacArithmeticDecoder<'a> {
             prediction_flags,
             ..CabacBDirectMacroblockResult::default()
         };
-        match (prediction0, prediction1) {
-            (Some((y0, cb0, cr0)), Some((y1, cb1, cr1))) => {
-                for index in 0..256 {
-                    result.luma[index] =
-                        ((u16::from(y0[index]) + u16::from(y1[index]) + 1) >> 1) as u8;
-                }
-                for index in 0..64 {
-                    result.cb[index] =
-                        ((u16::from(cb0[index]) + u16::from(cb1[index]) + 1) >> 1) as u8;
-                    result.cr[index] =
-                        ((u16::from(cr0[index]) + u16::from(cr1[index]) + 1) >> 1) as u8;
-                }
-            }
-            (Some((y, cb, cr)), None) | (None, Some((y, cb, cr))) => {
-                result.luma = y;
-                result.cb = cb;
-                result.cr = cr;
-            }
-            (None, None) => unreachable!(),
+        let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
+        let job: ReconstructionJob =
+            Box::new(move || b_direct_samples(&references, macroblock_x, macroblock_y));
+        if let Some(job) = defer_reconstruction(job) {
+            (result.luma, result.cb, result.cr) = job()?;
+            builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
         }
-        builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
         Ok(result)
     }
 
@@ -4112,7 +4215,34 @@ impl<'a> CabacArithmeticDecoder<'a> {
         picture_macroblock_count: usize,
         contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
         builder: &mut crate::Yuv420FrameBuilder,
-        mut input_provider: F,
+        input_provider: F,
+    ) -> io::Result<Vec<CabacDecodedSliceMacroblock>>
+    where
+        F: FnMut(usize, &[CabacDecodedSliceMacroblock]) -> io::Result<CabacSliceMacroblockInput>,
+    {
+        self.decode_slice_data_threaded(
+            slice_type,
+            first_macroblock_address,
+            picture_macroblock_count,
+            contexts,
+            builder,
+            1,
+            input_provider,
+        )
+    }
+
+    /// Like `decode_slice_data`, but with `threads > 1` the inter prediction and residual
+    /// reconstruction of P/B macroblocks runs on worker threads while parsing continues.
+    /// Results are identical to the single-threaded decode.
+    pub fn decode_slice_data_threaded<F>(
+        &mut self,
+        slice_type: u8,
+        first_macroblock_address: usize,
+        picture_macroblock_count: usize,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        builder: &mut crate::Yuv420FrameBuilder,
+        threads: usize,
+        input_provider: F,
     ) -> io::Result<Vec<CabacDecodedSliceMacroblock>>
     where
         F: FnMut(usize, &[CabacDecodedSliceMacroblock]) -> io::Result<CabacSliceMacroblockInput>,
@@ -4126,45 +4256,124 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 "CABAC slice_data inputs are invalid or unsupported",
             ));
         }
+        if threads <= 1 || slice_type % 5 == 2 || reconstruction_is_deferred() {
+            return self.decode_slice_macroblocks(
+                slice_type,
+                first_macroblock_address,
+                picture_macroblock_count,
+                contexts,
+                builder,
+                input_provider,
+                None,
+            );
+        }
+        let (job_sender, job_receiver) =
+            std::sync::mpsc::sync_channel::<(usize, ReconstructionJob)>(threads * 16);
+        let job_receiver = std::sync::Mutex::new(job_receiver);
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                let (jobs, results) = (&job_receiver, result_sender.clone());
+                scope.spawn(move || loop {
+                    let Ok((address, job)) = jobs.lock().unwrap().recv() else {
+                        break;
+                    };
+                    if results.send((address, job())).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(result_sender);
+            DEFERRED_RECONSTRUCTION.with_borrow_mut(|state| {
+                *state = Some(DeferredReconstruction {
+                    job: None,
+                    pending: vec![false; picture_macroblock_count],
+                    width_in_mbs: builder.picture_width_in_mbs(),
+                })
+            });
+            let mut driver = ReconstructionDriver {
+                jobs: Some(job_sender),
+                results: result_receiver,
+                outstanding: 0,
+                first_address: first_macroblock_address,
+                error: None,
+            };
+            let decoded = self
+                .decode_slice_macroblocks(
+                    slice_type,
+                    first_macroblock_address,
+                    picture_macroblock_count,
+                    contexts,
+                    builder,
+                    input_provider,
+                    Some(&mut driver),
+                )
+                .and_then(|mut decoded| {
+                    driver.finish(&mut decoded, builder)?;
+                    Ok(decoded)
+                });
+            DEFERRED_RECONSTRUCTION.with_borrow_mut(|state| *state = None);
+            decoded
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_slice_macroblocks<F>(
+        &mut self,
+        slice_type: u8,
+        first_macroblock_address: usize,
+        picture_macroblock_count: usize,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        builder: &mut crate::Yuv420FrameBuilder,
+        mut input_provider: F,
+        mut driver: Option<&mut ReconstructionDriver>,
+    ) -> io::Result<Vec<CabacDecodedSliceMacroblock>>
+    where
+        F: FnMut(usize, &[CabacDecodedSliceMacroblock]) -> io::Result<CabacSliceMacroblockInput>,
+    {
         let mut decoded = Vec::new();
         let mut macroblock_address = first_macroblock_address;
         loop {
             let bit_offset_before = self.bits.bit_offset();
             let range_before = self.code_range;
             let offset_before = self.code_offset;
-            let macroblock_input = input_provider(macroblock_address, &decoded)?;
-            let macroblock_result = if slice_type % 5 == 2 {
-                let CabacSliceMacroblockInput::Intra(input) = macroblock_input else {
-                    return Err(invalid("I-slice provider returned a non-intra macroblock"));
-                };
-                CabacSliceMacroblockResult::Intra(self.decode_i_intra_macroblock(
-                    input,
+            if let Some(driver) = driver.as_deref_mut() {
+                driver.apply_ready(&mut decoded, builder)?;
+            }
+            let mut macroblock_input = input_provider(macroblock_address, &decoded)?;
+            let macroblock_result = loop {
+                match self.decode_slice_macroblock(
+                    slice_type,
+                    macroblock_input,
                     contexts,
                     builder,
                     macroblock_address,
-                )?)
-            } else {
-                let CabacSliceMacroblockInput::Inter(input) = macroblock_input else {
-                    return Err(invalid(
-                        "P/B slice provider returned a non-inter macroblock",
-                    ));
-                };
-                if input.inter_input.slice_type % 5 != slice_type % 5 {
-                    return Err(invalid("macroblock slice type does not match slice_data"));
-                }
-                let layer =
-                    self.decode_p_b_macroblock_layer(input, contexts, builder, macroblock_address)?;
-                match layer.macroblock {
-                    CabacPBMacroblockPrediction::Intra(intra) => {
-                        CabacSliceMacroblockResult::Intra(intra)
+                ) {
+                    Err(error) if is_intra_neighbors_pending(&error) => {
+                        let driver = driver
+                            .as_deref_mut()
+                            .ok_or_else(|| invalid("intra neighbors pending without a driver"))?;
+                        driver.wait_for_intra_neighbors(
+                            macroblock_address,
+                            &mut decoded,
+                            builder,
+                        )?;
+                        macroblock_input = input_provider(macroblock_address, &decoded)?;
                     }
-                    _ => CabacSliceMacroblockResult::Inter(layer),
+                    result => break result?,
                 }
             };
             decoded.push(CabacDecodedSliceMacroblock {
                 address: macroblock_address,
                 result: macroblock_result,
             });
+            if let Some(driver) = driver.as_deref_mut() {
+                let job = DEFERRED_RECONSTRUCTION
+                    .with_borrow_mut(|state| state.as_mut().and_then(|state| state.job.take()));
+                if let Some(job) = job {
+                    driver.submit(macroblock_address, job)?;
+                }
+            }
             let end_of_slice = self.decode_terminate_bin()?;
             if (347..=350).contains(&macroblock_address) {
                 eprintln!(
@@ -4199,6 +4408,38 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     invalid("slice_data reached picture end without end_of_slice_flag")
                 })?;
         }
+    }
+
+    fn decode_slice_macroblock(
+        &mut self,
+        slice_type: u8,
+        macroblock_input: CabacSliceMacroblockInput,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        builder: &mut crate::Yuv420FrameBuilder,
+        macroblock_address: usize,
+    ) -> io::Result<CabacSliceMacroblockResult> {
+        if slice_type % 5 == 2 {
+            let CabacSliceMacroblockInput::Intra(input) = macroblock_input else {
+                return Err(invalid("I-slice provider returned a non-intra macroblock"));
+            };
+            return Ok(CabacSliceMacroblockResult::Intra(
+                self.decode_i_intra_macroblock(input, contexts, builder, macroblock_address)?,
+            ));
+        }
+        let CabacSliceMacroblockInput::Inter(input) = macroblock_input else {
+            return Err(invalid(
+                "P/B slice provider returned a non-inter macroblock",
+            ));
+        };
+        if input.inter_input.slice_type % 5 != slice_type % 5 {
+            return Err(invalid("macroblock slice type does not match slice_data"));
+        }
+        let layer =
+            self.decode_p_b_macroblock_layer(input, contexts, builder, macroblock_address)?;
+        Ok(match layer.macroblock {
+            CabacPBMacroblockPrediction::Intra(intra) => CabacSliceMacroblockResult::Intra(intra),
+            _ => CabacSliceMacroblockResult::Inter(layer),
+        })
     }
 
     /// Decodes a non-skip P/B macroblock and atomically places its motion-compensated prediction.
@@ -4295,6 +4536,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let is_b_slice = input.slice_type % 5 == 1;
         let intra_type_start = if is_b_slice { 23 } else { 5 };
         if macroblock_type >= intra_type_start {
+            require_intra_neighbors(address)?;
             let input = intra_input
                 .ok_or_else(|| invalid("P/B intra macroblock references are unavailable"))?;
             let intra = trial.decode_i_intra_macroblock_with_type(
@@ -4541,6 +4783,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             }
         }
 
+        let mut partition_predictions = Vec::with_capacity(specifications.len());
         for (partition_index, specification) in specifications.iter().enumerate() {
             let flags = prediction_flags[partition_index];
             let references = reference_indices[partition_index];
@@ -4549,7 +4792,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             if !flags[0] && !flags[1] {
                 return Err(invalid("inter partition has no active prediction list"));
             }
-            let mut predictions: [Option<(Vec<u8>, Vec<u8>, Vec<u8>)>; 2] = [None, None];
+            let mut prediction_references = [None, None];
             for list_index in 0..2 {
                 if !flags[list_index] {
                     continue;
@@ -4558,60 +4801,20 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     .ok()
                     .filter(|index| *index < input.reference_lists[list_index].len())
                     .ok_or_else(|| invalid("inter macroblock reference index is unavailable"))?;
-                predictions[list_index] = Some(compensate_inter_partition(
-                    &input.reference_lists[list_index][reference_index].frame,
-                    input.macroblock_x,
-                    input.macroblock_y,
-                    specification.x,
-                    specification.y,
-                    specification.width,
-                    specification.height,
+                prediction_references[list_index] = Some((
+                    input.reference_lists[list_index][reference_index]
+                        .frame
+                        .clone(),
                     vectors[list_index],
-                )?);
+                ));
             }
-            let (prediction0, prediction1) = (predictions[0].as_ref(), predictions[1].as_ref());
-            for row in 0..specification.height {
-                for column in 0..specification.width {
-                    let local_index = row * specification.width + column;
-                    let sample = match (prediction0, prediction1) {
-                        (Some(first), Some(second)) => {
-                            (u16::from(first.0[local_index]) + u16::from(second.0[local_index]) + 1)
-                                >> 1
-                        }
-                        (Some(first), None) => u16::from(first.0[local_index]),
-                        (None, Some(second)) => u16::from(second.0[local_index]),
-                        (None, None) => unreachable!(),
-                    } as u8;
-                    result.luma[(specification.y + row) * 16 + specification.x + column] = sample;
-                }
-            }
-            for row in 0..specification.height / 2 {
-                for column in 0..specification.width / 2 {
-                    let local_index = row * (specification.width / 2) + column;
-                    let destination =
-                        (specification.y / 2 + row) * 8 + specification.x / 2 + column;
-                    let average = |component: usize| -> u8 {
-                        let sample = |prediction: &(Vec<u8>, Vec<u8>, Vec<u8>)| {
-                            if component == 1 {
-                                prediction.1[local_index]
-                            } else {
-                                prediction.2[local_index]
-                            }
-                        };
-                        match (prediction0, prediction1) {
-                            (Some(first), Some(second)) => {
-                                ((u16::from(sample(first)) + u16::from(sample(second)) + 1) >> 1)
-                                    as u8
-                            }
-                            (Some(first), None) => sample(first),
-                            (None, Some(second)) => sample(second),
-                            (None, None) => unreachable!(),
-                        }
-                    };
-                    result.cb[destination] = average(1);
-                    result.cr[destination] = average(2);
-                }
-            }
+            partition_predictions.push(InterPartitionPrediction {
+                x: specification.x,
+                y: specification.y,
+                width: specification.width,
+                height: specification.height,
+                references: prediction_references,
+            });
             result.partitions.push(CabacInterMacroblockPartition {
                 x: specification.x,
                 y: specification.y,
@@ -4623,6 +4826,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 motion_vector_differences: motion_vector_differences[partition_index],
             });
         }
+        let mut inter_residual = InterResidual::new();
         if let Some(residual_input) = residual_input {
             let residual = trial.decode_inter_residuals(
                 macroblock_type,
@@ -4630,9 +4834,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 &result.sub_macroblock_types,
                 residual_input,
                 &mut trial_contexts,
-                &mut result.luma,
-                &mut result.cb,
-                &mut result.cr,
+                &mut inter_residual,
             )?;
             result.coded_block_pattern_luma = residual.0;
             result.coded_block_pattern_chroma = residual.1;
@@ -4643,7 +4845,17 @@ impl<'a> CabacArithmeticDecoder<'a> {
             result.chroma_dc_coded = residual.6;
             result.chroma_ac_coded_flags = residual.7;
         }
-        builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
+        let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
+        let job: ReconstructionJob = Box::new(move || {
+            let mut samples =
+                inter_prediction_samples(&partition_predictions, macroblock_x, macroblock_y)?;
+            inter_residual.apply(&mut samples);
+            Ok(samples)
+        });
+        if let Some(job) = defer_reconstruction(job) {
+            (result.luma, result.cb, result.cr) = job()?;
+            builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
+        }
         self.bits = trial.bits;
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
@@ -4659,9 +4871,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         sub_types: &[u8],
         input: CabacInterMacroblockResidualInput,
         contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
-        luma: &mut [u8; 256],
-        cb: &mut [u8; 64],
-        cr: &mut [u8; 64],
+        output: &mut InterResidual,
     ) -> io::Result<(
         u8,
         u8,
@@ -4773,8 +4983,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 for row in 0..8 {
                     for column in 0..8 {
                         let index = (block_y + row) * 16 + block_x + column;
-                        luma[index] = (i64::from(luma[index]) + residual[row * 8 + column])
-                            .clamp(0, 255) as u8;
+                        output.luma[index] = residual[row * 8 + column];
                     }
                 }
             }
@@ -4819,8 +5028,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 for row in 0..4 {
                     for column in 0..4 {
                         let index = (block_y * 4 + row) * 16 + block_x * 4 + column;
-                        luma[index] = (i64::from(luma[index]) + residual[row * 4 + column])
-                            .clamp(0, 255) as u8;
+                        output.luma[index] = residual[row * 4 + column];
                     }
                 }
             }
@@ -4942,11 +5150,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             }
             let residual =
                 crate::reconstruction::assemble_chroma420_residual_macroblock(&residual_blocks);
-            if component == 0 {
-                *cb = crate::reconstruction::reconstruct_chroma420_macroblock(cb, &residual);
-            } else {
-                *cr = crate::reconstruction::reconstruct_chroma420_macroblock(cr, &residual);
-            }
+            output.chroma[component] = residual;
         }
         Ok((
             coded_block_pattern_luma,
@@ -5913,6 +6117,107 @@ pub fn place_chroma4x4_scan_levels(dc_level: i32, ac_scan_levels: &[i32; 15]) ->
     place_luma4x4_scan_levels(&scan_levels)
 }
 
+struct InterResidual {
+    luma: [i64; 256],
+    chroma: [[i64; 64]; 2],
+}
+
+impl InterResidual {
+    fn new() -> Self {
+        Self {
+            luma: [0; 256],
+            chroma: [[0; 64]; 2],
+        }
+    }
+
+    fn apply(&self, samples: &mut MacroblockSamples) {
+        for (sample, residual) in samples.0.iter_mut().zip(&self.luma) {
+            *sample = (i64::from(*sample) + residual).clamp(0, 255) as u8;
+        }
+        samples.1 =
+            crate::reconstruction::reconstruct_chroma420_macroblock(&samples.1, &self.chroma[0]);
+        samples.2 =
+            crate::reconstruction::reconstruct_chroma420_macroblock(&samples.2, &self.chroma[1]);
+    }
+}
+
+struct InterPartitionPrediction {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    references: [Option<(std::sync::Arc<crate::Yuv420Frame>, crate::MotionVector)>; 2],
+}
+
+fn inter_prediction_samples(
+    partitions: &[InterPartitionPrediction],
+    macroblock_x: usize,
+    macroblock_y: usize,
+) -> io::Result<MacroblockSamples> {
+    let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
+    for partition in partitions {
+        let mut predictions: [Option<(Vec<u8>, Vec<u8>, Vec<u8>)>; 2] = [None, None];
+        for (prediction, reference) in predictions.iter_mut().zip(&partition.references) {
+            if let Some((frame, motion)) = reference {
+                *prediction = Some(compensate_inter_partition(
+                    frame,
+                    macroblock_x,
+                    macroblock_y,
+                    partition.x,
+                    partition.y,
+                    partition.width,
+                    partition.height,
+                    *motion,
+                )?);
+            }
+        }
+        let (prediction0, prediction1) = (predictions[0].as_ref(), predictions[1].as_ref());
+        for row in 0..partition.height {
+            for column in 0..partition.width {
+                let local_index = row * partition.width + column;
+                let sample = match (prediction0, prediction1) {
+                    (Some(first), Some(second)) => {
+                        (u16::from(first.0[local_index]) + u16::from(second.0[local_index]) + 1)
+                            >> 1
+                    }
+                    (Some(first), None) => u16::from(first.0[local_index]),
+                    (None, Some(second)) => u16::from(second.0[local_index]),
+                    (None, None) => {
+                        return Err(invalid("inter partition has no active prediction list"))
+                    }
+                } as u8;
+                luma[(partition.y + row) * 16 + partition.x + column] = sample;
+            }
+        }
+        for row in 0..partition.height / 2 {
+            for column in 0..partition.width / 2 {
+                let local_index = row * (partition.width / 2) + column;
+                let destination = (partition.y / 2 + row) * 8 + partition.x / 2 + column;
+                let average = |component: usize| -> u8 {
+                    let sample = |prediction: &(Vec<u8>, Vec<u8>, Vec<u8>)| {
+                        if component == 1 {
+                            prediction.1[local_index]
+                        } else {
+                            prediction.2[local_index]
+                        }
+                    };
+                    match (prediction0, prediction1) {
+                        (Some(first), Some(second)) => {
+                            ((u16::from(sample(first)) + u16::from(sample(second)) + 1) >> 1) as u8
+                        }
+                        (Some(first), None) => sample(first),
+                        (None, Some(second)) => sample(second),
+                        (None, None) => 0,
+                    }
+                };
+                cb[destination] = average(1);
+                cr[destination] = average(2);
+            }
+        }
+    }
+    Ok((luma, cb, cr))
+}
+
 fn compensate_inter_partition(
     frame: &crate::Yuv420Frame,
     macroblock_x: usize,
@@ -5932,9 +6237,9 @@ fn compensate_inter_partition(
     {
         return Err(invalid("inter prediction partition geometry is invalid"));
     }
-    let y_plane = frame.luma_plane_bytes()?;
-    let cb_plane = frame.u_plane_bytes()?;
-    let cr_plane = frame.v_plane_bytes()?;
+    let y_plane = frame.luma_plane()?;
+    let cb_plane = frame.u_plane()?;
+    let cr_plane = frame.v_plane()?;
     let motion_x = isize::try_from(motion.x)
         .map_err(|_| invalid("inter prediction motion vector is outside the supported range"))?;
     let motion_y = isize::try_from(motion.y)
@@ -6026,15 +6331,127 @@ fn compensate_inter_partition(
     Ok((luma, cb, cr))
 }
 
+fn p_skip_samples(
+    reference: &crate::Yuv420Frame,
+    macroblock_x: usize,
+    macroblock_y: usize,
+    motion_vector: crate::MotionVector,
+) -> io::Result<MacroblockSamples> {
+    let ref_y = reference.luma_plane()?;
+    let ref_cb = reference.u_plane()?;
+    let ref_cr = reference.v_plane()?;
+    let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
+    let motion_x = isize::try_from(motion_vector.x)
+        .map_err(|_| invalid("P_Skip motion vector is outside the supported range"))?;
+    let motion_y = isize::try_from(motion_vector.y)
+        .map_err(|_| invalid("P_Skip motion vector is outside the supported range"))?;
+    for row in 0..16 {
+        for column in 0..16 {
+            let x = macroblock_x
+                .checked_mul(16)
+                .and_then(|value| value.checked_add(column))
+                .and_then(|value| isize::try_from(value).ok())
+                .and_then(|value| value.checked_add(motion_x >> 2))
+                .ok_or_else(|| invalid("P_Skip luma coordinate is outside the supported range"))?;
+            let y = macroblock_y
+                .checked_mul(16)
+                .and_then(|value| value.checked_add(row))
+                .and_then(|value| isize::try_from(value).ok())
+                .and_then(|value| value.checked_add(motion_y >> 2))
+                .ok_or_else(|| invalid("P_Skip luma coordinate is outside the supported range"))?;
+            luma[row * 16 + column] = crate::reconstruction::interpolate_luma_fractional_sample(
+                &ref_y,
+                reference.width,
+                reference.height,
+                reference.width,
+                x,
+                y,
+                (motion_vector.x & 3) as u8,
+                (motion_vector.y & 3) as u8,
+            )?;
+        }
+    }
+    let chroma_width = reference.width / 2 + reference.width % 2;
+    let chroma_height = reference.height / 2 + reference.height % 2;
+    for row in 0..8 {
+        for column in 0..8 {
+            let x = macroblock_x
+                .checked_mul(8)
+                .and_then(|value| value.checked_add(column))
+                .and_then(|value| isize::try_from(value).ok())
+                .and_then(|value| value.checked_add(motion_x >> 3))
+                .ok_or_else(|| {
+                    invalid("P_Skip chroma coordinate is outside the supported range")
+                })?;
+            let y = macroblock_y
+                .checked_mul(8)
+                .and_then(|value| value.checked_add(row))
+                .and_then(|value| isize::try_from(value).ok())
+                .and_then(|value| value.checked_add(motion_y >> 3))
+                .ok_or_else(|| {
+                    invalid("P_Skip chroma coordinate is outside the supported range")
+                })?;
+            let index = row * 8 + column;
+            for (plane, target) in [(&ref_cb, &mut cb), (&ref_cr, &mut cr)] {
+                target[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
+                    plane,
+                    chroma_width,
+                    chroma_height,
+                    chroma_width,
+                    x,
+                    y,
+                    (motion_vector.x & 7) as u8,
+                    (motion_vector.y & 7) as u8,
+                )?;
+            }
+        }
+    }
+    Ok((luma, cb, cr))
+}
+
+fn b_direct_samples(
+    references: &[Option<(std::sync::Arc<crate::Yuv420Frame>, crate::MotionVector)>; 2],
+    macroblock_x: usize,
+    macroblock_y: usize,
+) -> io::Result<MacroblockSamples> {
+    let mut predictions = [None, None];
+    for (prediction, reference) in predictions.iter_mut().zip(references) {
+        if let Some((frame, motion)) = reference {
+            *prediction = Some(compensate_b_direct_reference(
+                frame,
+                macroblock_x,
+                macroblock_y,
+                *motion,
+            )?);
+        }
+    }
+    let [prediction0, prediction1] = predictions;
+    Ok(match (prediction0, prediction1) {
+        (Some((y0, cb0, cr0)), Some((y1, cb1, cr1))) => {
+            let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
+            for index in 0..256 {
+                luma[index] = ((u16::from(y0[index]) + u16::from(y1[index]) + 1) >> 1) as u8;
+            }
+            for index in 0..64 {
+                cb[index] = ((u16::from(cb0[index]) + u16::from(cb1[index]) + 1) >> 1) as u8;
+                cr[index] = ((u16::from(cr0[index]) + u16::from(cr1[index]) + 1) >> 1) as u8;
+            }
+            (luma, cb, cr)
+        }
+        (Some(samples), None) | (None, Some(samples)) => samples,
+        (None, None) => return Err(invalid("B_Direct has no active prediction list")),
+    })
+}
+
 fn compensate_b_direct_reference(
     frame: &crate::Yuv420Frame,
     macroblock_x: usize,
     macroblock_y: usize,
     motion: crate::MotionVector,
 ) -> io::Result<([u8; 256], [u8; 64], [u8; 64])> {
-    let y_plane = frame.luma_plane_bytes()?;
-    let cb_plane = frame.u_plane_bytes()?;
-    let cr_plane = frame.v_plane_bytes()?;
+    let y_plane = frame.luma_plane()?;
+    let cb_plane = frame.u_plane()?;
+    let cr_plane = frame.v_plane()?;
     let motion_x = isize::try_from(motion.x)
         .map_err(|_| invalid("B_Direct motion vector is outside the supported range"))?;
     let motion_y = isize::try_from(motion.y)
@@ -7379,7 +7796,7 @@ mod tests {
             top_candidate: None,
             top_right_candidate: None,
             top_left_candidate: None,
-            reference_frame: reference,
+            reference_frame: reference.into(),
         };
         let mut builder = crate::Yuv420FrameBuilder::new(1, 1, 0, 0, 0, 0).unwrap();
         let result = decoder
@@ -7434,7 +7851,8 @@ mod tests {
                 y,
                 u: chroma.clone(),
                 v: chroma,
-            },
+            }
+            .into(),
         };
         let mut builder = crate::Yuv420FrameBuilder::new(1, 1, 0, 0, 0, 0).unwrap();
         let result = decoder
@@ -7479,7 +7897,8 @@ mod tests {
                 y: vec![64; 32 * 32],
                 u: vec![96; 16 * 16],
                 v: vec![160; 16 * 16],
-            },
+            }
+            .into(),
         };
         let mut builder = crate::Yuv420FrameBuilder::new(2, 2, 0, 0, 0, 0).unwrap();
         let result = decoder
@@ -7525,7 +7944,7 @@ mod tests {
             top_candidate: None,
             top_right_candidate: None,
             top_left_candidate: None,
-            reference_frame: reference,
+            reference_frame: reference.into(),
         };
         let mut builder = crate::Yuv420FrameBuilder::new(1, 1, 0, 0, 0, 0).unwrap();
         builder
@@ -7561,7 +7980,8 @@ mod tests {
                 y: vec![value; 256],
                 u: vec![value; 64],
                 v: vec![value; 64],
-            },
+            }
+            .into(),
             picture_order_count,
             long_term: false,
         }
@@ -7924,7 +8344,7 @@ mod tests {
             v: vec![120; 64],
         };
         let reference = CabacBReferencePicture {
-            frame: reference_frame,
+            frame: reference_frame.into(),
             picture_order_count: 0,
             long_term: false,
         };
@@ -8123,7 +8543,8 @@ mod tests {
                 y: vec![20; 256],
                 u: vec![80; 64],
                 v: vec![120; 64],
-            },
+            }
+            .into(),
             picture_order_count: 0,
             long_term: false,
         };
@@ -8331,7 +8752,8 @@ mod tests {
                 y: vec![51; 512],
                 u: vec![61; 128],
                 v: vec![71; 128],
-            },
+            }
+            .into(),
             picture_order_count: 0,
             long_term: false,
         };

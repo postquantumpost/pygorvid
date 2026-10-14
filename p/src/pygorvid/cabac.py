@@ -6,6 +6,15 @@ from typing import Literal
 
 from .bitreader import BitReader, BitstreamError
 from .cabac_init import CONTEXT_INIT_TABLE
+from .deferred import (
+    PLACEHOLDER_SAMPLES as _PLACEHOLDER_SAMPLES,
+    InterResidual as _InterResidual,
+    IntraNeighborsPending as _IntraNeighborsPending,
+    SliceReconstructionDriver as _SliceReconstructionDriver,
+    parallel_reconstruction_available as _parallel_reconstruction_available,
+    reconstruct_or_defer as _reconstruct_or_defer,
+    require_intra_neighbors as _require_intra_neighbors,
+)
 
 
 class CABACError(ValueError):
@@ -1592,11 +1601,7 @@ class CABACArithmeticDecoder:
             self._commit_slice_trial(trial, contexts, trial_contexts)
             return CABACPSkipMacroblockResult(False, -1, (0, 0), (), (), ())
 
-        from .reconstruction import (
-            _LumaFractionalSampleCache,
-            interpolate_chroma_fractional_sample,
-            predict_motion_vector,
-        )
+        from .reconstruction import predict_motion_vector
 
         left, top = input.left_candidate, input.top_candidate
         motion = (0, 0)
@@ -1622,60 +1627,15 @@ class CABACArithmeticDecoder:
         frame = input.reference_frame
         if frame is None:
             raise CABACError("P_Skip reference picture is required")
-        y_plane = frame.luma_plane_bytes()
-        cb_plane = frame.u_plane_bytes()
-        cr_plane = frame.v_plane_bytes()
-        macroblock_x, macroblock_y = input.macroblock_x, input.macroblock_y
-        luma_interpolator = _LumaFractionalSampleCache(
-            y_plane,
-            frame.width,
-            frame.height,
-            frame.width,
+        samples = _reconstruct_or_defer(
+            "pskip",
+            (frame,),
+            (input.macroblock_x, input.macroblock_y, motion),
             getattr(trial, "_timeout_check", None),
         )
-        luma = []
-        for row in range(16):
-            for column in range(16):
-                luma.append(
-                    luma_interpolator.sample(
-                        macroblock_x * 16 + column + (motion[0] >> 2),
-                        macroblock_y * 16 + row + (motion[1] >> 2),
-                        motion[0] & 3,
-                        motion[1] & 3,
-                    )
-                )
-        chroma_width = (frame.width + 1) // 2
-        chroma_height = (frame.height + 1) // 2
-        cb, cr = [], []
-        for row in range(8):
-            for column in range(8):
-                x_int = macroblock_x * 8 + column + (motion[0] >> 3)
-                y_int = macroblock_y * 8 + row + (motion[1] >> 3)
-                cb.append(
-                    interpolate_chroma_fractional_sample(
-                        cb_plane,
-                        chroma_width,
-                        chroma_height,
-                        chroma_width,
-                        x_int,
-                        y_int,
-                        motion[0] & 7,
-                        motion[1] & 7,
-                    )
-                )
-                cr.append(
-                    interpolate_chroma_fractional_sample(
-                        cr_plane,
-                        chroma_width,
-                        chroma_height,
-                        chroma_width,
-                        x_int,
-                        y_int,
-                        motion[0] & 7,
-                        motion[1] & 7,
-                    )
-                )
-        builder.place_macroblock(address, luma, cb, cr)
+        if samples is not None:
+            builder.place_macroblock(address, *samples)
+        luma, cb, cr = samples or _PLACEHOLDER_SAMPLES
         self._commit_slice_trial(trial, contexts, trial_contexts)
         return CABACPSkipMacroblockResult(True, 0, motion, tuple(luma), tuple(cb), tuple(cr))
 
@@ -1759,10 +1719,8 @@ class CABACArithmeticDecoder:
             raise CABACError("B_Direct macroblock metadata is invalid")
 
         from .reconstruction import (
-            _LumaFractionalSampleCache,
             MotionVectorCandidate,
             Yuv420Frame,
-            interpolate_chroma_fractional_sample,
             predict_motion_vector,
         )
 
@@ -1894,71 +1852,23 @@ class CABACArithmeticDecoder:
         if not any(prediction_flags):
             raise CABACError("B_Direct has no active prediction list")
 
-        def compensate(frame, motion):
-            y_plane = frame.luma_plane_bytes()
-            cb_plane = frame.u_plane_bytes()
-            cr_plane = frame.v_plane_bytes()
-            mv_x, mv_y = motion
-            mb_x, mb_y = input.macroblock_x, input.macroblock_y
-            luma_interpolator = _LumaFractionalSampleCache(
-                y_plane,
-                frame.width,
-                frame.height,
-                frame.width,
-                getattr(self, "_timeout_check", None),
-            )
-            y = tuple(
-                luma_interpolator.sample(
-                    mb_x * 16 + column + (mv_x >> 2),
-                    mb_y * 16 + row + (mv_y >> 2),
-                    mv_x & 3,
-                    mv_y & 3,
-                )
-                for row in range(16)
-                for column in range(16)
-            )
-            chroma_width = (frame.width + 1) // 2
-            chroma_height = (frame.height + 1) // 2
-            chroma = tuple(
-                tuple(
-                    interpolate_chroma_fractional_sample(
-                        plane,
-                        chroma_width,
-                        chroma_height,
-                        chroma_width,
-                        mb_x * 8 + column + (mv_x >> 3),
-                        mb_y * 8 + row + (mv_y >> 3),
-                        mv_x & 7,
-                        mv_y & 7,
-                    )
-                    for row in range(8)
-                    for column in range(8)
-                )
-                for plane in (cb_plane, cr_plane)
-            )
-            return y, chroma[0], chroma[1]
-
-        predictions = [
-            compensate(frame, motion) if frame is not None else None
-            for frame, motion in zip(selected, motion_vectors)
-        ]
-        if predictions[0] is None:
-            luma, cb, cr = predictions[1]
-        elif predictions[1] is None:
-            luma, cb, cr = predictions[0]
-        else:
-            luma = tuple((a + b + 1) >> 1 for a, b in zip(predictions[0][0], predictions[1][0]))
-            cb = tuple((a + b + 1) >> 1 for a, b in zip(predictions[0][1], predictions[1][1]))
-            cr = tuple((a + b + 1) >> 1 for a, b in zip(predictions[0][2], predictions[1][2]))
-        builder.place_macroblock(address, luma, cb, cr)
+        samples = _reconstruct_or_defer(
+            "bdirect",
+            tuple(selected),
+            (motion_vectors, input.macroblock_x, input.macroblock_y),
+            getattr(self, "_timeout_check", None),
+        )
+        if samples is not None:
+            builder.place_macroblock(address, *samples)
+        luma, cb, cr = samples or _PLACEHOLDER_SAMPLES
         return CABACBDirectMacroblockResult(
             skipped,
             reference_indices,
             motion_vectors,
             prediction_flags,
-            luma,
-            cb,
-            cr,
+            tuple(luma),
+            tuple(cb),
+            tuple(cr),
         )
 
     def decode_reference_index(
@@ -3069,8 +2979,14 @@ class CABACArithmeticDecoder:
             CABACIIntraMacroblockInput | CABACPBMacroblockLayerInput,
         ],
         progress_callback: Callable[[int], None] | None = None,
+        threads: int = 1,
+        reference_frames: Sequence[object] = (),
     ) -> tuple[CABACSliceMacroblockResult, ...]:
-        """Run CABAC slice_data over progressive raster macroblocks through end_of_slice_flag."""
+        """Run CABAC slice_data over progressive raster macroblocks through end_of_slice_flag.
+
+        With threads > 1, P/B inter reconstruction runs in worker processes that share
+        reference_frames; results are identical to the single-threaded decode.
+        """
         _validate_slice_contexts(contexts)
         if (
             not isinstance(slice_type, int)
@@ -3089,24 +3005,44 @@ class CABACArithmeticDecoder:
         ):
             raise CABACError("CABAC slice_data inputs are invalid or unsupported")
 
+        if slice_type % 5 == 2 or not _parallel_reconstruction_available(threads):
+            return self._decode_slice_macroblocks(
+                slice_type, first_macroblock_address, picture_macroblock_count,
+                contexts, builder, input_provider, progress_callback, None,
+            )
+        with _SliceReconstructionDriver(
+            threads, builder.picture_width_in_mbs, first_macroblock_address, reference_frames
+        ) as driver:
+            return self._decode_slice_macroblocks(
+                slice_type, first_macroblock_address, picture_macroblock_count,
+                contexts, builder, input_provider, progress_callback, driver,
+            )
+
+    def _decode_slice_macroblocks(
+        self,
+        slice_type,
+        first_macroblock_address,
+        picture_macroblock_count,
+        contexts,
+        builder,
+        input_provider,
+        progress_callback,
+        driver,
+    ) -> tuple[CABACSliceMacroblockResult, ...]:
         decoded = []
         macroblock_address = first_macroblock_address
         while True:
-            macroblock_input = input_provider(macroblock_address, decoded)
-            if slice_type % 5 == 2:
-                if not isinstance(macroblock_input, CABACIIntraMacroblockInput):
-                    raise CABACError("I-slice input provider returned a non-intra macroblock")
-                macroblock_result = self.decode_i_intra_macroblock(
-                    macroblock_input, contexts, builder, macroblock_address
-                )
-            else:
-                if not isinstance(macroblock_input, CABACPBMacroblockLayerInput):
-                    raise CABACError("P/B input provider returned a non-inter macroblock")
-                if macroblock_input.inter_input.slice_type % 5 != slice_type % 5:
-                    raise CABACError("macroblock slice type does not match its slice_data")
-                macroblock_result = self.decode_p_b_macroblock_layer(
-                    macroblock_input, contexts, builder, macroblock_address
-                )
+            if driver is not None:
+                driver.apply_ready(decoded, builder)
+            while True:
+                macroblock_input = input_provider(macroblock_address, decoded)
+                try:
+                    macroblock_result = self._decode_slice_macroblock(
+                        slice_type, macroblock_input, contexts, builder, macroblock_address
+                    )
+                    break
+                except _IntraNeighborsPending:
+                    driver.wait_for_intra_neighbors(macroblock_address, decoded, builder)
             if (
                 isinstance(macroblock_result, CABACPBMacroblockLayerResult)
                 and isinstance(macroblock_result.macroblock, CABACIIntraMacroblockResult)
@@ -3115,13 +3051,34 @@ class CABACArithmeticDecoder:
             else:
                 result = macroblock_result
             decoded.append(CABACSliceMacroblockResult(macroblock_address, result))
+            if driver is not None:
+                job = driver.take_job()
+                if job is not None:
+                    driver.submit(macroblock_address, job, decoded, builder)
             if progress_callback is not None:
                 progress_callback(macroblock_address)
             if self.decode_terminate_bin():
+                if driver is not None:
+                    driver.finish(decoded, builder)
                 return tuple(decoded)
             if macroblock_address + 1 >= picture_macroblock_count:
                 raise CABACError("slice_data reached the picture end without end_of_slice_flag")
             macroblock_address += 1
+
+    def _decode_slice_macroblock(self, slice_type, macroblock_input, contexts, builder, macroblock_address):
+        if slice_type % 5 == 2:
+            if not isinstance(macroblock_input, CABACIIntraMacroblockInput):
+                raise CABACError("I-slice input provider returned a non-intra macroblock")
+            return self.decode_i_intra_macroblock(
+                macroblock_input, contexts, builder, macroblock_address
+            )
+        if not isinstance(macroblock_input, CABACPBMacroblockLayerInput):
+            raise CABACError("P/B input provider returned a non-inter macroblock")
+        if macroblock_input.inter_input.slice_type % 5 != slice_type % 5:
+            raise CABACError("macroblock slice type does not match its slice_data")
+        return self.decode_p_b_macroblock_layer(
+            macroblock_input, contexts, builder, macroblock_address
+        )
 
     def _decode_inter_macroblock(
         self,
@@ -3163,12 +3120,10 @@ class CABACArithmeticDecoder:
         ):
             raise CABACError("inter macroblock reference lists are invalid")
         from .reconstruction import (
-            _LumaFractionalSampleCache,
             MotionVector,
             MotionVectorCandidate,
             MotionVectorPartitionShape,
             apply_motion_vector_difference,
-            interpolate_chroma_fractional_sample,
             predict_motion_vector_for_partition,
             Yuv420Frame,
         )
@@ -3194,6 +3149,7 @@ class CABACArithmeticDecoder:
         )
         intra_type_start = 23 if is_b_slice else 5
         if macroblock_type >= intra_type_start:
+            _require_intra_neighbors(address)
             if not isinstance(intra_input, CABACIIntraMacroblockInput):
                 raise CABACError("P/B intra macroblock references are unavailable")
             intra_result = trial._decode_i_intra_macroblock_with_type(
@@ -3310,9 +3266,6 @@ class CABACArithmeticDecoder:
         if len(frame_dimensions) != 1:
             raise CABACError("inter macroblock reference picture dimensions do not match")
         frame_width, frame_height = next(iter(frame_dimensions))
-        luma = bytearray(256)
-        cb = bytearray(64)
-        cr = bytearray(64)
         partition_results = []
 
         prepared = []
@@ -3545,6 +3498,8 @@ class CABACArithmeticDecoder:
                     predicted, MotionVector(*difference)
                 )
 
+        job_frames = []
+        job_partitions = []
         for state in prepared:
             x, y = state["x"], state["y"]
             width, height = state["width"], state["height"]
@@ -3552,66 +3507,22 @@ class CABACArithmeticDecoder:
             ref_indices = state["references"]
             motion_vectors = state["vectors"]
 
-            selected_predictions = []
+            selected = []
             for list_index, active in enumerate(flags):
                 if not active:
-                    selected_predictions.append(None)
+                    selected.append(None)
                     continue
                 if not 0 <= ref_indices[list_index] < len(input.reference_lists[list_index]):
                     raise CABACError("inter macroblock reference index is unavailable")
                 reference = input.reference_lists[list_index][ref_indices[list_index]].frame
-                ref_y = reference.luma_plane_bytes()
-                cb_plane, cr_plane = reference.u_plane_bytes(), reference.v_plane_bytes()
-                mv_x, mv_y = motion_vectors[list_index].x, motion_vectors[list_index].y
-                predicted_luma = [0] * (width * height)
-                luma_interpolator = _LumaFractionalSampleCache(
-                    ref_y,
-                    frame_width,
-                    frame_height,
-                    reference.width,
-                    getattr(self, "_timeout_check", None),
+                if not any(reference is frame for frame in job_frames):
+                    job_frames.append(reference)
+                frame_index = next(
+                    index for index, frame in enumerate(job_frames) if frame is reference
                 )
-                for row in range(height):
-                    for column in range(width):
-                        predicted_luma[row * width + column] = luma_interpolator.sample(
-                            input.macroblock_x * 16 + x + column + (mv_x >> 2),
-                            input.macroblock_y * 16 + y + row + (mv_y >> 2),
-                            mv_x & 3,
-                            mv_y & 3,
-                        )
-                chroma_x, chroma_y = x // 2, y // 2
-                chroma_width, chroma_height = width // 2, height // 2
-                ref_chroma_width, ref_chroma_height = (frame_width + 1) // 2, (frame_height + 1) // 2
-                predicted_cb, predicted_cr = [], []
-                for row in range(chroma_height):
-                    for column in range(chroma_width):
-                        cx = input.macroblock_x * 8 + chroma_x + column + (mv_x >> 3)
-                        cy = input.macroblock_y * 8 + chroma_y + row + (mv_y >> 3)
-                        predicted_cb.append(
-                            interpolate_chroma_fractional_sample(
-                                cb_plane, ref_chroma_width, ref_chroma_height, ref_chroma_width,
-                                cx, cy, mv_x & 7, mv_y & 7,
-                            )
-                        )
-                        predicted_cr.append(
-                            interpolate_chroma_fractional_sample(
-                                cr_plane, ref_chroma_width, ref_chroma_height, ref_chroma_width,
-                                cx, cy, mv_x & 7, mv_y & 7,
-                            )
-                        )
-                selected_predictions.append((predicted_luma, predicted_cb, predicted_cr))
-
-            for row in range(height):
-                for column in range(width):
-                    samples = [prediction[0][row * width + column] for prediction in selected_predictions if prediction is not None]
-                    luma[(y + row) * 16 + x + column] = (sum(samples) + (1 if len(samples) == 2 else 0)) // len(samples)
-            for row in range(height // 2):
-                for column in range(width // 2):
-                    samples_cb = [prediction[1][row * (width // 2) + column] for prediction in selected_predictions if prediction is not None]
-                    samples_cr = [prediction[2][row * (width // 2) + column] for prediction in selected_predictions if prediction is not None]
-                    destination = ((y // 2) + row) * 8 + (x // 2) + column
-                    cb[destination] = (sum(samples_cb) + (1 if len(samples_cb) == 2 else 0)) // len(samples_cb)
-                    cr[destination] = (sum(samples_cr) + (1 if len(samples_cr) == 2 else 0)) // len(samples_cr)
+                vector = motion_vectors[list_index]
+                selected.append((frame_index, (vector.x, vector.y)))
+            job_partitions.append((x, y, width, height, tuple(selected)))
             partition_results.append(
                 CABACInterMacroblockPartition(
                     x, y, width, height, tuple(flags), tuple(ref_indices),
@@ -3620,6 +3531,7 @@ class CABACArithmeticDecoder:
                 )
             )
 
+        residual = _InterResidual()
         residual_result = (0, 0, False, 0, 26, (), (False, False), ((False,) * 4, (False,) * 4))
         if residual_input is not None:
             residual_result = trial._decode_inter_residuals(
@@ -3628,11 +3540,24 @@ class CABACArithmeticDecoder:
                 tuple(sub_types),
                 residual_input,
                 trial_contexts,
-                luma,
-                cb,
-                cr,
+                residual,
             )
-        builder.place_macroblock(address, luma, cb, cr)
+        samples = _reconstruct_or_defer(
+            "inter",
+            tuple(job_frames),
+            (
+                tuple(job_partitions),
+                input.macroblock_x,
+                input.macroblock_y,
+                frame_width,
+                frame_height,
+                residual,
+            ),
+            getattr(self, "_timeout_check", None),
+        )
+        if samples is not None:
+            builder.place_macroblock(address, *samples)
+        luma, cb, cr = samples or _PLACEHOLDER_SAMPLES
         self._commit_slice_trial(trial, contexts, trial_contexts)
         return CABACInterMacroblockResult(
             macroblock_type=macroblock_type,
@@ -3658,9 +3583,7 @@ class CABACArithmeticDecoder:
         sub_types: tuple[int, ...],
         input: CABACInterMacroblockResidualInput,
         contexts: list[CABACContextModel],
-        luma: bytearray,
-        cb: bytearray,
-        cr: bytearray,
+        residual_output: "_InterResidual",
     ):
         if (
             not 0 <= input.previous_qpy <= 51
@@ -3689,7 +3612,6 @@ class CABACArithmeticDecoder:
             inverse_transform_luma4x4,
             inverse_transform_luma8x8,
             reconstruct_chroma4x4_residual,
-            reconstruct_chroma420_macroblock,
         )
 
         cbp_luma = self.decode_luma_coded_block_pattern(
@@ -3757,7 +3679,7 @@ class CABACArithmeticDecoder:
                 for row in range(8):
                     for column in range(8):
                         destination = (block_y + row) * 16 + block_x + column
-                        luma[destination] = min(255, max(0, luma[destination] + residual[row * 8 + column]))
+                        residual_output.luma[destination] = residual[row * 8 + column]
         else:
             for block_index in range(16):
                 raster_index = _LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index]
@@ -3785,7 +3707,7 @@ class CABACArithmeticDecoder:
                 for row in range(4):
                     for column in range(4):
                         destination = (block_y * 4 + row) * 16 + block_x * 4 + column
-                        luma[destination] = min(255, max(0, luma[destination] + residual[row * 4 + column]))
+                        residual_output.luma[destination] = residual[row * 4 + column]
 
         chroma_dc_coded = [False, False]
         chroma_dc_samples = [[0] * 4 for _ in range(2)]
@@ -3863,10 +3785,7 @@ class CABACArithmeticDecoder:
                     )
                 )
             residual_plane = assemble_chroma420_residual_macroblock(residual_blocks)
-            if component == 0:
-                cb[:] = reconstruct_chroma420_macroblock(cb, residual_plane)
-            else:
-                cr[:] = reconstruct_chroma420_macroblock(cr, residual_plane)
+            residual_output.chroma[component] = residual_plane
 
         return (
             cbp_luma,

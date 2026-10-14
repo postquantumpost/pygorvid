@@ -95,7 +95,7 @@ func nativeMinPositive(left, right int32) int32 {
 	return max(left, right)
 }
 
-func (decoder *H264Decoder) compensateNativeDirect(current *nativeMacroblock, slice nativeSlice, address int, poc int64, parts []nativePartition, lists [2][]DecodedReferencePicture, whole bool) error {
+func (decoder *H264Decoder) compensateNativeDirect(current *nativeMacroblock, compensations *[]nativeCompensation, slice nativeSlice, address int, poc int64, parts []nativePartition, lists [2][]DecodedReferencePicture, whole bool) error {
 	for _, part := range parts {
 		if !part.direct {
 			continue
@@ -112,9 +112,7 @@ func (decoder *H264Decoder) compensateNativeDirect(current *nativeMacroblock, sl
 			prediction.direct = true
 			setNativePrediction(current, part, list, prediction)
 			setNativePrediction(&decoder.nativeBlocks[address], part, list, prediction)
-			if err := compensateNativePartition(&current.result, lists[list][prediction.refIndex].Frame, address, int(slice.sps.CodedWidth)/16, part, prediction.motion, active); err != nil {
-				return err
-			}
+			*compensations = append(*compensations, nativeCompensation{frame: lists[list][prediction.refIndex].Frame, part: part, motion: prediction.motion, average: active})
 			active = true
 		}
 	}

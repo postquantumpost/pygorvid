@@ -564,6 +564,28 @@ pub struct H264Decoder {
     poc_type12_state: crate::PocType12State,
     poc_cache: Option<(crate::PictureIdentity, i64)>,
     decoded_frames: HashMap<usize, Yuv420Frame>,
+    // Zero selects default_decoder_threads().
+    threads: usize,
+}
+
+/// Returns half the available processors, at least one.
+pub fn default_decoder_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1))
+}
+
+impl H264Decoder {
+    /// Sets the number of decoder threads; zero selects `default_decoder_threads()`.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads;
+    }
+
+    pub fn threads(&self) -> usize {
+        if self.threads == 0 {
+            default_decoder_threads()
+        } else {
+            self.threads
+        }
+    }
 }
 
 impl H264Decoder {
@@ -606,6 +628,7 @@ impl H264Decoder {
             poc_type12_state: crate::PocType12State::default(),
             poc_cache: None,
             decoded_frames: HashMap::new(),
+            threads: 0,
         }
     }
 
@@ -668,6 +691,7 @@ impl H264Decoder {
             poc_type12_state: crate::PocType12State::default(),
             poc_cache: None,
             decoded_frames: HashMap::new(),
+            threads: 0,
         }
     }
 
@@ -815,7 +839,11 @@ impl H264Decoder {
                 return Err(invalid_checkpoint("checkpoint motion field is invalid"));
             }
             reference_picture_buffer
-                .store_with_motion_field(picture.reference, &picture.frame, picture.motion_field)
+                .store_with_motion_field(
+                    picture.reference,
+                    &picture.frame,
+                    std::sync::Arc::unwrap_or_clone(picture.motion_field),
+                )
                 .map_err(|_| invalid_checkpoint("checkpoint reference picture is invalid"))?;
         }
 
@@ -1077,12 +1105,14 @@ impl H264Decoder {
         let macroblock_count = width_in_mbs
             .checked_mul(height_in_mbs)
             .ok_or_else(|| invalid("picture macroblock count overflows"))?;
-        cabac.decode_slice_data(
+        let threads = self.threads();
+        cabac.decode_slice_data_threaded(
             dependency_slice.header.slice_type,
             dependency_slice.header.first_macroblock_in_slice as usize,
             macroblock_count,
             &mut contexts,
             builder,
+            threads,
             |address, history| {
                 let input =
                     self.macroblock_input_from_history(dependency_slice, address, history)?;
@@ -1416,29 +1446,31 @@ impl H264Decoder {
         let slice_qpy = i32::try_from(slice_qpy)
             .map_err(|_| invalid("dependency slice QP is outside the supported range"))?;
         let (mut previous_qpy, mut previous_qp_delta) = (slice_qpy, 0);
-        for previous in history {
-            match &previous.result {
+        // Equivalent to a forward scan: QP comes from the last coded entry, the delta from the last entry.
+        for (position, previous) in history.iter().enumerate().rev() {
+            let last = position + 1 == history.len();
+            let coded = match &previous.result {
                 crate::CabacSliceMacroblockResult::Intra(previous) => {
-                    previous_qpy = previous.qpy;
-                    previous_qp_delta = previous.qp_delta;
+                    Some((previous.qpy, previous.qp_delta))
                 }
-                crate::CabacSliceMacroblockResult::Inter(layer) if layer.skipped => {
-                    previous_qp_delta = 0;
-                }
+                crate::CabacSliceMacroblockResult::Inter(layer) if layer.skipped => None,
                 crate::CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
                     crate::CabacPBMacroblockPrediction::Intra(previous) => {
-                        previous_qpy = previous.qpy;
-                        previous_qp_delta = previous.qp_delta;
+                        Some((previous.qpy, previous.qp_delta))
                     }
                     crate::CabacPBMacroblockPrediction::Inter(previous) => {
-                        previous_qpy = previous.qpy;
-                        previous_qp_delta = previous.qp_delta;
+                        Some((previous.qpy, previous.qp_delta))
                     }
                     crate::CabacPBMacroblockPrediction::PSkip(_)
-                    | crate::CabacPBMacroblockPrediction::BSkip(_) => {
-                        previous_qp_delta = 0;
-                    }
+                    | crate::CabacPBMacroblockPrediction::BSkip(_) => None,
                 },
+            };
+            if let Some((qpy, qp_delta)) = coded {
+                previous_qpy = qpy;
+                if last {
+                    previous_qp_delta = qp_delta;
+                }
+                break;
             }
         }
         let mut input = crate::CabacIIntraMacroblockInput {
@@ -2130,11 +2162,12 @@ impl H264Decoder {
                         "picture deblocking metadata is incomplete at {missing_addresses:?}; last decoded macroblock {last_decoded_macroblock:?}"
                     ))
                 })?;
-            let coded_frame = crate::reconstruction::deblock_yuv420_picture(
+            let coded_frame = crate::reconstruction::deblock_yuv420_picture_threads(
                 &builder
                     .finish()
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?,
                 &deblocking,
+                self.threads(),
             )
             .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             let width = sps.width as usize;
