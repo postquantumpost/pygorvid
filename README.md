@@ -33,3 +33,23 @@ Frame indices are zero-based presentation indices. Output extensions select the
 encoder, and files are replaced only after successful decoding and encoding.
 Temporary output directories are cleaned up on success or failure. Python and
 Rust decoder checkpoints can be enabled with `PYGORVID_CHECKPOINT_DIR`.
+
+What Is Supported
+Only a subset of mp4, H.264 for decode is supported right now.  It's the
+subset needed by the videos I'm working with right now.
+
+What is tested and working:
+- Elgato
+- OBS
+- Linux Video Trimmer
+
+What is not tested but I have sample videos available:
+- Android phone video, horizontal
+- Android phone video, vertical
+- DJI drone video
+- Dashcam video, low resolution
+- Dashcam video, high resolution
+
+What is not tested:
+- full set of ITU sample data
+- Everything else
