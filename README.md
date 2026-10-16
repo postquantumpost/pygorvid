@@ -1,6 +1,17 @@
 # pygorvid
 A video file support library for python, go, and rust, to reduce dependency on ffmpeg.
 
+## Version 1.0
+
+Version 1.0.0 provides independent Python, Go, and Rust install images. Run
+`make release` to build them into `dist/`, or use `make release-python`,
+`make release-go`, or `make release-rust` for one language. Python includes a
+pip-installable wheel and source distribution; Go and Rust include library SDKs
+and prebuilt Linux commands. See [installation and release build instructions](docs/INSTALL.md)
+for Linux Mint setup, toolchain requirements, and use from other projects.
+
+Version 1.0 does not expand the codec subset described below.
+
 `vidprobe` reports basic file information for one or more input files. `--input`
 adds a file that is processed before any positional input files. To extract a
 zero-based video frame as PNG or JPEG, provide one input file and both options:

@@ -1,12 +1,18 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pygorvid"
-version = "0.1.0"
+version = "1.0.0"
 description = "Video file support library to reduce dependency on ffmpeg"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
+
+[project.urls]
+Repository = "https://github.com/postquantumpost/pygorvid"
 
 [project.scripts]
 vidprobe = "pygorvid.cli:main"
