@@ -1238,7 +1238,7 @@ func TestCABACDecodeIntraNxN8x8LumaMacroblockModesAndTransformFlag(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.TransformSize8x8 || result.Modes[0] != 0 || result.Samples != [256]uint8{} || result.Residuals != [4][64]int64{} {
+	if !result.TransformSize8x8 || result.Modes[0] != 0 || result.Samples != [256]uint8{} || result.Residuals != [4][64]int64{} || result.Nonzero != [4]bool{} {
 		t.Fatalf("I_NxN 8x8 result transform=%t modes=%v samples0=%d", result.TransformSize8x8, result.Modes, result.Samples[0])
 	}
 }
@@ -1269,7 +1269,7 @@ func TestCABACDecodeIntraNxN8x8LumaMacroblockResidualAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.TransformSize8x8 || !anyNonzeroInt64(result.Residuals[0][:]) {
+	if !result.TransformSize8x8 || !result.Nonzero[0] || !anyNonzeroInt64(result.Residuals[0][:]) {
 		t.Fatal("category-5 residual was not reconstructed")
 	}
 
@@ -1290,6 +1290,20 @@ func TestCABACDecodeIntraNxN8x8LumaMacroblockResidualAndRollback(t *testing.T) {
 	}
 	if truncatedContexts != original || truncated.codeRange != 510 || truncated.codeOffset != 0 || truncated.bits.bitOffset != 0 {
 		t.Fatal("failed 8x8 macroblock decode changed CABAC state")
+	}
+}
+
+func TestNativeDeblockingUsesDecoded8x8NonzeroFlags(t *testing.T) {
+	block := &nativeMacroblock{result: CABACIIntraMacroblockResult{
+		TransformSize8x8:      true,
+		CodedBlockPatternLuma: 15,
+		Luma8x8Nonzero:        [4]bool{false, true, false, true},
+	}}
+	for raster := 0; raster < 16; raster++ {
+		group := raster/8*2 + raster%4/2
+		if got, want := nativeCoefficients(block, raster), block.result.Luma8x8Nonzero[group]; got != want {
+			t.Errorf("raster %d coefficient presence = %t; want %t", raster, got, want)
+		}
 	}
 }
 

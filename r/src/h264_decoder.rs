@@ -217,13 +217,13 @@ fn apply_adaptive_reference_marking(
 
 fn deblocking_luma_nonzero_flags(
     transform_size_8x8: bool,
-    coded_block_pattern_luma: u8,
     coded_flags: [bool; 16],
+    luma_8x8_nonzero: [bool; 4],
 ) -> [bool; 16] {
     if transform_size_8x8 {
         return std::array::from_fn(|raster| {
             let group = (raster / 8) * 2 + (raster % 4) / 2;
-            coded_block_pattern_luma & (1 << group) != 0
+            luma_8x8_nonzero[group]
         });
     }
     let mut nonzero = [false; 16];
@@ -243,14 +243,21 @@ mod deblocking_metadata_tests {
     #[test]
     fn luma_8x8_residual_marks_every_constituent_4x4_cell() {
         for pattern in 0..16 {
-            let nonzero = deblocking_luma_nonzero_flags(true, pattern, [false; 16]);
+            let nonzero_8x8 = std::array::from_fn(|group| pattern & (1 << group) != 0);
+            let nonzero = deblocking_luma_nonzero_flags(true, [false; 16], nonzero_8x8);
             for row in 0..4 {
                 for column in 0..4 {
                     let group = (row / 2) * 2 + column / 2;
-                    assert_eq!(nonzero[row * 4 + column], pattern & (1 << group) != 0);
+                    assert_eq!(nonzero[row * 4 + column], nonzero_8x8[group]);
                 }
             }
         }
+    }
+
+    #[test]
+    fn luma_8x8_coded_block_pattern_does_not_imply_nonzero_coefficients() {
+        let nonzero = deblocking_luma_nonzero_flags(true, [false; 16], [false; 4]);
+        assert_eq!(nonzero, [false; 16]);
     }
 
     #[test]
@@ -261,7 +268,7 @@ mod deblocking_metadata_tests {
         {
             let mut flags = [false; 16];
             flags[scan] = true;
-            let nonzero = deblocking_luma_nonzero_flags(false, 15, flags);
+            let nonzero = deblocking_luma_nonzero_flags(false, flags, [false; 4]);
             assert!(nonzero[raster]);
             assert_eq!(nonzero.into_iter().filter(|flag| *flag).count(), 1);
         }
@@ -287,11 +294,11 @@ fn picture_deblocking_macroblock(
         CabacSliceMacroblockResult::Intra(macroblock) => {
             nonzero = deblocking_luma_nonzero_flags(
                 macroblock.transform_size_8x8,
-                macroblock.coded_block_pattern_luma,
                 std::array::from_fn(|index| {
                     macroblock.luma_4x4_coded_block_flags[index]
                         || macroblock.luma_ac_coded_block_flags[index]
                 }),
+                macroblock.luma_8x8_nonzero,
             );
             let qpy = if macroblock.macroblock_type == 25 {
                 0
@@ -349,11 +356,11 @@ fn picture_deblocking_macroblock(
                 CabacPBMacroblockPrediction::Intra(macroblock) => {
                     nonzero = deblocking_luma_nonzero_flags(
                         macroblock.transform_size_8x8,
-                        macroblock.coded_block_pattern_luma,
                         std::array::from_fn(|index| {
                             macroblock.luma_4x4_coded_block_flags[index]
                                 || macroblock.luma_ac_coded_block_flags[index]
                         }),
+                        macroblock.luma_8x8_nonzero,
                     );
                     let qpy = if macroblock.macroblock_type == 25 {
                         0
@@ -371,8 +378,8 @@ fn picture_deblocking_macroblock(
                 CabacPBMacroblockPrediction::Inter(macroblock) => {
                     nonzero = deblocking_luma_nonzero_flags(
                         macroblock.transform_size_8x8,
-                        macroblock.coded_block_pattern_luma,
                         macroblock.luma_4x4_coded_block_flags,
+                        macroblock.luma_8x8_nonzero,
                     );
                     (
                         macroblock.qpy,

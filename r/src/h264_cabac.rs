@@ -302,6 +302,7 @@ pub struct CabacInterMacroblockResult {
     pub qp_delta: i32,
     pub qpy: i32,
     pub luma_4x4_coded_block_flags: [bool; 16],
+    pub luma_8x8_nonzero: [bool; 4],
     pub chroma_dc_coded: [bool; 2],
     pub chroma_ac_coded_flags: [[bool; 4]; 2],
 }
@@ -1601,6 +1602,7 @@ pub struct CabacIIntraMacroblockResult {
     pub cb: [u8; 64],
     pub cr: [u8; 64],
     pub luma_4x4_coded_block_flags: [bool; 16],
+    pub luma_8x8_nonzero: [bool; 4],
     pub luma_dc_coded: bool,
     pub luma_ac_coded_block_flags: [bool; 16],
     pub luma_8x8_coded_block_flags: [bool; 4],
@@ -1625,6 +1627,7 @@ impl Default for CabacIIntraMacroblockResult {
             cb: [0; 64],
             cr: [0; 64],
             luma_4x4_coded_block_flags: [false; 16],
+            luma_8x8_nonzero: [false; 4],
             luma_dc_coded: false,
             luma_ac_coded_block_flags: [false; 16],
             luma_8x8_coded_block_flags: [false; 4],
@@ -3569,6 +3572,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     }
                     result.luma_8x8_coded_block_flags[block_index] = true;
                     let levels = trial.decode_luma8x8_residual_block(&mut trial_contexts)?;
+                    result.luma_8x8_nonzero[block_index] = levels.iter().any(|level| *level != 0);
                     let mut raster = [0_i32; 64];
                     for (scan_index, raster_index) in LUMA8X8_SCAN_TO_RASTER.iter().enumerate() {
                         raster[*raster_index] = levels[scan_index];
@@ -4618,6 +4622,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             qp_delta: 0,
             qpy: 26,
             luma_4x4_coded_block_flags: [false; 16],
+            luma_8x8_nonzero: [false; 4],
             chroma_dc_coded: [false; 2],
             chroma_ac_coded_flags: [[false; 4]; 2],
         };
@@ -4896,6 +4901,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             result.luma_4x4_coded_block_flags = residual.5;
             result.chroma_dc_coded = residual.6;
             result.chroma_ac_coded_flags = residual.7;
+            result.luma_8x8_nonzero = residual.8;
         }
         let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
         let job: ReconstructionJob = Box::new(move || {
@@ -4934,6 +4940,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         [bool; 16],
         [bool; 2],
         [[bool; 4]; 2],
+        [bool; 4],
     )> {
         if !(0..=51).contains(&input.previous_qpy)
             || !(-51..=51).contains(&input.previous_qp_delta)
@@ -5021,6 +5028,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     continue;
                 }
                 let levels = self.decode_luma8x8_residual_block(contexts)?;
+                output.luma_8x8_nonzero[block_index] = levels.iter().any(|level| *level != 0);
                 let mut raster_levels = [0_i32; 64];
                 for (scan_index, raster_index) in LUMA8X8_SCAN_TO_RASTER.iter().enumerate() {
                     raster_levels[*raster_index] = levels[scan_index];
@@ -5214,6 +5222,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             luma_coded_flags,
             chroma_dc_coded,
             chroma_ac_coded_flags,
+            output.luma_8x8_nonzero,
         ))
     }
 
@@ -6211,6 +6220,7 @@ pub fn place_chroma4x4_scan_levels(dc_level: i32, ac_scan_levels: &[i32; 15]) ->
 struct InterResidual {
     luma: [i64; 256],
     chroma: [[i64; 64]; 2],
+    luma_8x8_nonzero: [bool; 4],
 }
 
 impl InterResidual {
@@ -6218,6 +6228,7 @@ impl InterResidual {
         Self {
             luma: [0; 256],
             chroma: [[0; 64]; 2],
+            luma_8x8_nonzero: [false; 4],
         }
     }
 
@@ -8687,6 +8698,7 @@ mod tests {
         assert!(result.transform_size_8x8);
         assert_ne!(result.luma[0], 20);
         assert_eq!(result.coded_block_pattern_luma, 1);
+        assert!(result.luma_8x8_nonzero[0]);
     }
 
     #[test]
@@ -9055,6 +9067,7 @@ mod tests {
             qp_delta: 0,
             qpy: 26,
             luma_4x4_coded_block_flags: [false; 16],
+            luma_8x8_nonzero: [false; 4],
             chroma_dc_coded: [false; 2],
             chroma_ac_coded_flags: [[false; 4]; 2],
         };
@@ -9101,6 +9114,7 @@ mod tests {
             qp_delta: 0,
             qpy: 26,
             luma_4x4_coded_block_flags: luma_flags,
+            luma_8x8_nonzero: [false; 4],
             chroma_dc_coded: [true, false],
             chroma_ac_coded_flags: [[false, true, false, true], [true, false, true, false]],
         };
@@ -9221,6 +9235,7 @@ mod tests {
                     qp_delta: 0,
                     qpy: 26,
                     luma_4x4_coded_block_flags: [false; 16],
+                    luma_8x8_nonzero: [false; 4],
                     chroma_dc_coded: [false; 2],
                     chroma_ac_coded_flags: [[false; 4]; 2],
                 };

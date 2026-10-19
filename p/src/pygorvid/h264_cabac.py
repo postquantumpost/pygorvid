@@ -182,6 +182,7 @@ class CABACInterMacroblockResult:
     luma_4x4_coded_block_flags: tuple[bool, ...] = ()
     chroma_dc_coded: tuple[bool, bool] = (False, False)
     chroma_ac_coded_flags: tuple[tuple[bool, ...], tuple[bool, ...]] = ((False,) * 4, (False,) * 4)
+    luma_8x8_nonzero: tuple[bool, ...] = (False,) * 4
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,7 @@ class Intra8x8LumaMacroblockResult:
     modes: tuple[int, ...]
     residuals: tuple[tuple[int, ...], ...]
     samples: tuple[int, ...]
+    nonzero: tuple[bool, ...] = (False,) * 4
 
 
 @dataclass(frozen=True)
@@ -376,6 +378,7 @@ class CABACIIntraMacroblockResult:
     luma_dc_coded: bool = False
     luma_ac_coded_block_flags: tuple[bool, ...] = ()
     luma_8x8_coded_block_flags: tuple[bool, ...] = (False,) * 4
+    luma_8x8_nonzero: tuple[bool, ...] = (False,) * 4
 
 
 @dataclass(frozen=True)
@@ -2177,10 +2180,12 @@ class CABACArithmeticDecoder:
             modes.append(trial.decode_intra4x4_pred_mode(predicted_mode, mode_contexts))
 
         residuals = [[0] * 64 for _ in range(4)]
+        nonzero_8x8 = [False] * 4
         reconstructed_blocks = []
         for block_index, block in enumerate(blocks):
             if coded_block_pattern_luma & (1 << block_index):
                 scan_levels = trial.decode_luma8x8_residual_block(trial_contexts)
+                nonzero_8x8[block_index] = any(scan_levels)
                 raster_levels = [0] * 64
                 for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
                     raster_levels[raster_index] = scan_levels[scan_index]
@@ -2203,6 +2208,7 @@ class CABACArithmeticDecoder:
             tuple(modes),
             tuple(tuple(residual) for residual in residuals),
             tuple(samples),
+            tuple(nonzero_8x8),
         )
 
     def decode_intra16x16_luma_macroblock(
@@ -2623,6 +2629,7 @@ class CABACArithmeticDecoder:
         luma_dc_coded = False
         luma_ac_coded_flags: tuple[bool, ...] = ()
         luma_8x8_coded_flags = [False] * 4
+        luma_8x8_nonzero = [False] * 4
         if mb_type == 0 and transform_8x8:
             if len(input.luma_8x8_blocks) != 4:
                 raise CABACError("Intra_8x8 macroblock requires four gathered blocks")
@@ -2632,6 +2639,7 @@ class CABACArithmeticDecoder:
                 if cbp_luma & (1 << block_index):
                     luma_8x8_coded_flags[block_index] = True
                     levels = trial.decode_luma8x8_residual_block(trial_contexts)
+                    luma_8x8_nonzero[block_index] = any(levels)
                     raster = [0] * 64
                     for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
                         raster[raster_index] = levels[scan_index]
@@ -2738,6 +2746,7 @@ class CABACArithmeticDecoder:
             luma_dc_coded=luma_dc_coded,
             luma_ac_coded_block_flags=luma_ac_coded_flags,
             luma_8x8_coded_block_flags=tuple(luma_8x8_coded_flags),
+            luma_8x8_nonzero=tuple(luma_8x8_nonzero),
         )
 
     def decode_ipcm_intra_macroblock(
@@ -3566,7 +3575,7 @@ class CABACArithmeticDecoder:
             )
 
         residual = _InterResidual()
-        residual_result = (0, 0, False, 0, 26, (), (False, False), ((False,) * 4, (False,) * 4))
+        residual_result = (0, 0, False, 0, 26, (), (False, False), ((False,) * 4, (False,) * 4), (False,) * 4)
         if residual_input is not None:
             residual_result = trial._decode_inter_residuals(
                 macroblock_type,
@@ -3608,6 +3617,7 @@ class CABACArithmeticDecoder:
             luma_4x4_coded_block_flags=residual_result[5],
             chroma_dc_coded=residual_result[6],
             chroma_ac_coded_flags=residual_result[7],
+            luma_8x8_nonzero=residual_result[8],
         )
 
     def _decode_inter_residuals(
@@ -3691,11 +3701,13 @@ class CABACArithmeticDecoder:
             qpy = (qpy + qp_delta + 52) % 52
 
         luma_coded_flags = [False] * 16
+        luma_8x8_nonzero = [False] * 4
         if transform_8x8:
             for block_index in range(4):
                 if not cbp_luma & (1 << block_index):
                     continue
                 scan_levels = self.decode_luma8x8_residual_block(contexts)
+                luma_8x8_nonzero[block_index] = any(scan_levels)
                 if any(scan_levels):
                     block_x, block_y = (block_index % 2) * 2, (block_index // 2) * 2
                     for row in range(2):
@@ -3830,6 +3842,7 @@ class CABACArithmeticDecoder:
             tuple(luma_coded_flags),
             tuple(chroma_dc_coded),
             (tuple(chroma_ac_flags[0]), tuple(chroma_ac_flags[1])),
+            tuple(luma_8x8_nonzero),
         )
 
     def decode_intra_chroma_pred_mode(

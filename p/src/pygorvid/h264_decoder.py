@@ -246,7 +246,7 @@ def _picture_deblocking_macroblock(
         nonzero[_LUMA4X4_BLOCK_SCAN_TO_RASTER[scan_index]] = flag
     if transform_size_8x8:
         nonzero = [
-            bool(decoded.coded_block_pattern_luma & (1 << ((raster // 8) * 2 + (raster % 4) // 2)))
+            decoded.luma_8x8_nonzero[(raster // 8) * 2 + (raster % 4) // 2]
             for raster in range(16)
         ]
 

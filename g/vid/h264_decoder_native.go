@@ -209,7 +209,7 @@ func cropNativeFrame(coded Yuv420Frame, sps SPSInfo) Yuv420Frame {
 
 func nativeCoefficients(block *nativeMacroblock, raster int) bool {
 	if block.result.TransformSize8x8 {
-		return block.result.CodedBlockPatternLuma&(1<<(raster/8*2+(raster%4)/2)) != 0
+		return block.result.Luma8x8Nonzero[raster/8*2+(raster%4)/2]
 	}
 	return block.result.Luma4x4CodedBlockFlags[luma4x4BlockScanToRaster[raster]]
 }

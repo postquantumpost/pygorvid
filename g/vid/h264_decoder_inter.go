@@ -224,6 +224,12 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 			if err != nil {
 				return err
 			}
+			for _, level := range levels {
+				if level != 0 {
+					result.Luma8x8Nonzero[block] = true
+					break
+				}
+			}
 			coefficients, err := inverseScaleLuma8x8(PlaceLuma8x8ScanLevels(levels), input.Luma8x8ScalingList, result.QPY)
 			if err != nil {
 				return err

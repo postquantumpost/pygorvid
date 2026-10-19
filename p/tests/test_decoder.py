@@ -374,18 +374,18 @@ def test_h264_decoder_reconstructs_high52_filtered_inter_planes(
 
 
 @pytest.mark.parametrize(
-    ("transform_size_8x8", "pattern", "expected"),
+    ("transform_size_8x8", "nonzero_8x8", "expected"),
     (
-        (False, 0, (2,)),
-        (True, 0, ()),
-        (True, 1, (0, 1, 4, 5)),
-        (True, 2, (2, 3, 6, 7)),
-        (True, 4, (8, 9, 12, 13)),
-        (True, 8, (10, 11, 14, 15)),
-        (True, 15, tuple(range(16))),
+        (False, (False,) * 4, (2,)),
+        (True, (False,) * 4, ()),
+        (True, (True, False, False, False), (0, 1, 4, 5)),
+        (True, (False, True, False, False), (2, 3, 6, 7)),
+        (True, (False, False, True, False), (8, 9, 12, 13)),
+        (True, (False, False, False, True), (10, 11, 14, 15)),
+        (True, (True,) * 4, tuple(range(16))),
     ),
 )
-def test_picture_deblocking_maps_luma_residual_flags(transform_size_8x8, pattern, expected):
+def test_picture_deblocking_maps_luma_residual_flags(transform_size_8x8, nonzero_8x8, expected):
     from pygorvid.cabac import CABACIIntraMacroblockResult
     from pygorvid.decoder import _picture_deblocking_macroblock
 
@@ -393,7 +393,7 @@ def test_picture_deblocking_maps_luma_residual_flags(transform_size_8x8, pattern
     ac_flags[4] = True
     decoded = CABACIIntraMacroblockResult(
         macroblock_type=0,
-        coded_block_pattern_luma=pattern,
+        coded_block_pattern_luma=15,
         coded_block_pattern_chroma=0,
         transform_size_8x8=transform_size_8x8,
         intra16x16_luma_mode=0,
@@ -409,6 +409,7 @@ def test_picture_deblocking_maps_luma_residual_flags(transform_size_8x8, pattern
         chroma_dc_coded=(False, False),
         chroma_ac_coded_flags=((False,) * 4, (False,) * 4),
         luma_ac_coded_block_flags=tuple(ac_flags),
+        luma_8x8_nonzero=nonzero_8x8,
     )
     dependency_slice = SimpleNamespace(
         header=SimpleNamespace(

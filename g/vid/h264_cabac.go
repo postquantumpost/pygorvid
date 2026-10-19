@@ -890,6 +890,7 @@ type Intra8x8LumaMacroblockResult struct {
 	TransformSize8x8 bool
 	Modes            [4]uint8
 	Residuals        [4][64]int64
+	Nonzero          [4]bool
 	Samples          [256]uint8
 }
 
@@ -1001,6 +1002,7 @@ type CABACIIntraMacroblockResult struct {
 	Cb                      [64]uint8
 	Cr                      [64]uint8
 	Luma4x4CodedBlockFlags  [16]bool
+	Luma8x8Nonzero          [4]bool
 	Luma16x16DCCoded        bool
 	ChromaDCCoded           [2]bool
 	ChromaACCodedFlags      [2][4]bool
@@ -1141,6 +1143,12 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraNxN8x8LumaMacroblock(contexts 
 		levels, err := trial.DecodeLuma8x8ResidualBlock(&trialContexts)
 		if err != nil {
 			return Intra8x8LumaMacroblockResult{}, err
+		}
+		for _, level := range levels {
+			if level != 0 {
+				result.Nonzero[blockIndex] = true
+				break
+			}
 		}
 		rasterLevels := PlaceLuma8x8ScanLevels(levels)
 		coefficients, err := inverseScaleLuma8x8(rasterLevels, scalingList, qpy)
@@ -1519,7 +1527,7 @@ func (decoder *CABACArithmeticDecoder) decodeIntraMacroblock(input CABACIIntraMa
 			if err != nil {
 				return CABACIIntraMacroblockResult{}, err
 			}
-			result.Luma = lumaResult.Samples
+			result.Luma, result.Luma8x8Nonzero = lumaResult.Samples, lumaResult.Nonzero
 		} else {
 			lumaResult, err := decodeIntraNxN4x4LumaResiduals(&trial, &trialContexts, result.CodedBlockPatternLuma, result.QPY, input.Luma4x4ScalingList, modes4x4, input.Luma4x4TopEdge, input.Luma4x4LeftEdge, input.Luma4x4Blocks)
 			if err != nil {
@@ -1643,6 +1651,12 @@ func decodeIntraNxN8x8LumaResiduals(decoder *CABACArithmeticDecoder, contexts *[
 		levels, err := decoder.DecodeLuma8x8ResidualBlock(contexts)
 		if err != nil {
 			return Intra8x8LumaMacroblockResult{}, err
+		}
+		for _, level := range levels {
+			if level != 0 {
+				result.Nonzero[blockIndex] = true
+				break
+			}
 		}
 		coefficients, err := inverseScaleLuma8x8(PlaceLuma8x8ScanLevels(levels), scalingList, qpy)
 		if err != nil {
