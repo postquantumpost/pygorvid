@@ -130,9 +130,13 @@ func setNativePrediction(block *nativeMacroblock, part nativePartition, list int
 
 func compensateNativePartition(result *CABACIIntraMacroblockResult, frame Yuv420Frame, address, pictureWidth int, part nativePartition, motion MotionVector, average bool) error {
 	originX, originY := address%pictureWidth*16, address/pictureWidth*16
+	lumaSampler, err := newLumaFractionalSampleSampler(frame.Y, frame.Width, frame.Height, frame.YStride)
+	if err != nil {
+		return err
+	}
 	for row := part.y; row < part.y+part.height; row++ {
 		for column := part.x; column < part.x+part.width; column++ {
-			value, err := interpolateLumaFractionalSample(frame.Y, frame.Width, frame.Height, frame.YStride, originX+column+int(motion.X>>2), originY+row+int(motion.Y>>2), uint8(motion.X&3), uint8(motion.Y&3))
+			value, err := lumaSampler.sample(originX+column+int(motion.X>>2), originY+row+int(motion.Y>>2), uint8(motion.X&3), uint8(motion.Y&3))
 			if err != nil {
 				return err
 			}

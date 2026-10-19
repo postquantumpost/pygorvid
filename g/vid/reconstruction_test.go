@@ -1204,6 +1204,27 @@ func TestInterpolateLumaFractionalSampleFromReferencePlane(t *testing.T) {
 	}
 }
 
+func TestInterpolateLumaFractionalSampleMatchesGridForTexturedNeighborhood(t *testing.T) {
+	var samples [6][6]uint8
+	for row := range samples {
+		for column := range samples[row] {
+			samples[row][column] = uint8((row*47 + column*83 + row*column*19) % 256)
+		}
+	}
+	want := interpolateLumaQuarterSampleGrid(samples)
+	for xFracL := 0; xFracL < 4; xFracL++ {
+		for yFracL := 0; yFracL < 4; yFracL++ {
+			got, err := interpolateLumaFractionalSampleFromNeighborhood(samples, uint8(xFracL), uint8(yFracL))
+			if err != nil {
+				t.Fatalf("phase (%d, %d) error = %v", xFracL, yFracL, err)
+			}
+			if got != want[xFracL][yFracL] {
+				t.Errorf("phase (%d, %d) = %d; want %d", xFracL, yFracL, got, want[xFracL][yFracL])
+			}
+		}
+	}
+}
+
 func TestInterpolateChromaFractionalSampleUsesBilinearEquation(t *testing.T) {
 	plane := []uint8{0, 64, 128, 255}
 	for _, test := range []struct {

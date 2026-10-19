@@ -1731,10 +1731,9 @@ def _interpolate_luma_half_sample(samples: Sequence[int], direction: str) -> int
     return min(255, max(0, value))
 
 
-def interpolate_luma_half_sample_diagonal(
+def _interpolate_luma_vertical_half_sample_columns(
     samples: Sequence[Sequence[int]],
-) -> int:
-    """Apply the unrounded two-pass six-tap filter to a 6x6 luma neighborhood."""
+) -> tuple[int, ...]:
     if len(samples) != 6 or any(
         len(row) != 6
         or any(
@@ -1748,11 +1747,17 @@ def interpolate_luma_half_sample_diagonal(
         raise InterPredictionError(
             "diagonal luma interpolation requires a 6x6 block of 8-bit reference samples"
         )
-
-    vertical = [
+    return tuple(
         _filter_luma_six_tap([samples[row][column] for row in range(6)])
         for column in range(6)
-    ]
+    )
+
+
+def interpolate_luma_half_sample_diagonal(
+    samples: Sequence[Sequence[int]],
+) -> int:
+    """Apply the unrounded two-pass six-tap filter to a 6x6 luma neighborhood."""
+    vertical = _interpolate_luma_vertical_half_sample_columns(samples)
     value = (_filter_luma_six_tap(vertical) + 512) >> 10
     return min(255, max(0, value))
 
@@ -1843,6 +1848,43 @@ def gather_luma_quarter_sample_neighborhood(
     timeout_check: Callable[[], None] | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Gather a stride-aware 6x6 luma neighborhood with per-coordinate edge clipping."""
+    required_length = _validate_luma_reference_plane(
+        plane, width, height, stride, x_int, y_int, timeout_check
+    )
+
+    if (
+        x_int >= 2
+        and y_int >= 2
+        and width >= 6
+        and height >= 6
+        and x_int <= width - 4
+        and y_int <= height - 4
+    ):
+        first_x = x_int - 2
+        first_y = y_int - 2
+        return tuple(
+            tuple(plane[(first_y + row) * stride + first_x : (first_y + row) * stride + first_x + 6])
+            for row in range(6)
+        )
+
+    x_indices = tuple(min(max(x_int + offset, 0), width - 1) for offset in range(-2, 4))
+    row_starts = tuple(
+        min(max(y_int + offset, 0), height - 1) * stride for offset in range(-2, 4)
+    )
+    return tuple(
+        tuple(plane[row_start + x] for x in x_indices) for row_start in row_starts
+    )
+
+
+def _validate_luma_reference_plane(
+    plane: Sequence[int],
+    width: int,
+    height: int,
+    stride: int,
+    x_int: int,
+    y_int: int,
+    timeout_check: Callable[[], None] | None,
+) -> int:
     integer_values = (width, height, stride, x_int, y_int)
     if any(not isinstance(value, int) or isinstance(value, bool) for value in integer_values):
         raise InterPredictionError("luma reference dimensions, stride, and coordinates must be integers")
@@ -1876,27 +1918,201 @@ def gather_luma_quarter_sample_neighborhood(
                 for index in range(chunk_start, chunk_end)
             ):
                 raise InterPredictionError("luma reference plane must contain 8-bit samples")
+    return required_length
 
-    return tuple(
-        tuple(
-            plane[
-                min(max(y_int + row_offset, 0), height - 1) * stride
-                + min(max(x_int + column_offset, 0), width - 1)
-            ]
-            for column_offset in range(-2, 4)
+
+def _interpolate_luma_fractional_sample_from_neighborhood(
+    samples: Sequence[Sequence[int]], x_frac_l: int, y_frac_l: int
+) -> int:
+    if (
+        not isinstance(x_frac_l, int)
+        or isinstance(x_frac_l, bool)
+        or not 0 <= x_frac_l <= 3
+        or not isinstance(y_frac_l, int)
+        or isinstance(y_frac_l, bool)
+        or not 0 <= y_frac_l <= 3
+    ):
+        raise InterPredictionError("luma fractional-sample offset is outside [0,3]")
+
+    needs_j = (x_frac_l == 1 and y_frac_l == 2) or (
+        x_frac_l == 2 and y_frac_l > 0
+    ) or (x_frac_l == 3 and y_frac_l == 2)
+    vertical = _interpolate_luma_vertical_half_sample_columns(samples) if needs_j else None
+    center = samples[2][2]
+    right = samples[2][3]
+    lower = samples[3][2]
+    b = interpolate_luma_half_sample_horizontal(samples[2]) if x_frac_l > 0 and y_frac_l <= 1 else None
+    if y_frac_l > 0 and x_frac_l <= 1:
+        h = (
+            min(255, max(0, (vertical[2] + 16) >> 5))
+            if vertical is not None
+            else interpolate_luma_half_sample_vertical([row[2] for row in samples])
         )
-        for row_offset in range(-2, 4)
+    else:
+        h = None
+    j = (
+        min(255, max(0, (_filter_luma_six_tap(vertical) + 512) >> 10))
+        if vertical is not None
+        else None
     )
+    if x_frac_l == 3 and y_frac_l > 0:
+        m = (
+            min(255, max(0, (vertical[3] + 16) >> 5))
+            if vertical is not None
+            else interpolate_luma_half_sample_vertical([row[3] for row in samples])
+        )
+    else:
+        m = None
+    s = interpolate_luma_half_sample_horizontal(samples[3]) if x_frac_l > 0 and y_frac_l == 3 else None
+    average = interpolate_luma_quarter_sample_average
+
+    if x_frac_l == 0:
+        if y_frac_l == 0:
+            return center
+        if y_frac_l == 1:
+            return average(center, h)
+        if y_frac_l == 2:
+            return h
+        return average(lower, h)
+    if x_frac_l == 1:
+        if y_frac_l == 0:
+            return average(center, b)
+        if y_frac_l == 1:
+            return average(b, h)
+        if y_frac_l == 2:
+            return average(h, j)
+        return average(h, s)
+    if x_frac_l == 2:
+        if y_frac_l == 0:
+            return b
+        if y_frac_l == 1:
+            return average(b, j)
+        if y_frac_l == 2:
+            return j
+        return average(j, s)
+    if y_frac_l == 0:
+        return average(right, b)
+    if y_frac_l == 1:
+        return average(b, m)
+    if y_frac_l == 2:
+        return average(j, m)
+    return average(m, s)
+
+
+def _interpolate_luma_fractional_sample_from_plane(
+    plane: Sequence[int],
+    width: int,
+    height: int,
+    stride: int,
+    x_int: int,
+    y_int: int,
+    x_frac_l: int,
+    y_frac_l: int,
+) -> int:
+    if (
+        not isinstance(x_frac_l, int)
+        or isinstance(x_frac_l, bool)
+        or not 0 <= x_frac_l <= 3
+        or not isinstance(y_frac_l, int)
+        or isinstance(y_frac_l, bool)
+        or not 0 <= y_frac_l <= 3
+    ):
+        raise InterPredictionError("luma fractional-sample offset is outside [0,3]")
+
+    def sample_at(x_offset: int, y_offset: int) -> int:
+        x = min(max(x_int + x_offset, 0), width - 1)
+        y = min(max(y_int + y_offset, 0), height - 1)
+        return plane[y * stride + x]
+
+    if x_frac_l == 0 and y_frac_l == 0:
+        return sample_at(0, 0)
+
+    def horizontal_half(x_offset: int, y_offset: int) -> int:
+        taps = tuple(sample_at(x_offset + index - 2, y_offset) for index in range(6))
+        value = (_filter_luma_six_tap(taps) + 16) >> 5
+        return min(255, max(0, value))
+
+    def vertical_half(x_offset: int, y_offset: int) -> int:
+        taps = tuple(sample_at(x_offset, y_offset + index - 2) for index in range(6))
+        value = (_filter_luma_six_tap(taps) + 16) >> 5
+        return min(255, max(0, value))
+
+    needs_j = (x_frac_l == 1 and y_frac_l == 2) or (
+        x_frac_l == 2 and y_frac_l > 0
+    ) or (x_frac_l == 3 and y_frac_l == 2)
+    vertical = None
+    if needs_j:
+        vertical = tuple(
+            _filter_luma_six_tap(
+                tuple(sample_at(column - 2, row - 2) for row in range(6))
+            )
+            for column in range(6)
+        )
+    center = sample_at(0, 0)
+    right = sample_at(1, 0)
+    lower = sample_at(0, 1)
+    b = horizontal_half(0, 0) if x_frac_l > 0 and y_frac_l <= 1 else None
+    h = None
+    if y_frac_l > 0 and x_frac_l <= 1:
+        h = (
+            min(255, max(0, (vertical[2] + 16) >> 5))
+            if vertical is not None
+            else vertical_half(0, 0)
+        )
+    j = (
+        min(255, max(0, (_filter_luma_six_tap(vertical) + 512) >> 10))
+        if vertical is not None
+        else None
+    )
+    m = None
+    if x_frac_l == 3 and y_frac_l > 0:
+        m = (
+            min(255, max(0, (vertical[3] + 16) >> 5))
+            if vertical is not None
+            else vertical_half(1, 0)
+        )
+    s = horizontal_half(0, 1) if x_frac_l > 0 and y_frac_l == 3 else None
+    average = interpolate_luma_quarter_sample_average
+    if x_frac_l == 0:
+        if y_frac_l == 1:
+            return average(center, h)
+        if y_frac_l == 2:
+            return h
+        return average(lower, h)
+    if x_frac_l == 1:
+        if y_frac_l == 0:
+            return average(center, b)
+        if y_frac_l == 1:
+            return average(b, h)
+        if y_frac_l == 2:
+            return average(h, j)
+        return average(h, s)
+    if x_frac_l == 2:
+        if y_frac_l == 0:
+            return b
+        if y_frac_l == 1:
+            return average(b, j)
+        if y_frac_l == 2:
+            return j
+        return average(j, s)
+    if y_frac_l == 0:
+        return average(right, b)
+    if y_frac_l == 1:
+        return average(b, m)
+    if y_frac_l == 2:
+        return average(j, m)
+    return average(m, s)
 
 
 def interpolate_luma_quarter_sample_grid(
     samples: Sequence[Sequence[int]],
 ) -> tuple[tuple[int, ...], ...]:
     """Build the Table 8-12 grid indexed by xFracL then yFracL from a 6x6 neighborhood."""
-    j = interpolate_luma_half_sample_diagonal(samples)
+    vertical = _interpolate_luma_vertical_half_sample_columns(samples)
+    j = min(255, max(0, (_filter_luma_six_tap(vertical) + 512) >> 10))
     b = interpolate_luma_half_sample_horizontal(samples[2])
-    h = interpolate_luma_half_sample_vertical([row[2] for row in samples])
-    m = interpolate_luma_half_sample_vertical([row[3] for row in samples])
+    h = min(255, max(0, (vertical[2] + 16) >> 5))
+    m = min(255, max(0, (vertical[3] + 16) >> 5))
     s = interpolate_luma_half_sample_horizontal(samples[3])
 
     axial = interpolate_luma_quarter_sample_axial(
@@ -1941,7 +2157,7 @@ def select_luma_fractional_sample(
 
 
 class _LumaFractionalSampleCache:
-    __slots__ = ("plane", "width", "height", "stride", "timeout_check", "_grids")
+    __slots__ = ("plane", "width", "height", "stride", "timeout_check", "_samples")
 
     def __init__(
         self,
@@ -1951,34 +2167,54 @@ class _LumaFractionalSampleCache:
         stride: int,
         timeout_check: Callable[[], None] | None = None,
     ):
+        _validate_luma_reference_plane(
+            plane, width, height, stride, 0, 0, timeout_check
+        )
         self.plane = plane
         self.width = width
         self.height = height
         self.stride = stride
         self.timeout_check = timeout_check
-        self._grids = {}
+        self._samples = {}
 
     def sample(self, x_int: int, y_int: int, x_frac_l: int, y_frac_l: int) -> int:
         if self.timeout_check is not None:
             self.timeout_check()
-        key = (
+        if any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in (x_int, y_int)
+        ):
+            raise InterPredictionError(
+                "luma reference dimensions, stride, and coordinates must be integers"
+            )
+        if (
+            not isinstance(x_frac_l, int)
+            or isinstance(x_frac_l, bool)
+            or not 0 <= x_frac_l <= 3
+            or not isinstance(y_frac_l, int)
+            or isinstance(y_frac_l, bool)
+            or not 0 <= y_frac_l <= 3
+        ):
+            raise InterPredictionError("luma fractional-sample offset is outside [0,3]")
+        position = (
             min(max(x_int, -3), self.width + 1),
             min(max(y_int, -3), self.height + 1),
         )
-        grid = self._grids.get(key)
-        if grid is None:
-            neighborhood = gather_luma_quarter_sample_neighborhood(
+        key = (position[0], position[1], x_frac_l, y_frac_l)
+        sample = self._samples.get(key)
+        if sample is None:
+            sample = _interpolate_luma_fractional_sample_from_plane(
                 self.plane,
                 self.width,
                 self.height,
                 self.stride,
-                key[0],
-                key[1],
-                timeout_check=self.timeout_check,
+                position[0],
+                position[1],
+                x_frac_l,
+                y_frac_l,
             )
-            grid = interpolate_luma_quarter_sample_grid(neighborhood)
-            self._grids[key] = grid
-        return select_luma_fractional_sample(grid, x_frac_l, y_frac_l)
+            self._samples[key] = sample
+        return sample
 
 
 def interpolate_luma_fractional_sample(
@@ -1994,17 +2230,18 @@ def interpolate_luma_fractional_sample(
     timeout_check: Callable[[], None] | None = None,
 ) -> int:
     """Interpolate and select one luma sample from a reference plane."""
-    neighborhood = gather_luma_quarter_sample_neighborhood(
+    _validate_luma_reference_plane(
         plane,
         width,
         height,
         stride,
         x_int,
         y_int,
-        timeout_check=timeout_check,
+        timeout_check,
     )
-    grid = interpolate_luma_quarter_sample_grid(neighborhood)
-    return select_luma_fractional_sample(grid, x_frac_l, y_frac_l)
+    return _interpolate_luma_fractional_sample_from_plane(
+        plane, width, height, stride, x_int, y_int, x_frac_l, y_frac_l
+    )
 
 
 def interpolate_chroma_fractional_sample(

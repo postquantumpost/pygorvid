@@ -552,12 +552,17 @@ func (decoder *CABACArithmeticDecoder) DecodePSkipMacroblock(input CABACPSkipMac
 	if err != nil {
 		return CABACPSkipMacroblockResult{}, err
 	}
+	lumaSampler, err := newLumaFractionalSampleSampler(
+		refY, input.ReferenceFrame.Width, input.ReferenceFrame.Height, input.ReferenceFrame.Width,
+	)
+	if err != nil {
+		return CABACPSkipMacroblockResult{}, err
+	}
 	mbX, mbY := input.MacroblockX, input.MacroblockY
 	motionX, motionY := int(result.MotionVector.X), int(result.MotionVector.Y)
 	for row := 0; row < 16; row++ {
 		for column := 0; column < 16; column++ {
-			result.Luma[row*16+column], err = interpolateLumaFractionalSample(
-				refY, input.ReferenceFrame.Width, input.ReferenceFrame.Height, input.ReferenceFrame.Width,
+			result.Luma[row*16+column], err = lumaSampler.sample(
 				mbX*16+column+(motionX>>2), mbY*16+row+(motionY>>2), uint8(motionX&3), uint8(motionY&3),
 			)
 			if err != nil {

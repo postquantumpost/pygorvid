@@ -1497,27 +1497,34 @@ impl H264Decoder {
             crate::CabacMacroblockNeighborDirection::Left,
             top_left_prediction_available,
         );
-        let gather_top = |edge_start: usize, count: usize| -> Option<Vec<u8>> {
-            let top = top_samples?;
-            let mut samples = Vec::with_capacity(count);
-            for column in edge_start..edge_start + count {
-                if column < 16 {
-                    samples.push(top.luma[column]);
+        let gather_top = |edge_start: usize, output: &mut [u8]| -> bool {
+            let Some(top) = top_samples else {
+                return false;
+            };
+            for (offset, sample) in output.iter_mut().enumerate() {
+                let column = edge_start + offset;
+                *sample = if column < 16 {
+                    top.luma[column]
                 } else if let Some(top_right) = top_right_samples {
-                    samples.push(top_right.luma[column - 16]);
+                    top_right.luma[column - 16]
                 } else {
-                    samples.push(*samples.last().unwrap_or(&top.luma[15]));
-                }
+                    top.luma[15]
+                };
             }
-            Some(samples)
+            true
         };
-        let gather_left = |edge_start: usize, count: usize| -> Option<Vec<u8>> {
-            let left = left_samples?;
-            Some(
-                (edge_start..edge_start + count)
-                    .map(|row| left.luma.get(row).copied().unwrap_or(left.luma[15]))
-                    .collect(),
-            )
+        let gather_left = |edge_start: usize, output: &mut [u8]| -> bool {
+            let Some(left) = left_samples else {
+                return false;
+            };
+            for (offset, sample) in output.iter_mut().enumerate() {
+                *sample = left
+                    .luma
+                    .get(edge_start + offset)
+                    .copied()
+                    .unwrap_or(left.luma[15]);
+            }
+            true
         };
         let top_left_sample = |block_x: usize, block_y: usize| -> Option<u8> {
             if block_y == 0 {
@@ -1542,14 +1549,12 @@ impl H264Decoder {
             let block_x = (raster_index % 4) * 4;
             let block_y = (raster_index / 4) * 4;
             if block_y == 0 {
-                if let Some(samples) = gather_top(block_x, 8) {
-                    luma4_blocks[scan_index].top[..8].copy_from_slice(&samples);
+                if gather_top(block_x, &mut luma4_blocks[scan_index].top[..8]) {
                     luma4_blocks[scan_index].top_available = true;
                 }
             }
             if block_x == 0 {
-                if let Some(samples) = gather_left(block_y, 8) {
-                    luma4_blocks[scan_index].left[..8].copy_from_slice(&samples);
+                if gather_left(block_y, &mut luma4_blocks[scan_index].left[..8]) {
                     luma4_blocks[scan_index].left_available = true;
                 }
             }
@@ -1567,15 +1572,14 @@ impl H264Decoder {
             let block_x = (block_index % 2) * 8;
             let block_y = (block_index / 2) * 8;
             if block_y == 0 {
-                if let Some(samples) = gather_top(block_x, 16) {
-                    luma8_blocks[block_index].top.copy_from_slice(&samples);
+                if gather_top(block_x, &mut luma8_blocks[block_index].top) {
                     luma8_blocks[block_index].top_available = true;
                 }
             }
             if block_x == 0 {
-                if let Some(samples) = gather_left(block_y, 8) {
-                    luma8_blocks[block_index].left[..8].copy_from_slice(&samples);
-                    luma8_blocks[block_index].left[8..].fill(samples[7]);
+                if gather_left(block_y, &mut luma8_blocks[block_index].left[..8]) {
+                    let last_sample = luma8_blocks[block_index].left[7];
+                    luma8_blocks[block_index].left[8..].fill(last_sample);
                     luma8_blocks[block_index].left_available = true;
                 }
             }

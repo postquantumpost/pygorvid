@@ -872,23 +872,24 @@ class H264Decoder:
             def top_references(edge_start: int, count: int) -> tuple[int, ...] | None:
                 if top_samples is None:
                     return None
-                result = []
-                for column in range(edge_start, edge_start + count):
-                    if column < 16:
-                        result.append(top_samples.luma[column])
-                    elif top_right_samples is not None:
-                        result.append(top_right_samples.luma[column - 16])
-                    else:
-                        result.append(result[-1] if result else top_samples.luma[-1])
-                return tuple(result)
+                return tuple(
+                    top_samples.luma[column]
+                    if column < 16
+                    else top_right_samples.luma[column - 16]
+                    if top_right_samples is not None
+                    else top_samples.luma[-1]
+                    for column in range(edge_start, edge_start + count)
+                )
 
-            def left_references(edge_start: int, count: int) -> tuple[int, ...] | None:
+            def left_references(
+                edge_start: int, count: int, extension: int = 0
+            ) -> tuple[int, ...] | None:
                 if left_samples is None:
                     return None
-                result = []
-                for row in range(edge_start, edge_start + count):
-                    result.append(left_samples.luma[row] if row < 16 else left_samples.luma[-1])
-                return tuple(result)
+                return tuple(
+                    left_samples.luma[min(edge_start + offset, edge_start + count - 1, 15)]
+                    for offset in range(count + extension)
+                )
 
             def boundary_top_left(block_x: int, block_y: int) -> int | None:
                 if block_y == 0:
@@ -916,8 +917,7 @@ class H264Decoder:
             for block_y in (0, 8):
                 for block_x in (0, 8):
                     top = top_references(block_x, 16) if block_y == 0 else None
-                    left8 = left_references(block_y, 8) if block_x == 0 else None
-                    left = None if left8 is None else left8 + (left8[-1],) * 8
+                    left = left_references(block_y, 8, 8) if block_x == 0 else None
                     luma8_blocks.append(
                         LumaIntra8x8Block(
                             2,

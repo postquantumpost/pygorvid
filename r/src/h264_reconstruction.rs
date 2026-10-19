@@ -1758,8 +1758,7 @@ fn interpolate_luma_half_sample(samples: &[u8; 6]) -> u8 {
     clip_luma_sample((filter_luma_six_tap(taps) + 16) >> 5)
 }
 
-/// Applies the unrounded, two-pass six-tap filter at diagonal half-sample position j.
-pub fn interpolate_luma_half_sample_diagonal(samples: &[[u8; 6]; 6]) -> u8 {
+fn interpolate_luma_vertical_half_sample_columns(samples: &[[u8; 6]; 6]) -> [i32; 6] {
     let mut vertical = [0_i32; 6];
     for column in 0..6 {
         let mut taps = [0_i32; 6];
@@ -1768,6 +1767,12 @@ pub fn interpolate_luma_half_sample_diagonal(samples: &[[u8; 6]; 6]) -> u8 {
         }
         vertical[column] = filter_luma_six_tap(taps);
     }
+    vertical
+}
+
+/// Applies the unrounded, two-pass six-tap filter at diagonal half-sample position j.
+pub fn interpolate_luma_half_sample_diagonal(samples: &[[u8; 6]; 6]) -> u8 {
+    let vertical = interpolate_luma_vertical_half_sample_columns(samples);
     clip_luma_sample((filter_luma_six_tap(vertical) + 512) >> 10)
 }
 
@@ -1837,12 +1842,11 @@ pub fn select_luma_fractional_sample(
 
 /// Builds the Table 8-12 quarter-sample grid indexed by xFracL then yFracL.
 pub fn interpolate_luma_quarter_sample_grid(samples: &[[u8; 6]; 6]) -> [[u8; 4]; 4] {
-    let j = interpolate_luma_half_sample_diagonal(samples);
+    let vertical = interpolate_luma_vertical_half_sample_columns(samples);
+    let j = clip_luma_sample((filter_luma_six_tap(vertical) + 512) >> 10);
     let b = interpolate_luma_half_sample_horizontal(&samples[2]);
-    let center_column = std::array::from_fn(|row| samples[row][2]);
-    let right_column = std::array::from_fn(|row| samples[row][3]);
-    let h = interpolate_luma_half_sample_vertical(&center_column);
-    let m = interpolate_luma_half_sample_vertical(&right_column);
+    let h = clip_luma_sample((vertical[2] + 16) >> 5);
+    let m = clip_luma_sample((vertical[3] + 16) >> 5);
     let s = interpolate_luma_half_sample_horizontal(&samples[3]);
 
     let axial =
@@ -1857,15 +1861,185 @@ pub fn interpolate_luma_quarter_sample_grid(samples: &[[u8; 6]; 6]) -> [[u8; 4];
     ]
 }
 
-/// Gathers the 6x6 integer luma neighborhood, clipping each coordinate to the reference plane.
-pub fn gather_luma_quarter_sample_neighborhood(
+#[cfg(test)]
+fn interpolate_luma_half_sample_vertical_column(samples: &[[u8; 6]; 6], column: usize) -> u8 {
+    let column_samples = std::array::from_fn(|row| samples[row][column]);
+    interpolate_luma_half_sample_vertical(&column_samples)
+}
+
+#[cfg(test)]
+fn interpolate_luma_fractional_sample_from_neighborhood(
+    samples: &[[u8; 6]; 6],
+    x_frac_l: u8,
+    y_frac_l: u8,
+) -> io::Result<u8> {
+    if x_frac_l > 3 || y_frac_l > 3 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "luma fractional-sample offset is outside [0,3]",
+        ));
+    }
+
+    let needs_b = x_frac_l > 0 && y_frac_l <= 1;
+    let needs_h = y_frac_l > 0 && x_frac_l <= 1;
+    let needs_j = (x_frac_l == 1 && y_frac_l == 2)
+        || (x_frac_l == 2 && y_frac_l > 0)
+        || (x_frac_l == 3 && y_frac_l == 2);
+    let needs_m = x_frac_l == 3 && y_frac_l > 0;
+    let needs_s = x_frac_l > 0 && y_frac_l == 3;
+    let vertical = needs_j.then(|| interpolate_luma_vertical_half_sample_columns(samples));
+    let center = samples[2][2];
+    let right = samples[2][3];
+    let lower = samples[3][2];
+    let b = needs_b.then(|| interpolate_luma_half_sample_horizontal(&samples[2]));
+    let h = needs_h.then(|| match vertical {
+        Some(values) => clip_luma_sample((values[2] + 16) >> 5),
+        None => interpolate_luma_half_sample_vertical_column(samples, 2),
+    });
+    let j = vertical.map(|values| clip_luma_sample((filter_luma_six_tap(values) + 512) >> 10));
+    let m = needs_m.then(|| match vertical {
+        Some(values) => clip_luma_sample((values[3] + 16) >> 5),
+        None => interpolate_luma_half_sample_vertical_column(samples, 3),
+    });
+    let s = needs_s.then(|| interpolate_luma_half_sample_horizontal(&samples[3]));
+    let average = interpolate_luma_quarter_sample_average;
+
+    Ok(match (x_frac_l, y_frac_l) {
+        (0, 0) => center,
+        (0, 1) => average(center, h.unwrap()),
+        (0, 2) => h.unwrap(),
+        (0, 3) => average(lower, h.unwrap()),
+        (1, 0) => average(center, b.unwrap()),
+        (1, 1) => average(b.unwrap(), h.unwrap()),
+        (1, 2) => average(h.unwrap(), j.unwrap()),
+        (1, 3) => average(h.unwrap(), s.unwrap()),
+        (2, 0) => b.unwrap(),
+        (2, 1) => average(b.unwrap(), j.unwrap()),
+        (2, 2) => j.unwrap(),
+        (2, 3) => average(j.unwrap(), s.unwrap()),
+        (3, 0) => average(right, b.unwrap()),
+        (3, 1) => average(b.unwrap(), m.unwrap()),
+        (3, 2) => average(j.unwrap(), m.unwrap()),
+        (3, 3) => average(m.unwrap(), s.unwrap()),
+        _ => unreachable!(),
+    })
+}
+
+pub(crate) struct LumaFractionalSampleSampler<'a> {
+    plane: &'a [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+}
+
+impl<'a> LumaFractionalSampleSampler<'a> {
+    pub(crate) fn new(
+        plane: &'a [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+    ) -> io::Result<Self> {
+        validate_luma_reference_plane(plane, width, height, stride)?;
+        Ok(Self {
+            plane,
+            width,
+            height,
+            stride,
+        })
+    }
+
+    pub(crate) fn sample(
+        &self,
+        x_int: isize,
+        y_int: isize,
+        x_frac_l: u8,
+        y_frac_l: u8,
+    ) -> io::Result<u8> {
+        if x_frac_l > 3 || y_frac_l > 3 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "luma fractional-sample offset is outside [0,3]",
+            ));
+        }
+        let sample_at = |x_offset, y_offset| {
+            let x = clip_luma_reference_coordinate(x_int, x_offset, self.width);
+            let y = clip_luma_reference_coordinate(y_int, y_offset, self.height);
+            self.plane[y * self.stride + x]
+        };
+        if x_frac_l == 0 && y_frac_l == 0 {
+            return Ok(sample_at(0, 0));
+        }
+        let horizontal_half = |x_offset, y_offset| {
+            let taps = std::array::from_fn(|index| {
+                i32::from(sample_at(x_offset + index as isize - 2, y_offset))
+            });
+            clip_luma_sample((filter_luma_six_tap(taps) + 16) >> 5)
+        };
+        let vertical_half = |x_offset, y_offset| {
+            let taps = std::array::from_fn(|index| {
+                i32::from(sample_at(x_offset, y_offset + index as isize - 2))
+            });
+            clip_luma_sample((filter_luma_six_tap(taps) + 16) >> 5)
+        };
+        let needs_j = (x_frac_l == 1 && y_frac_l == 2)
+            || (x_frac_l == 2 && y_frac_l > 0)
+            || (x_frac_l == 3 && y_frac_l == 2);
+        let vertical = needs_j.then(|| {
+            std::array::from_fn(|column| {
+                let taps = std::array::from_fn(|row| {
+                    i32::from(sample_at(column as isize - 2, row as isize - 2))
+                });
+                filter_luma_six_tap(taps)
+            })
+        });
+        let center = sample_at(0, 0);
+        let right = sample_at(1, 0);
+        let lower = sample_at(0, 1);
+        let b = (x_frac_l > 0 && y_frac_l <= 1).then(|| horizontal_half(0, 0));
+        let h = (y_frac_l > 0 && x_frac_l <= 1).then(|| {
+            vertical.map_or_else(
+                || vertical_half(0, 0),
+                |values| clip_luma_sample((values[2] + 16) >> 5),
+            )
+        });
+        let j = vertical.map(|values| clip_luma_sample((filter_luma_six_tap(values) + 512) >> 10));
+        let m = (x_frac_l == 3 && y_frac_l > 0).then(|| {
+            vertical.map_or_else(
+                || vertical_half(1, 0),
+                |values| clip_luma_sample((values[3] + 16) >> 5),
+            )
+        });
+        let s = (x_frac_l > 0 && y_frac_l == 3).then(|| horizontal_half(0, 1));
+        let average = interpolate_luma_quarter_sample_average;
+
+        Ok(match (x_frac_l, y_frac_l) {
+            (0, 0) => center,
+            (0, 1) => average(center, h.unwrap()),
+            (0, 2) => h.unwrap(),
+            (0, 3) => average(lower, h.unwrap()),
+            (1, 0) => average(center, b.unwrap()),
+            (1, 1) => average(b.unwrap(), h.unwrap()),
+            (1, 2) => average(h.unwrap(), j.unwrap()),
+            (1, 3) => average(h.unwrap(), s.unwrap()),
+            (2, 0) => b.unwrap(),
+            (2, 1) => average(b.unwrap(), j.unwrap()),
+            (2, 2) => j.unwrap(),
+            (2, 3) => average(j.unwrap(), s.unwrap()),
+            (3, 0) => average(right, b.unwrap()),
+            (3, 1) => average(b.unwrap(), m.unwrap()),
+            (3, 2) => average(j.unwrap(), m.unwrap()),
+            (3, 3) => average(m.unwrap(), s.unwrap()),
+            _ => unreachable!(),
+        })
+    }
+}
+
+fn validate_luma_reference_plane(
     plane: &[u8],
     width: usize,
     height: usize,
     stride: usize,
-    x_int: isize,
-    y_int: isize,
-) -> io::Result<[[u8; 6]; 6]> {
+) -> io::Result<()> {
     let invalid_layout = || {
         io::Error::new(
             ErrorKind::InvalidInput,
@@ -1887,13 +2061,44 @@ pub fn gather_luma_quarter_sample_neighborhood(
     if plane.len() < required_length {
         return Err(invalid_layout());
     }
+    Ok(())
+}
+
+/// Gathers the 6x6 integer luma neighborhood, clipping each coordinate to the reference plane.
+pub fn gather_luma_quarter_sample_neighborhood(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    x_int: isize,
+    y_int: isize,
+) -> io::Result<[[u8; 6]; 6]> {
+    validate_luma_reference_plane(plane, width, height, stride)?;
 
     let mut samples = [[0_u8; 6]; 6];
+    if x_int >= 2
+        && y_int >= 2
+        && width >= 6
+        && height >= 6
+        && (x_int as usize) <= width - 4
+        && (y_int as usize) <= height - 4
+    {
+        let first_x = x_int as usize - 2;
+        let first_y = y_int as usize - 2;
+        for (row, sample_row) in samples.iter_mut().enumerate() {
+            let start = (first_y + row) * stride + first_x;
+            sample_row.copy_from_slice(&plane[start..start + 6]);
+        }
+        return Ok(samples);
+    }
+
+    let x_indices: [usize; 6] =
+        std::array::from_fn(|column| clip_luma_reference_coordinate(x_int, column as isize - 2, width));
+    let row_starts: [usize; 6] =
+        std::array::from_fn(|row| clip_luma_reference_coordinate(y_int, row as isize - 2, height) * stride);
     for (row, sample_row) in samples.iter_mut().enumerate() {
-        let y = clip_luma_reference_coordinate(y_int, row as isize - 2, height);
-        for (column, sample) in sample_row.iter_mut().enumerate() {
-            let x = clip_luma_reference_coordinate(x_int, column as isize - 2, width);
-            *sample = plane[y * stride + x];
+        for (sample, &x) in sample_row.iter_mut().zip(&x_indices) {
+            *sample = plane[row_starts[row] + x];
         }
     }
     Ok(samples)
@@ -1910,10 +2115,8 @@ pub fn interpolate_luma_fractional_sample(
     x_frac_l: u8,
     y_frac_l: u8,
 ) -> io::Result<u8> {
-    let neighborhood =
-        gather_luma_quarter_sample_neighborhood(plane, width, height, stride, x_int, y_int)?;
-    let grid = interpolate_luma_quarter_sample_grid(&neighborhood);
-    select_luma_fractional_sample(&grid, x_frac_l, y_frac_l)
+    LumaFractionalSampleSampler::new(plane, width, height, stride)?
+        .sample(x_int, y_int, x_frac_l, y_frac_l)
 }
 
 /// Applies the H.264 clause 8.4.2.2.2 4:2:0 chroma bilinear interpolation equation.
@@ -5666,6 +5869,28 @@ mod tests {
                     )
                     .unwrap(),
                     *sample
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selected_luma_fractional_samples_match_full_grid_for_textured_neighborhood() {
+        let samples = std::array::from_fn(|row| {
+            std::array::from_fn(|column| ((row * 47 + column * 83 + row * column * 19) % 256) as u8)
+        });
+        let grid = interpolate_luma_quarter_sample_grid(&samples);
+        for (x_frac_l, row) in grid.iter().enumerate() {
+            for (y_frac_l, expected) in row.iter().enumerate() {
+                assert_eq!(
+                    interpolate_luma_fractional_sample_from_neighborhood(
+                        &samples,
+                        x_frac_l as u8,
+                        y_frac_l as u8,
+                    )
+                    .unwrap(),
+                    *expected,
+                    "fractional phase ({x_frac_l}, {y_frac_l})"
                 );
             }
         }

@@ -6331,6 +6331,12 @@ fn compensate_inter_partition(
     let y_plane = frame.luma_plane()?;
     let cb_plane = frame.u_plane()?;
     let cr_plane = frame.v_plane()?;
+    let luma_sampler = crate::reconstruction::LumaFractionalSampleSampler::new(
+        &y_plane,
+        frame.width,
+        frame.height,
+        frame.width,
+    )?;
     let motion_x = isize::try_from(motion.x)
         .map_err(|_| invalid("inter prediction motion vector is outside the supported range"))?;
     let motion_y = isize::try_from(motion.y)
@@ -6356,16 +6362,8 @@ fn compensate_inter_partition(
                 .ok_or_else(|| {
                     invalid("inter prediction luma coordinate is outside the supported range")
                 })?;
-            luma[row * width + column] = crate::reconstruction::interpolate_luma_fractional_sample(
-                &y_plane,
-                frame.width,
-                frame.height,
-                frame.width,
-                x,
-                y,
-                (motion.x & 3) as u8,
-                (motion.y & 3) as u8,
-            )?;
+            luma[row * width + column] =
+                luma_sampler.sample(x, y, (motion.x & 3) as u8, (motion.y & 3) as u8)?;
         }
     }
     let chroma_width = frame.width / 2 + frame.width % 2;
@@ -6431,6 +6429,12 @@ fn p_skip_samples(
     let ref_y = reference.luma_plane()?;
     let ref_cb = reference.u_plane()?;
     let ref_cr = reference.v_plane()?;
+    let luma_sampler = crate::reconstruction::LumaFractionalSampleSampler::new(
+        &ref_y,
+        reference.width,
+        reference.height,
+        reference.width,
+    )?;
     let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
     let motion_x = isize::try_from(motion_vector.x)
         .map_err(|_| invalid("P_Skip motion vector is outside the supported range"))?;
@@ -6450,11 +6454,7 @@ fn p_skip_samples(
                 .and_then(|value| isize::try_from(value).ok())
                 .and_then(|value| value.checked_add(motion_y >> 2))
                 .ok_or_else(|| invalid("P_Skip luma coordinate is outside the supported range"))?;
-            luma[row * 16 + column] = crate::reconstruction::interpolate_luma_fractional_sample(
-                &ref_y,
-                reference.width,
-                reference.height,
-                reference.width,
+            luma[row * 16 + column] = luma_sampler.sample(
                 x,
                 y,
                 (motion_vector.x & 3) as u8,
@@ -6543,6 +6543,12 @@ fn compensate_b_direct_reference(
     let y_plane = frame.luma_plane()?;
     let cb_plane = frame.u_plane()?;
     let cr_plane = frame.v_plane()?;
+    let luma_sampler = crate::reconstruction::LumaFractionalSampleSampler::new(
+        &y_plane,
+        frame.width,
+        frame.height,
+        frame.width,
+    )?;
     let motion_x = isize::try_from(motion.x)
         .map_err(|_| invalid("B_Direct motion vector is outside the supported range"))?;
     let motion_y = isize::try_from(motion.y)
@@ -6566,16 +6572,8 @@ fn compensate_b_direct_reference(
                 .ok_or_else(|| {
                     invalid("B_Direct luma coordinate is outside the supported range")
                 })?;
-            luma[row * 16 + column] = crate::reconstruction::interpolate_luma_fractional_sample(
-                &y_plane,
-                frame.width,
-                frame.height,
-                frame.width,
-                x,
-                y,
-                (motion.x & 3) as u8,
-                (motion.y & 3) as u8,
-            )?;
+            luma[row * 16 + column] =
+                luma_sampler.sample(x, y, (motion.x & 3) as u8, (motion.y & 3) as u8)?;
         }
     }
     let chroma_width = frame.width / 2 + frame.width % 2;

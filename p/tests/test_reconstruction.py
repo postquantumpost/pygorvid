@@ -1135,6 +1135,23 @@ def test_interpolate_luma_quarter_sample_grid_builds_table_8_12_positions():
     )
 
 
+def test_interpolate_luma_fractional_sample_matches_grid_for_textured_neighborhood():
+    samples = [
+        [(row * 47 + column * 83 + row * column * 19) % 256 for column in range(6)]
+        for row in range(6)
+    ]
+    grid = interpolate_luma_quarter_sample_grid(samples)
+    plane = bytes(sample for row in samples for sample in row)
+    for x_frac_l, row in enumerate(grid):
+        for y_frac_l, expected in enumerate(row):
+            assert (
+                interpolate_luma_fractional_sample(
+                    plane, 6, 6, 6, 2, 2, x_frac_l, y_frac_l
+                )
+                == expected
+            )
+
+
 @pytest.mark.parametrize(
     "samples",
     (
@@ -1215,7 +1232,7 @@ def test_gather_luma_quarter_sample_neighborhood_polls_bytes_without_rescanning(
     assert checks == [True, True]
 
 
-def test_luma_fractional_sample_cache_reuses_clipped_neighborhood(monkeypatch):
+def test_luma_fractional_sample_cache_reuses_clipped_sample(monkeypatch):
     import pygorvid.reconstruction as reconstruction
 
     plane = bytes(range(256))
@@ -1225,21 +1242,21 @@ def test_luma_fractional_sample_cache_reuses_clipped_neighborhood(monkeypatch):
         )
         for x_int in (-3, -4)
     )
-    original_gather = reconstruction.gather_luma_quarter_sample_neighborhood
-    gather_calls = []
+    original_sample = reconstruction._interpolate_luma_fractional_sample_from_plane
+    sample_calls = []
 
-    def count_gather(*args, **kwargs):
-        gather_calls.append(True)
-        return original_gather(*args, **kwargs)
+    def count_sample(*args, **kwargs):
+        sample_calls.append(True)
+        return original_sample(*args, **kwargs)
 
     monkeypatch.setattr(
-        reconstruction, "gather_luma_quarter_sample_neighborhood", count_gather
+        reconstruction, "_interpolate_luma_fractional_sample_from_plane", count_sample
     )
     cache = reconstruction._LumaFractionalSampleCache(plane, 16, 16, 16)
     actual = tuple(cache.sample(x_int, -3, 1, 2) for x_int in (-3, -4))
 
     assert actual == expected
-    assert gather_calls == [True]
+    assert sample_calls == [True]
 
 
 def test_yuv420_frame_reuses_exact_packed_planes():

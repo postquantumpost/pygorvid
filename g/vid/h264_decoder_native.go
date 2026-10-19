@@ -519,11 +519,12 @@ func nativeIntraInput(slice nativeSlice, address int, history []*CABACIIntraMacr
 			block.TopAvailable = true
 			for index := range block.Top {
 				position := column + index
-				block.Top[index] = top.Luma[255]
 				if position < 16 {
 					block.Top[index] = top.Luma[240+position]
 				} else if topRight != nil {
 					block.Top[index] = topRight.Luma[240+position-16]
+				} else {
+					block.Top[index] = top.Luma[255]
 				}
 			}
 		}

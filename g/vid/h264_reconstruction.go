@@ -804,17 +804,9 @@ func interpolateLumaHalfSampleVertical(samples [6]uint8) uint8 {
 	return interpolateLumaHalfSample(samples)
 }
 
-func interpolateLumaHalfSample(samples [6]uint8) uint8 {
-	var integerSamples [6]int
-	for index, sample := range samples {
-		integerSamples[index] = int(sample)
-	}
-	return clipLumaSample((filterLumaSixTap(integerSamples) + 16) >> 5)
-}
-
-func interpolateLumaHalfSampleDiagonal(samples [6][6]uint8) uint8 {
+func interpolateLumaVerticalHalfSampleColumns(samples [6][6]uint8) [6]int {
 	var vertical [6]int
-	for column := 0; column < len(vertical); column++ {
+	for column := range vertical {
 		vertical[column] = filterLumaSixTap([6]int{
 			int(samples[0][column]),
 			int(samples[1][column]),
@@ -824,6 +816,19 @@ func interpolateLumaHalfSampleDiagonal(samples [6][6]uint8) uint8 {
 			int(samples[5][column]),
 		})
 	}
+	return vertical
+}
+
+func interpolateLumaHalfSample(samples [6]uint8) uint8 {
+	var integerSamples [6]int
+	for index, sample := range samples {
+		integerSamples[index] = int(sample)
+	}
+	return clipLumaSample((filterLumaSixTap(integerSamples) + 16) >> 5)
+}
+
+func interpolateLumaHalfSampleDiagonal(samples [6][6]uint8) uint8 {
+	vertical := interpolateLumaVerticalHalfSampleColumns(samples)
 	return clipLumaSample((filterLumaSixTap(vertical) + 512) >> 10)
 }
 
@@ -866,15 +871,11 @@ func interpolateLumaQuarterSampleAroundJ(b, h, j, m, s uint8) [4]uint8 {
 }
 
 func interpolateLumaQuarterSampleGrid(samples [6][6]uint8) [4][4]uint8 {
-	var centerColumn, rightColumn [6]uint8
-	for row := 0; row < 6; row++ {
-		centerColumn[row] = samples[row][2]
-		rightColumn[row] = samples[row][3]
-	}
+	vertical := interpolateLumaVerticalHalfSampleColumns(samples)
 	b := interpolateLumaHalfSampleHorizontal(samples[2])
-	h := interpolateLumaHalfSampleVertical(centerColumn)
-	j := interpolateLumaHalfSampleDiagonal(samples)
-	m := interpolateLumaHalfSampleVertical(rightColumn)
+	h := clipLumaSample((vertical[2] + 16) >> 5)
+	j := clipLumaSample((filterLumaSixTap(vertical) + 512) >> 10)
+	m := clipLumaSample((vertical[3] + 16) >> 5)
 	s := interpolateLumaHalfSampleHorizontal(samples[3])
 	axial := interpolateLumaQuarterSampleAxial(samples[2][2], samples[2][3], samples[3][2], b, h)
 	diagonal := interpolateLumaQuarterSampleDiagonal(b, h, m, s)
@@ -887,20 +888,220 @@ func interpolateLumaQuarterSampleGrid(samples [6][6]uint8) [4][4]uint8 {
 	}
 }
 
-func gatherLumaQuarterSampleNeighborhood(plane []uint8, width, height, stride, xInt, yInt int) ([6][6]uint8, error) {
-	var samples [6][6]uint8
+func interpolateLumaHalfSampleVerticalColumn(samples [6][6]uint8, column int) uint8 {
+	var columnSamples [6]uint8
+	for row := range columnSamples {
+		columnSamples[row] = samples[row][column]
+	}
+	return interpolateLumaHalfSampleVertical(columnSamples)
+}
+
+func interpolateLumaFractionalSampleFromNeighborhood(samples [6][6]uint8, xFracL, yFracL uint8) (uint8, error) {
+	if xFracL > 3 || yFracL > 3 {
+		return 0, ErrLumaFractionalSampleOffset
+	}
+	needsJ := (xFracL == 1 && yFracL == 2) || (xFracL == 2 && yFracL > 0) || (xFracL == 3 && yFracL == 2)
+	var vertical [6]int
+	if needsJ {
+		vertical = interpolateLumaVerticalHalfSampleColumns(samples)
+	}
+	var b, h, j, m, s uint8
+	if xFracL > 0 && yFracL <= 1 {
+		b = interpolateLumaHalfSampleHorizontal(samples[2])
+	}
+	if yFracL > 0 && xFracL <= 1 {
+		if needsJ {
+			h = clipLumaSample((vertical[2] + 16) >> 5)
+		} else {
+			h = interpolateLumaHalfSampleVerticalColumn(samples, 2)
+		}
+	}
+	if needsJ {
+		j = clipLumaSample((filterLumaSixTap(vertical) + 512) >> 10)
+	}
+	if xFracL == 3 && yFracL > 0 {
+		if needsJ {
+			m = clipLumaSample((vertical[3] + 16) >> 5)
+		} else {
+			m = interpolateLumaHalfSampleVerticalColumn(samples, 3)
+		}
+	}
+	if xFracL > 0 && yFracL == 3 {
+		s = interpolateLumaHalfSampleHorizontal(samples[3])
+	}
+	average := interpolateLumaQuarterSampleAverage
+	switch {
+	case xFracL == 0 && yFracL == 0:
+		return samples[2][2], nil
+	case xFracL == 0 && yFracL == 1:
+		return average(samples[2][2], h), nil
+	case xFracL == 0 && yFracL == 2:
+		return h, nil
+	case xFracL == 0 && yFracL == 3:
+		return average(samples[3][2], h), nil
+	case xFracL == 1 && yFracL == 0:
+		return average(samples[2][2], b), nil
+	case xFracL == 1 && yFracL == 1:
+		return average(b, h), nil
+	case xFracL == 1 && yFracL == 2:
+		return average(h, j), nil
+	case xFracL == 1 && yFracL == 3:
+		return average(h, s), nil
+	case xFracL == 2 && yFracL == 0:
+		return b, nil
+	case xFracL == 2 && yFracL == 1:
+		return average(b, j), nil
+	case xFracL == 2 && yFracL == 2:
+		return j, nil
+	case xFracL == 2 && yFracL == 3:
+		return average(j, s), nil
+	case xFracL == 3 && yFracL == 0:
+		return average(samples[2][3], b), nil
+	case xFracL == 3 && yFracL == 1:
+		return average(b, m), nil
+	case xFracL == 3 && yFracL == 2:
+		return average(j, m), nil
+	default:
+		return average(m, s), nil
+	}
+}
+
+type lumaFractionalSampleSampler struct {
+	plane                 []uint8
+	width, height, stride int
+}
+
+func newLumaFractionalSampleSampler(plane []uint8, width, height, stride int) (lumaFractionalSampleSampler, error) {
 	if width <= 0 || height <= 0 || stride < width {
-		return samples, ErrLumaReferencePlaneLayout
+		return lumaFractionalSampleSampler{}, ErrLumaReferencePlaneLayout
 	}
 	maxInt := int(^uint(0) >> 1)
 	if height-1 > (maxInt-width)/stride || len(plane) < (height-1)*stride+width {
-		return samples, ErrLumaReferencePlaneLayout
+		return lumaFractionalSampleSampler{}, ErrLumaReferencePlaneLayout
 	}
-	for row := 0; row < 6; row++ {
-		y := clampLumaReferenceCoordinate(yInt, row-2, height)
-		for column := 0; column < 6; column++ {
-			x := clampLumaReferenceCoordinate(xInt, column-2, width)
-			samples[row][column] = plane[y*stride+x]
+	return lumaFractionalSampleSampler{plane: plane, width: width, height: height, stride: stride}, nil
+}
+
+func (sampler lumaFractionalSampleSampler) sample(xInt, yInt int, xFracL, yFracL uint8) (uint8, error) {
+	if xFracL > 3 || yFracL > 3 {
+		return 0, ErrLumaFractionalSampleOffset
+	}
+	sampleAt := func(xOffset, yOffset int) uint8 {
+		x := clampLumaReferenceCoordinate(xInt, xOffset, sampler.width)
+		y := clampLumaReferenceCoordinate(yInt, yOffset, sampler.height)
+		return sampler.plane[y*sampler.stride+x]
+	}
+	horizontalHalf := func(xOffset, yOffset int) uint8 {
+		var taps [6]int
+		for index := range taps {
+			taps[index] = int(sampleAt(xOffset+index-2, yOffset))
+		}
+		return clipLumaSample((filterLumaSixTap(taps) + 16) >> 5)
+	}
+	verticalHalf := func(xOffset, yOffset int) uint8 {
+		var taps [6]int
+		for index := range taps {
+			taps[index] = int(sampleAt(xOffset, yOffset+index-2))
+		}
+		return clipLumaSample((filterLumaSixTap(taps) + 16) >> 5)
+	}
+	if xFracL == 0 && yFracL == 0 {
+		return sampleAt(0, 0), nil
+	}
+	needsJ := (xFracL == 1 && yFracL == 2) || (xFracL == 2 && yFracL > 0) || (xFracL == 3 && yFracL == 2)
+	var vertical [6]int
+	if needsJ {
+		for column := range vertical {
+			var taps [6]int
+			for row := range taps {
+				taps[row] = int(sampleAt(column-2, row-2))
+			}
+			vertical[column] = filterLumaSixTap(taps)
+		}
+	}
+	center, right, lower := sampleAt(0, 0), sampleAt(1, 0), sampleAt(0, 1)
+	var b, h, j, m, s uint8
+	if xFracL > 0 && yFracL <= 1 {
+		b = horizontalHalf(0, 0)
+	}
+	if yFracL > 0 && xFracL <= 1 {
+		if needsJ {
+			h = clipLumaSample((vertical[2] + 16) >> 5)
+		} else {
+			h = verticalHalf(0, 0)
+		}
+	}
+	if needsJ {
+		j = clipLumaSample((filterLumaSixTap(vertical) + 512) >> 10)
+	}
+	if xFracL == 3 && yFracL > 0 {
+		if needsJ {
+			m = clipLumaSample((vertical[3] + 16) >> 5)
+		} else {
+			m = verticalHalf(1, 0)
+		}
+	}
+	if xFracL > 0 && yFracL == 3 {
+		s = horizontalHalf(0, 1)
+	}
+	average := interpolateLumaQuarterSampleAverage
+	switch {
+	case xFracL == 0 && yFracL == 1:
+		return average(center, h), nil
+	case xFracL == 0 && yFracL == 2:
+		return h, nil
+	case xFracL == 0 && yFracL == 3:
+		return average(lower, h), nil
+	case xFracL == 1 && yFracL == 0:
+		return average(center, b), nil
+	case xFracL == 1 && yFracL == 1:
+		return average(b, h), nil
+	case xFracL == 1 && yFracL == 2:
+		return average(h, j), nil
+	case xFracL == 1 && yFracL == 3:
+		return average(h, s), nil
+	case xFracL == 2 && yFracL == 0:
+		return b, nil
+	case xFracL == 2 && yFracL == 1:
+		return average(b, j), nil
+	case xFracL == 2 && yFracL == 2:
+		return j, nil
+	case xFracL == 2 && yFracL == 3:
+		return average(j, s), nil
+	case xFracL == 3 && yFracL == 0:
+		return average(right, b), nil
+	case xFracL == 3 && yFracL == 1:
+		return average(b, m), nil
+	case xFracL == 3 && yFracL == 2:
+		return average(j, m), nil
+	default:
+		return average(m, s), nil
+	}
+}
+
+func gatherLumaQuarterSampleNeighborhood(plane []uint8, width, height, stride, xInt, yInt int) ([6][6]uint8, error) {
+	var samples [6][6]uint8
+	if _, err := newLumaFractionalSampleSampler(plane, width, height, stride); err != nil {
+		return samples, err
+	}
+	if xInt >= 2 && yInt >= 2 && width >= 6 && height >= 6 && xInt <= width-4 && yInt <= height-4 {
+		firstX, firstY := xInt-2, yInt-2
+		for row := range samples {
+			start := (firstY+row)*stride + firstX
+			copy(samples[row][:], plane[start:start+6])
+		}
+		return samples, nil
+	}
+	var xIndices, rowStarts [6]int
+	for column := range xIndices {
+		xIndices[column] = clampLumaReferenceCoordinate(xInt, column-2, width)
+	}
+	for row := range rowStarts {
+		rowStarts[row] = clampLumaReferenceCoordinate(yInt, row-2, height) * stride
+	}
+	for row := range samples {
+		for column, x := range xIndices {
+			samples[row][column] = plane[rowStarts[row]+x]
 		}
 	}
 	return samples, nil
@@ -931,12 +1132,11 @@ func selectLumaFractionalSample(samples [4][4]uint8, xFracL, yFracL uint8) (uint
 }
 
 func interpolateLumaFractionalSample(plane []uint8, width, height, stride, xInt, yInt int, xFracL, yFracL uint8) (uint8, error) {
-	neighborhood, err := gatherLumaQuarterSampleNeighborhood(plane, width, height, stride, xInt, yInt)
+	sampler, err := newLumaFractionalSampleSampler(plane, width, height, stride)
 	if err != nil {
 		return 0, err
 	}
-	grid := interpolateLumaQuarterSampleGrid(neighborhood)
-	return selectLumaFractionalSample(grid, xFracL, yFracL)
+	return sampler.sample(xInt, yInt, xFracL, yFracL)
 }
 
 func interpolateChromaFractionalSample(plane []uint8, width, height, stride, xInt, yInt int, xFracC, yFracC uint8) (uint8, error) {
@@ -1162,7 +1362,6 @@ type DecodedReferencePicture struct {
 type ReferencePictureBuffer struct {
 	pictures []DecodedReferencePicture
 }
-
 
 func (buffer *ReferencePictureBuffer) Store(reference ReferencePicture, frame Yuv420Frame) error {
 	chromaWidth := frame.Width/2 + frame.Width%2
