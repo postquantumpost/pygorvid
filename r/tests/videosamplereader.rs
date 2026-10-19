@@ -173,6 +173,61 @@ fn write_fixture(name: &str, bytes: &[u8]) -> (PathBuf, PathBuf) {
 }
 
 #[test]
+fn reads_hevc_metadata_and_validates_configuration_count() {
+    let mut configuration = vec![0; 23];
+    configuration[0] = 1;
+    configuration[1] = 2;
+    configuration[12] = 120;
+    configuration[13] = 0xf0;
+    configuration[15] = 0xfc;
+    configuration[16] = 0xfd;
+    configuration[17] = 0xfa;
+    configuration[18] = 0xfa;
+    configuration[21] = 3;
+    configuration[22] = 3;
+    for nal_type in [32u8, 33, 34] {
+        configuration.extend_from_slice(&[0x80 | nal_type, 0, 1, 0, 3, nal_type << 1, 1, 0x80]);
+    }
+    for kind in [b"hvc1", b"hev1"] {
+        for count in 0..=2 {
+            let mut entry = vec![0; 78];
+            for _ in 0..count {
+                entry.extend(mkbox(b"hvcC", &configuration));
+            }
+            let mut stsd = vec![0; 4];
+            stsd.extend_from_slice(&1u32.to_be_bytes());
+            stsd.extend(mkbox(kind, &entry));
+            let mut mdhd = vec![0; 20];
+            mdhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+            let mut handler = vec![0; 8];
+            handler.extend_from_slice(b"vide");
+            let mut mdia = mkbox(b"mdhd", &mdhd);
+            mdia.extend(mkbox(b"hdlr", &handler));
+            let mut stbl = mkbox(b"stsd", &stsd);
+            stbl.extend(mkbox(b"stsz", &[0; 12]));
+            stbl.extend(mkbox(b"stsc", &[0; 8]));
+            stbl.extend(mkbox(b"stts", &[0; 8]));
+            stbl.extend(mkbox(b"stco", &[0; 8]));
+            mdia.extend(mkbox(b"minf", &mkbox(b"stbl", &stbl)));
+            let data = mkbox(b"moov", &mkbox(b"trak", &mkbox(b"mdia", &mdia)));
+            let (dir, path) = write_fixture("hevc", &data);
+            if count == 1 {
+                let reader = VideoSampleReader::open(&path).unwrap();
+                assert_eq!(reader.codec(), pygorvid::VideoCodec::Hevc);
+                assert_eq!(reader.hevc_configuration().unwrap().bit_depth_luma, 10);
+                assert_eq!(reader.sample_count(), 0);
+                let error = pygorvid::VideoDecoder::new(reader).err().expect("decoder must report unavailability even for an empty track");
+                assert!(matches!(error, pygorvid::DecodeError::Codec(_)));
+            } else {
+                let error = VideoSampleReader::open(&path).err().expect("invalid configuration count");
+                assert_eq!(error.to_string(), "HEVC sample entry must contain one hvcC box");
+            }
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
+#[test]
 fn reads_samples_with_stco_and_variable_sizes() {
     assert_reader_case(false, false);
 }

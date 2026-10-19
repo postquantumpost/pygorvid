@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env, fmt, fs,
     fs::File,
     io,
@@ -69,6 +69,7 @@ pub struct DependencySlice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
+    Codec(crate::CodecError),
     MissingSampleReader,
     FrameIndexOutOfRange,
     NotImplemented,
@@ -80,6 +81,7 @@ pub enum DecodeError {
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Codec(error) => fmt::Display::fmt(error, f),
             Self::MissingSampleReader => write!(f, "H.264 decoder requires a sample reader"),
             Self::FrameIndexOutOfRange => write!(f, "frame index is out of range"),
             Self::NotImplemented => write!(f, "H.264 decoder is not implemented yet"),
@@ -213,6 +215,59 @@ fn apply_adaptive_reference_marking(
     Ok((current_long_term_frame_idx, reset_frame_num))
 }
 
+fn deblocking_luma_nonzero_flags(
+    transform_size_8x8: bool,
+    coded_block_pattern_luma: u8,
+    coded_flags: [bool; 16],
+) -> [bool; 16] {
+    if transform_size_8x8 {
+        return std::array::from_fn(|raster| {
+            let group = (raster / 8) * 2 + (raster % 4) / 2;
+            coded_block_pattern_luma & (1 << group) != 0
+        });
+    }
+    let mut nonzero = [false; 16];
+    for (index, raster) in [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+        .into_iter()
+        .enumerate()
+    {
+        nonzero[raster] = coded_flags[index];
+    }
+    nonzero
+}
+
+#[cfg(test)]
+mod deblocking_metadata_tests {
+    use super::deblocking_luma_nonzero_flags;
+
+    #[test]
+    fn luma_8x8_residual_marks_every_constituent_4x4_cell() {
+        for pattern in 0..16 {
+            let nonzero = deblocking_luma_nonzero_flags(true, pattern, [false; 16]);
+            for row in 0..4 {
+                for column in 0..4 {
+                    let group = (row / 2) * 2 + column / 2;
+                    assert_eq!(nonzero[row * 4 + column], pattern & (1 << group) != 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn luma_4x4_residual_flags_remain_in_raster_order() {
+        for (scan, raster) in [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+            .into_iter()
+            .enumerate()
+        {
+            let mut flags = [false; 16];
+            flags[scan] = true;
+            let nonzero = deblocking_luma_nonzero_flags(false, 15, flags);
+            assert!(nonzero[raster]);
+            assert_eq!(nonzero.into_iter().filter(|flag| *flag).count(), 1);
+        }
+    }
+}
+
 fn picture_deblocking_macroblock(
     entry: &crate::CabacDecodedSliceMacroblock,
     header: &crate::SliceHeader,
@@ -230,11 +285,14 @@ fn picture_deblocking_macroblock(
     let mut predictions: [Vec<crate::LumaPredictionVector>; 16] = Default::default();
     let (qpy, updated_qpy, intra, transform_size_8x8) = match &entry.result {
         CabacSliceMacroblockResult::Intra(macroblock) => {
-            let scan = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
-            for (index, raster) in scan.into_iter().enumerate() {
-                nonzero[raster] = macroblock.luma_4x4_coded_block_flags[index]
-                    || macroblock.luma_ac_coded_block_flags[index];
-            }
+            nonzero = deblocking_luma_nonzero_flags(
+                macroblock.transform_size_8x8,
+                macroblock.coded_block_pattern_luma,
+                std::array::from_fn(|index| {
+                    macroblock.luma_4x4_coded_block_flags[index]
+                        || macroblock.luma_ac_coded_block_flags[index]
+                }),
+            );
             let qpy = if macroblock.macroblock_type == 25 {
                 0
             } else {
@@ -289,11 +347,14 @@ fn picture_deblocking_macroblock(
                     None,
                 ),
                 CabacPBMacroblockPrediction::Intra(macroblock) => {
-                    let scan = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
-                    for (index, raster) in scan.into_iter().enumerate() {
-                        nonzero[raster] = macroblock.luma_4x4_coded_block_flags[index]
-                            || macroblock.luma_ac_coded_block_flags[index];
-                    }
+                    nonzero = deblocking_luma_nonzero_flags(
+                        macroblock.transform_size_8x8,
+                        macroblock.coded_block_pattern_luma,
+                        std::array::from_fn(|index| {
+                            macroblock.luma_4x4_coded_block_flags[index]
+                                || macroblock.luma_ac_coded_block_flags[index]
+                        }),
+                    );
                     let qpy = if macroblock.macroblock_type == 25 {
                         0
                     } else {
@@ -308,12 +369,11 @@ fn picture_deblocking_macroblock(
                     )
                 }
                 CabacPBMacroblockPrediction::Inter(macroblock) => {
-                    for (index, raster) in [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        nonzero[raster] = macroblock.luma_4x4_coded_block_flags[index];
-                    }
+                    nonzero = deblocking_luma_nonzero_flags(
+                        macroblock.transform_size_8x8,
+                        macroblock.coded_block_pattern_luma,
+                        macroblock.luma_4x4_coded_block_flags,
+                    );
                     (
                         macroblock.qpy,
                         macroblock.transform_size_8x8,
@@ -545,7 +605,6 @@ fn colocated_motion_facts(
     Ok(facts)
 }
 
-#[derive(Default)]
 pub struct H264Decoder {
     pub sample_count: Option<usize>,
     pub sequence_parameter_sets: Vec<crate::sps::SpsInfo>,
@@ -564,19 +623,90 @@ pub struct H264Decoder {
     poc_type12_state: crate::PocType12State,
     poc_cache: Option<(crate::PictureIdentity, i64)>,
     decoded_frames: HashMap<usize, Yuv420Frame>,
+    decoded_frame_order: VecDeque<usize>,
+    frame_cache_size: usize,
     // Zero selects default_decoder_threads().
     threads: usize,
+    verbose: bool,
 }
 
-/// Returns half the available processors, at least one.
-pub fn default_decoder_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1))
+impl Default for H264Decoder {
+    fn default() -> Self {
+        Self {
+            sample_count: None,
+            sequence_parameter_sets: Vec::new(),
+            picture_parameter_sets: Vec::new(),
+            reference_picture_buffer: crate::reconstruction::ReferencePictureBuffer::default(),
+            presentation_order_buffer: crate::reconstruction::PresentationOrderBuffer::new(0),
+            sample_reader: None,
+            first_sync_sample_index: None,
+            unsupported_feature: false,
+            checkpoint_parameter_sets: (Vec::new(), Vec::new()),
+            checkpoint_path: None,
+            gop_sync_sample_index: None,
+            last_decoded_sample_index: None,
+            maximum_long_term_frame_idx: None,
+            poc_type0_state: crate::PocType0State::default(),
+            poc_type12_state: crate::PocType12State::default(),
+            poc_cache: None,
+            decoded_frames: HashMap::new(),
+            decoded_frame_order: VecDeque::new(),
+            frame_cache_size: 8,
+            threads: 0,
+            verbose: false,
+        }
+    }
 }
+
+pub use crate::codec::default_decoder_threads;
 
 impl H264Decoder {
     /// Sets the number of decoder threads; zero selects `default_decoder_threads()`.
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads;
+    }
+
+    pub fn set_verbose(&mut self, verbose: bool) {
+        self.verbose = verbose;
+    }
+
+    /// Returns the maximum number of recently decoded output frames retained.
+    pub fn frame_cache_size(&self) -> usize {
+        self.frame_cache_size
+    }
+
+    /// Sets the decoded-output cache capacity; zero disables the cache.
+    pub fn set_frame_cache_size(&mut self, size: usize) {
+        self.frame_cache_size = size;
+        self.trim_decoded_frame_cache();
+    }
+
+    pub fn frame_cache_len(&self) -> usize {
+        self.decoded_frames.len()
+    }
+
+    fn cache_decoded_frame(&mut self, index: usize, frame: Yuv420Frame) {
+        if self.frame_cache_size == 0 {
+            return;
+        }
+        if let Some(position) = self
+            .decoded_frame_order
+            .iter()
+            .position(|cached| *cached == index)
+        {
+            self.decoded_frame_order.remove(position);
+        }
+        self.decoded_frames.insert(index, frame);
+        self.decoded_frame_order.push_back(index);
+        self.trim_decoded_frame_cache();
+    }
+
+    fn trim_decoded_frame_cache(&mut self) {
+        while self.decoded_frame_order.len() > self.frame_cache_size {
+            if let Some(oldest) = self.decoded_frame_order.pop_front() {
+                self.decoded_frames.remove(&oldest);
+            }
+        }
     }
 
     pub fn threads(&self) -> usize {
@@ -592,8 +722,8 @@ impl H264Decoder {
     pub fn new(sample_reader: crate::videosamplereader::VideoSampleReader) -> Self {
         let first_sync_sample_index = sample_reader.first_sync_sample_index();
         let sample_count = sample_reader.sample_count();
-        let configuration = sample_reader.configuration();
-        let mut unsupported_feature = false;
+        let configuration = sample_reader.avc_configuration().cloned().unwrap_or_default();
+        let mut unsupported_feature = sample_reader.codec() != crate::VideoCodec::H264;
         let mut sequence_parameter_sets = Vec::new();
         for nal in &configuration.sequence_parameter_sets {
             match crate::sps::parse_sps(nal) {
@@ -628,7 +758,10 @@ impl H264Decoder {
             poc_type12_state: crate::PocType12State::default(),
             poc_cache: None,
             decoded_frames: HashMap::new(),
+            decoded_frame_order: VecDeque::new(),
+            frame_cache_size: 8,
             threads: 0,
+            verbose: false,
         }
     }
 
@@ -691,7 +824,10 @@ impl H264Decoder {
             poc_type12_state: crate::PocType12State::default(),
             poc_cache: None,
             decoded_frames: HashMap::new(),
+            decoded_frame_order: VecDeque::new(),
+            frame_cache_size: 8,
             threads: 0,
+            verbose: false,
         }
     }
 
@@ -717,8 +853,12 @@ impl H264Decoder {
         let temporary = parent.join(format!(".{name}.tmp.{}.{}", std::process::id(), nonce));
         let result = (|| {
             let mut file = File::create(&temporary)?;
-            let mut frame_indices: Vec<_> = self.decoded_frames.keys().copied().collect();
-            frame_indices.sort_unstable();
+            let frame_indices: Vec<_> = self
+                .decoded_frame_order
+                .iter()
+                .copied()
+                .filter(|index| self.decoded_frames.contains_key(index))
+                .collect();
             let state = DecoderCheckpoint {
                 magic: *CHECKPOINT_MAGIC,
                 version: CHECKPOINT_VERSION,
@@ -806,6 +946,7 @@ impl H264Decoder {
         }
 
         let mut decoded_frames = HashMap::new();
+        let mut decoded_frame_order = VecDeque::new();
         for (index, frame) in state.decoded_frames {
             if self.sample_count.is_some_and(|count| index >= count)
                 || decoded_frames.contains_key(&index)
@@ -814,6 +955,7 @@ impl H264Decoder {
             }
             validate_checkpoint_frame(&frame)?;
             decoded_frames.insert(index, frame);
+            decoded_frame_order.push_back(index);
         }
 
         let mut reference_picture_buffer = crate::ReferencePictureBuffer::default();
@@ -848,6 +990,8 @@ impl H264Decoder {
         }
 
         self.decoded_frames = decoded_frames;
+        self.decoded_frame_order = decoded_frame_order;
+        self.trim_decoded_frame_cache();
         self.reference_picture_buffer = reference_picture_buffer;
         self.gop_sync_sample_index = state.gop_sync_sample_index;
         self.last_decoded_sample_index = state.last_decoded_sample_index;
@@ -1116,7 +1260,7 @@ impl H264Decoder {
             |address, history| {
                 let input =
                     self.macroblock_input_from_history(dependency_slice, address, history)?;
-                if (345..=349).contains(&address) {
+                if self.verbose && (345..=349).contains(&address) {
                     if let crate::CabacSliceMacroblockInput::Inter(layer) = &input {
                         eprintln!(
                             "input mb={address} hist={} inter_qpy={}/{} intra_qpy={:?}/{:?} cbp={}/{}",
@@ -1992,7 +2136,7 @@ impl H264Decoder {
                     .v_plane_bytes()
                     .map_err(|_| DecodeError::ReferenceMismatch)?;
                 let chroma_width = stored.frame.width / 2 + stored.frame.width % 2;
-                return Ok(Yuv420Frame {
+                let frame = Yuv420Frame {
                     width: stored.frame.width,
                     height: stored.frame.height,
                     y_stride: stored.frame.width,
@@ -2001,7 +2145,9 @@ impl H264Decoder {
                     y,
                     u,
                     v,
-                });
+                };
+                self.cache_decoded_frame(requested_index, frame.clone());
+                return Ok(frame);
             }
         }
 
@@ -2019,8 +2165,15 @@ impl H264Decoder {
             .and_then(|picture| picture.first())
             .map(|slice| slice.sample_index)
             .ok_or_else(|| DecodeError::DecodeFailure("dependency window is empty".into()))?;
+        let target_already_decoded = self
+            .last_decoded_sample_index
+            .is_some_and(|last| target_sample_index as u64 <= last);
         if self.gop_sync_sample_index != Some(gop_sync_sample_index)
             || self.last_decoded_sample_index.is_none()
+            || target_already_decoded
+            || self
+                .last_decoded_sample_index
+                .is_some_and(|last| target_sample_index as u64 <= last)
         {
             self.reference_picture_buffer.clear();
             self.poc_type0_state = crate::PocType0State::default();
@@ -2058,6 +2211,9 @@ impl H264Decoder {
                 continue;
             }
             let header = first_slice.header.clone();
+            if self.verbose {
+                eprintln!("decoding frame {requested_index} (sample {sample_index})");
+            }
             let pps = self
                 .picture_parameter_sets
                 .iter()
@@ -2199,7 +2355,7 @@ impl H264Decoder {
                 u: planes.next().unwrap(),
                 v: planes.next().unwrap(),
             };
-            self.decoded_frames.insert(display_index, frame.clone());
+            self.cache_decoded_frame(display_index, frame.clone());
             if header.nal_ref_idc != 0 {
                 let (stored_frame_num, long_term_frame_idx, reset_poc_state) = if header.idr {
                     (
@@ -2340,7 +2496,7 @@ impl H264Decoder {
 mod adaptive_reference_marking_tests {
     use super::apply_adaptive_reference_marking;
     use crate::slice::MemoryManagementOperation;
-    use crate::{ReferencePicture, ReferencePictureBuffer, Yuv420Frame};
+    use crate::{H264Decoder, ReferencePicture, ReferencePictureBuffer, Yuv420Frame};
 
     fn frame() -> Yuv420Frame {
         Yuv420Frame {
@@ -2360,6 +2516,24 @@ mod adaptive_reference_marking_tests {
             operation,
             operands: operands.to_vec(),
         }
+    }
+
+    #[test]
+    fn decoded_frame_cache_defaults_to_eight_and_evicts_oldest() {
+        let mut decoder = H264Decoder::default();
+        assert_eq!(decoder.frame_cache_size(), 8);
+        decoder.set_frame_cache_size(2);
+        for index in 0..4 {
+            let mut decoded = frame();
+            decoded.y[0] = index as u8;
+            decoder.cache_decoded_frame(index, decoded);
+        }
+        assert_eq!(decoder.frame_cache_len(), 2);
+        assert!(!decoder.decoded_frames.contains_key(&1));
+        assert!(decoder.decoded_frames.contains_key(&2));
+        assert!(decoder.decoded_frames.contains_key(&3));
+        decoder.set_frame_cache_size(0);
+        assert_eq!(decoder.frame_cache_len(), 0);
     }
 
     #[test]

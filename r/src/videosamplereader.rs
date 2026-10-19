@@ -1,11 +1,13 @@
-//! Read compressed AVC samples from the first video track in an MP4.
+//! Read compressed samples from the first video track in an MP4.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::mp4boxes::{find, read_boxes, AvcConfiguration, Mp4Box};
-use crate::nal::split_length_prefixed_nals;
+use crate::h264_mp4::AvcConfiguration;
+use crate::codec::{CodecConfiguration, VideoCodec};
+use crate::mp4boxes::{find, read_boxes, Mp4Box};
+use crate::codec_sample::split_length_prefixed_nals;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressedSample {
@@ -30,7 +32,7 @@ struct SampleLocation {
 pub struct VideoSampleReader {
     file: Option<File>,
     path: Option<std::path::PathBuf>,
-    configuration: AvcConfiguration,
+    configuration: CodecConfiguration,
     samples: Vec<SampleLocation>,
     next_index: usize,
 }
@@ -64,22 +66,11 @@ impl VideoSampleReader {
             &[b"mdia", b"minf", b"stbl", b"stsd"],
             "stsd",
         )?;
-        let avc_entries: Vec<&dyn Mp4Box> = sample_description
-            .children()
-            .iter()
-            .map(|entry| &**entry)
-            .filter(|entry| &entry.header().kind == b"avc1")
-            .collect();
-        if avc_entries.len() != 1 {
-            return Err(invalid(
-                "video track must have exactly one avc1 sample entry",
-            ));
+        let entries = sample_description.children();
+        if entries.len() != 1 {
+            return Err(invalid("only one video sample description is supported"));
         }
-        let avc_configuration = avc_entries[0]
-            .children()
-            .iter()
-            .find_map(|box_| box_.avc_configuration().cloned())
-            .ok_or_else(|| invalid("avc1 sample entry has no usable avcC configuration"))?;
+        let configuration = crate::codec::sample_configuration(&*entries[0])?;
 
         let stsz = one_box(
             track_children,
@@ -174,7 +165,7 @@ impl VideoSampleReader {
         Ok(Self {
             file: Some(file),
             path: Some(path_buf),
-            configuration: avc_configuration,
+            configuration,
             samples,
             next_index: 0,
         })
@@ -185,7 +176,29 @@ impl VideoSampleReader {
     }
 
     pub fn configuration(&self) -> &AvcConfiguration {
+        self.avc_configuration().expect("AVC configuration requested for a non-H.264 track")
+    }
+
+    pub fn codec(&self) -> VideoCodec {
+        self.configuration.codec()
+    }
+
+    pub fn codec_configuration(&self) -> &CodecConfiguration {
         &self.configuration
+    }
+
+    pub fn avc_configuration(&self) -> Option<&AvcConfiguration> {
+        match &self.configuration {
+            CodecConfiguration::H264(config) => Some(config),
+            _ => None,
+        }
+    }
+
+    pub fn hevc_configuration(&self) -> Option<&crate::HevcConfiguration> {
+        match &self.configuration {
+            CodecConfiguration::Hevc(config) => Some(config),
+            _ => None,
+        }
     }
 
     pub fn sample_count(&self) -> usize {
@@ -231,7 +244,7 @@ impl VideoSampleReader {
         file.seek(SeekFrom::Start(location.offset))?;
         let mut data = vec![0u8; location.size as usize];
         file.read_exact(&mut data)?;
-        validate_length_prefixed_nals(&data, usize::from(self.configuration.nal_length_size))
+        validate_length_prefixed_nals(&data, usize::from(self.configuration.nal_length_size()))
             .map_err(|error| invalid(format!("sample {index}: {error}")))?;
         Ok(CompressedSample {
             index: index as u64,

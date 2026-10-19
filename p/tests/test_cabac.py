@@ -860,10 +860,10 @@ def test_mb_skip_flag_rejects_intra_slice_types():
         (3, 2, [False] * 6, 0),
         (3, 1, [False, True, False, False, False, False], 1),
         (3, 0, [True, False, False, False, True, False], 2),
-        (3, 3, [False, False, False, True, True, True], 3),
+        (2, 3, [False, False, False, True, True, False], 2),
     ),
 )
-def test_reference_index_decodes_truncated_unary(maximum, increment, mps, expected):
+def test_reference_index_decodes_unary(maximum, increment, mps, expected):
     decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
     decoder._bits = BitReader(b"")
     decoder._code_range = 510
@@ -874,6 +874,34 @@ def test_reference_index_decodes_truncated_unary(maximum, increment, mps, expect
         model._state_index = 63
         model._value_mps = value_mps
     assert decoder.decode_reference_index(maximum, increment, contexts) == expected
+
+
+@pytest.mark.parametrize("maximum", (1, 2))
+def test_reference_index_maximum_consumes_terminator_and_rejects_excess(maximum):
+    decoder = CABACArithmeticDecoder.__new__(CABACArithmeticDecoder)
+    decoder._bits = BitReader(b"")
+    decoder._code_range = 510
+    decoder._code_offset = 0
+    decoder._terminated = False
+    contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(6)]
+    for model in contexts:
+        model._state_index = 63
+        model._value_mps = True
+    terminator = 4 if maximum == 1 else 5
+    contexts[terminator]._state_index = 10
+    contexts[terminator]._value_mps = False
+    assert decoder.decode_reference_index(maximum, 0, contexts) == maximum
+    assert contexts[terminator].state_index == 11
+
+    decoder._code_range = 510
+    contexts[terminator]._state_index = 63
+    contexts[terminator]._value_mps = True
+    original_contexts = _states(contexts)
+    with pytest.raises(CABACError, match="exceeds the active reference maximum"):
+        decoder.decode_reference_index(maximum, 0, contexts)
+    assert decoder.code_range == 510 and decoder.code_offset == 0
+    assert decoder._bits._bit_offset == 0
+    assert _states(contexts) == original_contexts
 
 
 def test_i_intra_mb_type_decodes_intra_nxn_i16x16_and_pcm():
@@ -1452,6 +1480,7 @@ def test_inter_macroblock_decodes_p16x16_reference_and_motion_vector():
     symbols, encode_mb_type = _inter_mb_type_symbols(0, 0)
     encode_mb_type(encoder, encoder_contexts, symbols[0])
     encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 54)
+    encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 58)
     encoder.encode_bin_string(encoder_contexts, "1", lambda *_: 40)
     encoder.encode_bin_string(encoder_contexts, "0", lambda *_: 43)
     encoder.bypass(False)

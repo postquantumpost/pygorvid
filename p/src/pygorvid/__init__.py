@@ -1,4 +1,8 @@
 from .basicinfo import BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo
+from .codec import CodecError, CodecErrorCode, VideoCodec, create_decoder
+from .codec_frame import Yuv420Frame
+from .hevc_decoder import HEVCDecoder
+from .hevc_mp4 import HEVCConfiguration
 from .bitreader import BitReader, BitstreamError
 from .cabac import (
     CABACArithmeticDecoder,
@@ -143,7 +147,6 @@ from .reconstruction import (
     ReferencePicture,
     DecodedReferencePicture,
     ReferencePictureBuffer,
-    Yuv420Frame,
     Yuv420FrameBuilder,
     apply_motion_vector_difference,
     apply_reference_list_modifications,
@@ -224,6 +227,12 @@ from .vidfile import VidFile, construct, openfile
 from .videosamplereader import AVCConfiguration, CompressedSample, VideoSampleReader
 
 __all__ = [
+    "CodecError",
+    "CodecErrorCode",
+    "VideoCodec",
+    "create_decoder",
+    "HEVCDecoder",
+    "HEVCConfiguration",
     "detect_format",
     "probe_file",
     "BasicInfo",

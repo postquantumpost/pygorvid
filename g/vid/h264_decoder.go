@@ -2,7 +2,8 @@ package vid
 
 import (
 	"errors"
-	"runtime"
+	"fmt"
+	"os"
 )
 
 var ErrDecoderMissingSampleReader = errors.New("H.264 decoder requires a sample reader")
@@ -10,6 +11,8 @@ var ErrDecoderFrameIndexOutOfRange = errors.New("frame index is out of range")
 var ErrDecoderNotImplemented = errors.New("H.264 decoder is not implemented yet")
 var ErrDecoderUnsupportedFeature = errors.New("unsupported H.264 profile, chroma format, bit depth, or interlace mode")
 var ErrDecoderReferenceMismatch = errors.New("decoded frame does not match the reference frame data")
+
+const defaultFrameCacheSize = 8
 
 // H264Decoder owns native H.264 reconstruction, reference pictures, and presentation frames.
 type H264Decoder struct {
@@ -23,17 +26,15 @@ type H264Decoder struct {
 	nativeBlocks            []nativeMacroblock
 	nativeReferenceBlocks   map[uint32][]nativeMacroblock
 	decodedFrames           map[uint64]Yuv420Frame
+	decodedFrameOrder       []uint64
+	frameCacheSize          int
 	nativeSyncSample        int64
 	nativeLastSample        int64
 	nativeMaximumLongTerm   int64
 	nativePOC0              POCType0State
 	nativePOC12             POCType12State
 	threads                 int
-}
-
-// DefaultDecoderThreads returns half the available processors, at least one.
-func DefaultDecoderThreads() int {
-	return max(1, runtime.NumCPU()/2)
+	verbose                 bool
 }
 
 // SetThreads sets the number of worker threads; values below one select DefaultDecoderThreads.
@@ -48,6 +49,51 @@ func (decoder *H264Decoder) Threads() int {
 	return decoder.threads
 }
 
+func (decoder *H264Decoder) SetVerbose(verbose bool) {
+	decoder.verbose = verbose
+}
+
+// SetFrameCacheSize sets the number of most recently decoded output frames to retain.
+// A size of zero disables the decoded-frame cache.
+func (decoder *H264Decoder) SetFrameCacheSize(size int) error {
+	if size < 0 {
+		return errors.New("frame cache size must be non-negative")
+	}
+	decoder.frameCacheSize = size
+	decoder.trimDecodedFrameCache()
+	return nil
+}
+
+// FrameCacheSize returns the decoded-frame cache capacity.
+func (decoder *H264Decoder) FrameCacheSize() int {
+	return decoder.frameCacheSize
+}
+
+func (decoder *H264Decoder) cacheDecodedFrame(index uint64, frame Yuv420Frame) {
+	if decoder.frameCacheSize == 0 {
+		return
+	}
+	if _, exists := decoder.decodedFrames[index]; exists {
+		for position, cachedIndex := range decoder.decodedFrameOrder {
+			if cachedIndex == index {
+				decoder.decodedFrameOrder = append(decoder.decodedFrameOrder[:position], decoder.decodedFrameOrder[position+1:]...)
+				break
+			}
+		}
+	}
+	decoder.decodedFrames[index] = frame
+	decoder.decodedFrameOrder = append(decoder.decodedFrameOrder, index)
+	decoder.trimDecodedFrameCache()
+}
+
+func (decoder *H264Decoder) trimDecodedFrameCache() {
+	for len(decoder.decodedFrameOrder) > decoder.frameCacheSize {
+		oldest := decoder.decodedFrameOrder[0]
+		decoder.decodedFrameOrder = decoder.decodedFrameOrder[1:]
+		delete(decoder.decodedFrames, oldest)
+	}
+}
+
 func NewH264Decoder(sampleReader *VideoSampleReader) *H264Decoder {
 	decoder := &H264Decoder{
 		threads:                 DefaultDecoderThreads(),
@@ -59,12 +105,17 @@ func NewH264Decoder(sampleReader *VideoSampleReader) *H264Decoder {
 		presentationOrderBuffer: NewPresentationOrderBuffer(0),
 		unsupportedFeature:      false,
 		decodedFrames:           make(map[uint64]Yuv420Frame),
+		frameCacheSize:          defaultFrameCacheSize,
 		nativeReferenceBlocks:   make(map[uint32][]nativeMacroblock),
 		nativeSyncSample:        -1,
 		nativeLastSample:        -1,
 		nativeMaximumLongTerm:   -1,
 	}
 	if sampleReader != nil {
+		if codec := sampleReader.Codec(); codec != "" && codec != CodecH264 {
+			decoder.unsupportedFeature = true
+			return decoder
+		}
 		decoder.sampleCount = sampleReader.SampleCount()
 		configuration := sampleReader.Configuration()
 		decoder.sequenceParameterSets = make([]SPSInfo, 0, len(configuration.SequenceSets))
@@ -113,6 +164,9 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 	if index >= uint64(decoder.sampleCount) {
 		return Yuv420Frame{}, ErrDecoderFrameIndexOutOfRange
 	}
+	if decoder.verbose {
+		fmt.Fprintf(os.Stderr, "decoding frame %d\n", index)
+	}
 	if cached, ok := decoder.decodedFrames[index]; ok {
 		return cloneNativeFrame(cached), nil
 	}
@@ -131,11 +185,13 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 				return Yuv420Frame{}, err
 			}
 			chromaWidth := stored.Frame.Width/2 + stored.Frame.Width%2
-			return Yuv420Frame{
+			frame := Yuv420Frame{
 				Width: stored.Frame.Width, Height: stored.Frame.Height,
 				YStride: stored.Frame.Width, UStride: chromaWidth, VStride: chromaWidth,
 				Y: y, U: u, V: v,
-			}, nil
+			}
+			decoder.cacheDecodedFrame(index, cloneNativeFrame(frame))
+			return frame, nil
 		}
 	}
 	if decoder.sampleReader.path == "" {

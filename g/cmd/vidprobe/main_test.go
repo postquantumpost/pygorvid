@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"pygorvid/vid"
@@ -14,6 +17,89 @@ func TestRunRejectsNonPositiveThreads(t *testing.T) {
 	for _, value := range []string{"0", "-2"} {
 		if status := run([]string{"--threads", value, "input.mp4"}); status != 2 {
 			t.Fatalf("run(--threads %s) = %d; want 2", value, status)
+		}
+	}
+}
+
+func TestReadAllFrames(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
+	for _, threads := range []int{1, 2} {
+		count, err := readAllFrames(path, threads, false)
+		if err != nil || count != 3 {
+			t.Fatalf("readAllFrames() = %d, %v; want 3, nil", count, err)
+		}
+	}
+	if status := run([]string{path, "--readall", "--input", path, "--threads", "2"}); status != 0 {
+		t.Fatalf("read-all multiple files status = %d; want 0", status)
+	}
+	if status := run([]string{"--readall", "missing.mp4", path}); status != 1 {
+		t.Fatalf("read-all missing input status = %d; want 1", status)
+	}
+}
+
+func TestReadAllRejectsExtractionOptions(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"--extractframe", "0"},
+		{"--output", "out.png"},
+		{"--extractframe", "0", "--output", "out.png"},
+	} {
+		arguments = append([]string{"--readall", "input.mp4"}, arguments...)
+		if status := run(arguments); status != 2 {
+			t.Fatalf("run(%v) = %d; want 2", arguments, status)
+		}
+	}
+}
+
+func TestReadAllReportsFailingFrame(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
+	reader, err := vid.OpenVideoSampleReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := reader.SampleAt(1)
+	reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset := bytes.Index(data, sample.Data)
+	if offset < 0 {
+		t.Fatal("sample bytes are not in fixture")
+	}
+	clear(data[offset : offset+len(sample.Data)])
+	invalid := filepath.Join(t.TempDir(), "invalid.mp4")
+	if err := os.WriteFile(invalid, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	count, err := readAllFrames(invalid, 1, false)
+	if count != 1 || err == nil || !strings.Contains(err.Error(), "decode frame 1:") {
+		t.Fatalf("readAllFrames() = %d, %v; want failure at frame 1", count, err)
+	}
+}
+
+func TestVerboseExtractionReportsProgressOnlyWhenEnabled(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
+	for _, verbose := range []bool{false, true} {
+		readEnd, writeEnd, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		previousStderr := os.Stderr
+		os.Stderr = writeEnd
+		output := filepath.Join(t.TempDir(), "frame.png")
+		extractErr := extractFrame(path, 0, output, 1, verbose)
+		writeEnd.Close()
+		os.Stderr = previousStderr
+		debugOutput, readErr := io.ReadAll(readEnd)
+		readEnd.Close()
+		if extractErr != nil || readErr != nil {
+			t.Fatalf("extractFrame(verbose=%t) = %v, read stderr: %v", verbose, extractErr, readErr)
+		}
+		if strings.Contains(string(debugOutput), "decoding frame") != verbose {
+			t.Fatalf("debug output for verbose=%t = %q", verbose, debugOutput)
 		}
 	}
 }
@@ -68,13 +154,13 @@ func TestWriteOutputFileUsesAtomicRename(t *testing.T) {
 
 func TestExtractFrameRejectsOutOfRangeFrameIndex(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "testdata", "h264", "high42-1080p.mp4")
-	if err := extractFrame(path, 10_000, filepath.Join(t.TempDir(), "out.png"), 1); err == nil {
+	if err := extractFrame(path, 10_000, filepath.Join(t.TempDir(), "out.png"), 1, false); err == nil {
 		t.Fatal("extractFrame() unexpectedly succeeded for an out-of-range frame index")
 	}
 }
 
 func TestExtractFrameRejectsUnsupportedImageExtension(t *testing.T) {
-	if err := extractFrame("sample.mp4", 0, "out.bmp", 1); err == nil {
+	if err := extractFrame("sample.mp4", 0, "out.bmp", 1, false); err == nil {
 		t.Fatal("extractFrame() accepted an unsupported output extension")
 	}
 }
@@ -86,7 +172,7 @@ func TestExtractFrameWritesJPEGForFixture(t *testing.T) {
 		for _, frame := range []int{0, 1} {
 			t.Run(extension+string(rune('0'+frame)), func(t *testing.T) {
 				output := prefixedOutput(filepath.Join(t.TempDir(), "image with spaces"+extension), "native_")
-				if err := extractFrame(path, frame, output, 2); err != nil {
+				if err := extractFrame(path, frame, output, 2, false); err != nil {
 					t.Fatalf("extractFrame() err = %v; want native JPEG output", err)
 				}
 				file, err := os.Open(output)
@@ -105,7 +191,7 @@ func TestExtractFrameWritesJPEGForFixture(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := extractFrame(path, 999, output, 1); err == nil {
+				if err := extractFrame(path, 999, output, 1, false); err == nil {
 					t.Fatal("extractFrame() accepted an out-of-range frame")
 				}
 				preserved, err := os.ReadFile(output)
@@ -138,7 +224,7 @@ func TestWriteOutputFileRejectsDirectoryDestinations(t *testing.T) {
 func TestExtractFrameWritesPNGForFixture(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "testdata", "h264", "high42-1080p.mp4")
 	output := filepath.Join(t.TempDir(), "out.png")
-	if err := extractFrame(path, 0, output, vid.DefaultDecoderThreads()); err != nil {
+	if err := extractFrame(path, 0, output, vid.DefaultDecoderThreads(), false); err != nil {
 		t.Fatalf("extractFrame() err = %v; want nil for a valid fixture", err)
 	}
 	f, err := os.Open(output)

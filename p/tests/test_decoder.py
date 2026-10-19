@@ -40,6 +40,24 @@ def test_b_decoder_smoke_64x64():
     )
 
 
+def test_decoder_frame_cache_retains_most_recent_decoded_frames():
+    decoder = H264Decoder(frame_cache_size=2)
+    assert decoder.frame_cache_size == 2
+    for index in range(4):
+        frame = Yuv420Frame(1, 1, 1, 1, 1, bytes([index]), bytes([index]), bytes([index]))
+        decoder._cache_decoded_frame(index, frame)
+    assert list(decoder._decoded_frames) == [2, 3]
+
+    decoder.frame_cache_size = 1
+    assert list(decoder._decoded_frames) == [3]
+    decoder.frame_cache_size = 0
+    assert not decoder._decoded_frames
+    with pytest.raises(ValueError, match="frame cache size"):
+        decoder.frame_cache_size = -1
+    with pytest.raises(ValueError, match="frame cache size"):
+        H264Decoder(frame_cache_size=-1)
+
+
 def _assert_decoder_smoke_fixture(name, dimension, expected_hashes):
     reader = VideoSampleReader(ROOT / "samples" / name)
     try:
@@ -355,7 +373,19 @@ def test_h264_decoder_reconstructs_high52_filtered_inter_planes(
         reader.close()
 
 
-def test_picture_deblocking_combines_intra_luma_ac_flags_per_block():
+@pytest.mark.parametrize(
+    ("transform_size_8x8", "pattern", "expected"),
+    (
+        (False, 0, (2,)),
+        (True, 0, ()),
+        (True, 1, (0, 1, 4, 5)),
+        (True, 2, (2, 3, 6, 7)),
+        (True, 4, (8, 9, 12, 13)),
+        (True, 8, (10, 11, 14, 15)),
+        (True, 15, tuple(range(16))),
+    ),
+)
+def test_picture_deblocking_maps_luma_residual_flags(transform_size_8x8, pattern, expected):
     from pygorvid.cabac import CABACIIntraMacroblockResult
     from pygorvid.decoder import _picture_deblocking_macroblock
 
@@ -363,9 +393,9 @@ def test_picture_deblocking_combines_intra_luma_ac_flags_per_block():
     ac_flags[4] = True
     decoded = CABACIIntraMacroblockResult(
         macroblock_type=0,
-        coded_block_pattern_luma=0,
+        coded_block_pattern_luma=pattern,
         coded_block_pattern_chroma=0,
-        transform_size_8x8=False,
+        transform_size_8x8=transform_size_8x8,
         intra16x16_luma_mode=0,
         chroma_prediction_mode=0,
         luma_4x4_modes=(),
@@ -393,7 +423,7 @@ def test_picture_deblocking_combines_intra_luma_ac_flags_per_block():
         SimpleNamespace(macroblock=decoded), dependency_slice, ((), ()), picture_set, 0
     )
 
-    assert metadata.nonzero[2]
+    assert tuple(index for index, flag in enumerate(metadata.nonzero) if flag) == expected
 
 
 def test_h264_decoder_stops_at_time_limit_between_macroblocks():

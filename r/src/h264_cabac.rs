@@ -2919,7 +2919,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         Ok(result)
     }
 
-    /// Decodes truncated-unary ref_idx_l0/l1 using a six-context offset bank.
+    /// Decodes unary ref_idx_l0/l1 using a six-context offset bank.
     pub fn decode_reference_index(
         &mut self,
         max_ref_idx_minus1: u32,
@@ -2950,10 +2950,13 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let mut ref_idx = 0_u8;
         if trial.decode_bin(&mut trial_contexts[neighbor_context_increment])? {
             ref_idx = 1;
-            while u32::from(ref_idx) < max_ref_idx_minus1 {
+            loop {
                 let context_index = if ref_idx == 1 { 4 } else { 5 };
                 if !trial.decode_bin(&mut trial_contexts[context_index])? {
                     break;
+                }
+                if u32::from(ref_idx) >= max_ref_idx_minus1 {
+                    return Err(invalid("ref_idx exceeds the active reference maximum"));
                 }
                 ref_idx += 1;
             }
@@ -4334,9 +4337,6 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let mut decoded = Vec::new();
         let mut macroblock_address = first_macroblock_address;
         loop {
-            let bit_offset_before = self.bits.bit_offset();
-            let range_before = self.code_range;
-            let offset_before = self.code_offset;
             if let Some(driver) = driver.as_deref_mut() {
                 driver.apply_ready(&mut decoded, builder)?;
             }
@@ -4375,29 +4375,6 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 }
             }
             let end_of_slice = self.decode_terminate_bin()?;
-            if (347..=350).contains(&macroblock_address) {
-                eprintln!(
-                    "mb={macroblock_address} bits={bit_offset_before}->{} range={range_before}->{} offset={offset_before}->{} eos={end_of_slice} kind={:?}",
-                    self.bits.bit_offset(),
-                    self.code_range,
-                    self.code_offset,
-                    decoded.last().map(|entry| match &entry.result {
-                        CabacSliceMacroblockResult::Intra(macroblock) => {
-                            format!("intra:{}", macroblock.macroblock_type)
-                        }
-                        CabacSliceMacroblockResult::Inter(layer) => match &layer.macroblock {
-                            CabacPBMacroblockPrediction::PSkip(_) => "p-skip".to_owned(),
-                            CabacPBMacroblockPrediction::BSkip(_) => "b-skip".to_owned(),
-                            CabacPBMacroblockPrediction::Inter(macroblock) => {
-                                format!("inter:{}", macroblock.macroblock_type)
-                            }
-                            CabacPBMacroblockPrediction::Intra(macroblock) => {
-                                format!("wrapped-intra:{}", macroblock.macroblock_type)
-                            }
-                        },
-                    })
-                );
-            }
             if end_of_slice {
                 return Ok(decoded);
             }
@@ -4762,19 +4739,37 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     x: difference[0],
                     y: difference[1],
                 };
-                let shape = match (specification.width, specification.height) {
-                    (16, 8) => crate::MotionVectorPartitionShape::SixteenByEight,
-                    (8, 16) => crate::MotionVectorPartitionShape::EightBySixteen,
-                    _ => crate::MotionVectorPartitionShape::Other,
+                let left = list_neighbors.left_candidate;
+                let top = list_neighbors.top_candidate;
+                let right = list_neighbors
+                    .top_right_candidate
+                    .or(list_neighbors.top_left_candidate);
+                let preferred = match (specification.width, specification.height) {
+                    (16, 8) if specification.y == 0 => top,
+                    (16, 8) => left,
+                    (8, 16) if specification.x == 0 => left,
+                    (8, 16) => right,
+                    _ => None,
+                };
+                let reference_index = reference_indices[partition_index][list_index];
+                let predicted = if let Some(candidate) =
+                    preferred.filter(|candidate| candidate.reference_index == Some(reference_index))
+                {
+                    candidate.vector
+                } else if top.is_none() && right.is_none() {
+                    left.map_or_default(|candidate| candidate.vector)
+                } else {
+                    crate::reconstruction::predict_motion_vector(
+                        reference_index,
+                        left,
+                        top,
+                        right,
+                        None,
+                    )
                 };
                 motion_vectors[partition_index][list_index] =
-                    crate::reconstruction::derive_motion_vector(
-                        shape,
-                        reference_indices[partition_index][list_index],
-                        list_neighbors.left_candidate,
-                        list_neighbors.top_candidate,
-                        list_neighbors.top_right_candidate,
-                        list_neighbors.top_left_candidate,
+                    crate::reconstruction::apply_motion_vector_difference(
+                        predicted,
                         crate::MotionVector {
                             x: difference[0],
                             y: difference[1],
@@ -7187,13 +7182,13 @@ mod tests {
     }
 
     #[test]
-    fn decodes_reference_index_truncated_unary_values() {
+    fn decodes_reference_index_unary_values() {
         for (maximum, increment, mps, expected) in [
             (0, 0, [false; 6], 0),
             (3, 2, [false; 6], 0),
             (3, 1, [false, true, false, false, false, false], 1),
             (3, 0, [true, false, false, false, true, false], 2),
-            (3, 3, [false, false, false, true, true, true], 3),
+            (2, 3, [false, false, false, true, true, false], 2),
         ] {
             let mut decoder = decoder_with_state(&[], 510, 0);
             let mut contexts = [CabacContextModel {
@@ -7208,6 +7203,46 @@ mod tests {
                     .decode_reference_index(maximum, increment, &mut contexts)
                     .unwrap(),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn reference_index_maximum_consumes_terminator_and_rejects_excess() {
+        for maximum in [1, 2] {
+            let mut decoder = decoder_with_state(&[], 510, 0);
+            let mut contexts = [CabacContextModel {
+                state_index: 63,
+                value_mps: true,
+            }; 6];
+            let terminator = if maximum == 1 { 4 } else { 5 };
+            contexts[terminator] = CabacContextModel {
+                state_index: 10,
+                value_mps: false,
+            };
+            assert_eq!(
+                decoder
+                    .decode_reference_index(maximum, 0, &mut contexts)
+                    .unwrap(),
+                maximum as u8
+            );
+            assert_eq!(contexts[terminator].state_index(), 11);
+
+            let mut decoder = decoder_with_state(&[], 510, 0);
+            contexts[terminator] = CabacContextModel {
+                state_index: 63,
+                value_mps: true,
+            };
+            let original_contexts = contexts;
+            assert!(decoder
+                .decode_reference_index(maximum, 0, &mut contexts)
+                .is_err());
+            assert_eq!(decoder.code_range, 510);
+            assert_eq!(decoder.code_offset, 0);
+            assert_eq!(decoder.bits.bit_offset(), 0);
+            assert_eq!(
+                contexts.map(|model| (model.state_index, model.value_mps)),
+                original_contexts.map(|model| (model.state_index, model.value_mps))
             );
         }
     }
@@ -8056,6 +8091,7 @@ mod tests {
         let mut encoder = TestEncoder::new();
         encode_inter_macroblock_type(&mut encoder, &mut encoder_contexts, 0, 0);
         encoder.encode_bin_string(&mut encoder_contexts, "1", &|_, _| 54);
+        encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| 58);
         encoder.encode_bin_string(&mut encoder_contexts, "1", &|_, _| 40);
         encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| 43);
         encoder.bypass(false);
@@ -8122,7 +8158,9 @@ mod tests {
         let mut encoder = TestEncoder::new();
         encode_inter_macroblock_type(&mut encoder, &mut encoder_contexts, 1, 3);
         encoder.encode_bin_string(&mut encoder_contexts, "1", &|_, _| 54);
+        encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| 58);
         encoder.encode_bin_string(&mut encoder_contexts, "1", &|_, _| 54);
+        encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| 58);
         for context_index in [40, 47, 40, 47] {
             encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| context_index);
         }
@@ -8160,6 +8198,62 @@ mod tests {
             .zip(encoder_contexts.iter())
             .all(|(decoded, encoded)| (decoded.state_index(), decoded.mps())
                 == (encoded.state_index(), encoded.mps())));
+    }
+
+    #[test]
+    fn inter_macroblock_motion_predictor_uses_partition_position() {
+        for (macroblock_type, expected) in [(1, [(30, 40), (10, 20)]), (2, [(10, 20), (50, 60)])] {
+            let slice_contexts = new_cabac_slice_contexts(0, 0, 26).unwrap();
+            let mut encoder_contexts = slice_contexts.clone();
+            let mut encoder = TestEncoder::new();
+            encode_inter_macroblock_type(&mut encoder, &mut encoder_contexts, 0, macroblock_type);
+            for context in [40, 47, 40, 47] {
+                encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| context);
+            }
+            let candidate = |x, y| {
+                Some(crate::MotionVectorCandidate {
+                    reference_index: Some(0),
+                    vector: crate::MotionVector { x, y },
+                })
+            };
+            let neighbors = CabacInterPartitionNeighbors {
+                list0: CabacInterListNeighbors {
+                    left_candidate: candidate(10, 20),
+                    top_candidate: candidate(30, 40),
+                    top_right_candidate: candidate(50, 60),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let input = CabacInterMacroblockInput {
+                slice_type: 0,
+                macroblock_x: 0,
+                macroblock_y: 0,
+                left_available: true,
+                top_available: true,
+                left_b_skip_or_direct: false,
+                top_b_skip_or_direct: false,
+                max_reference_index_minus1: [0, 0],
+                reference_lists: [vec![b_reference(128, 0)], Vec::new()],
+                partition_neighbors: vec![neighbors; 2],
+            };
+            let data = encoder.data();
+            let mut decoder = CabacArithmeticDecoder::new(&data).unwrap();
+            let mut contexts = slice_contexts.try_into().unwrap_or_else(|_| unreachable!());
+            let mut builder = crate::Yuv420FrameBuilder::new(1, 1, 0, 0, 0, 0).unwrap();
+            let result = decoder
+                .decode_inter_macroblock(input, &mut contexts, &mut builder, 0)
+                .unwrap();
+            for (partition, (x, y)) in result.partitions.iter().zip(expected) {
+                assert_eq!(partition.motion_vectors[0], crate::MotionVector { x, y });
+            }
+            assert!(contexts
+                .iter()
+                .zip(encoder_contexts)
+                .all(|(decoded, encoded)| {
+                    (decoded.state_index(), decoded.mps()) == (encoded.state_index(), encoded.mps())
+                }));
+        }
     }
 
     #[test]

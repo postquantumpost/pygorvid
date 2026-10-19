@@ -781,7 +781,7 @@ func TestCABACMBSkipFlagContextDerivation(t *testing.T) {
 	}
 }
 
-func TestCABACReferenceIndexTruncatedUnary(t *testing.T) {
+func TestCABACReferenceIndexUnary(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		maximum uint32
@@ -793,7 +793,7 @@ func TestCABACReferenceIndexTruncatedUnary(t *testing.T) {
 		{name: "zero", maximum: 3, inc: 2, want: 0},
 		{name: "one", maximum: 3, inc: 1, mps: [6]bool{false, true, false, false, false, false}, want: 1},
 		{name: "two", maximum: 3, inc: 0, mps: [6]bool{true, false, false, false, true, false}, want: 2},
-		{name: "maximum", maximum: 3, inc: 3, mps: [6]bool{false, false, false, true, true, true}, want: 3},
+		{name: "maximum", maximum: 2, inc: 3, mps: [6]bool{false, false, false, true, true, false}, want: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
@@ -923,31 +923,32 @@ func TestCABACInterMVDContextIncrement(t *testing.T) {
 	}
 }
 
-func TestCABACReferenceIndexValuesAndMaximumTruncation(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		maximum uint32
-		inc     uint8
-		mps     [6]bool
-		want    uint8
-	}{
-		{name: "inferred zero", maximum: 0, want: 0},
-		{name: "zero", maximum: 3, inc: 2, want: 0},
-		{name: "one", maximum: 3, inc: 1, mps: [6]bool{false, true, false, false, false, false}, want: 1},
-		{name: "two", maximum: 3, inc: 0, mps: [6]bool{true, false, false, false, true, false}, want: 2},
-		{name: "maximum", maximum: 3, inc: 3, mps: [6]bool{false, false, false, true, true, true}, want: 3},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
-			var contexts [6]CABACContextModel
-			for index := range contexts {
-				contexts[index] = CABACContextModel{stateIndex: 63, valueMPS: test.mps[index]}
-			}
-			got, err := decoder.DecodeReferenceIndex(test.maximum, test.inc, &contexts)
-			if err != nil || got != test.want {
-				t.Fatalf("ref_idx = %d, %v; want %d", got, err, test.want)
-			}
-		})
+func TestCABACReferenceIndexMaximumTermination(t *testing.T) {
+	for _, maximum := range []uint32{1, 2} {
+		decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+		var contexts [6]CABACContextModel
+		for index := range contexts {
+			contexts[index] = CABACContextModel{stateIndex: 63, valueMPS: true}
+		}
+		terminator := 4
+		if maximum == 2 {
+			terminator = 5
+		}
+		contexts[terminator] = CABACContextModel{stateIndex: 10}
+		got, err := decoder.DecodeReferenceIndex(maximum, 0, &contexts)
+		if err != nil || uint32(got) != maximum || contexts[terminator].stateIndex != 11 {
+			t.Fatalf("maximum %d: ref_idx=%d, err=%v, terminator=%+v", maximum, got, err, contexts[terminator])
+		}
+
+		decoder = &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510}
+		contexts[terminator] = CABACContextModel{stateIndex: 63, valueMPS: true}
+		originalContexts := contexts
+		if _, err := decoder.DecodeReferenceIndex(maximum, 0, &contexts); !errors.Is(err, ErrCABACUnsupportedSyntax) {
+			t.Fatalf("maximum %d: excess reference index error = %v", maximum, err)
+		}
+		if decoder.codeRange != 510 || decoder.codeOffset != 0 || decoder.bits.bitOffset != 0 || contexts != originalContexts {
+			t.Fatal("invalid reference index mutated decoder or contexts")
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -106,6 +107,52 @@ func sampleReaderFixture(useCo64, constantSize bool, avcc []byte) ([]byte, [][]b
 	moov := makeMoov(offsets)
 	data := append(append(append(ftyp, free...), moov...), mkbox("mdat", samples...)...)
 	return data, samples
+}
+
+func TestVideoSampleReaderIdentifiesHEVC(t *testing.T) {
+	configuration := make([]byte, 23)
+	configuration[0], configuration[1], configuration[12] = 1, 2, 120
+	configuration[13], configuration[15], configuration[16] = 0xf0, 0xfc, 0xfd
+	configuration[17], configuration[18], configuration[21], configuration[22] = 0xfa, 0xfa, 3, 3
+	for _, nalType := range []byte{32, 33, 34} {
+		configuration = append(configuration, 0x80|nalType, 0, 1, 0, 3, nalType<<1, 1, 0x80)
+	}
+	for _, kind := range []string{"hvc1", "hev1"} {
+		for count := 0; count <= 2; count++ {
+			t.Run(fmt.Sprintf("%s/%d-configurations", kind, count), func(t *testing.T) {
+				entry := make([]byte, 78)
+				for range count {
+					entry = append(entry, mkbox("hvcC", configuration)...)
+				}
+				stsd := make([]byte, 8)
+				binary.BigEndian.PutUint32(stsd[4:], 1)
+				stsd = append(stsd, mkbox(kind, entry)...)
+				mdhd := make([]byte, 20)
+				binary.BigEndian.PutUint32(mdhd[12:], 1000)
+				stbl := mkbox("stbl", mkbox("stsd", stsd), mkbox("stsz", make([]byte, 12)), mkbox("stsc", make([]byte, 8)), mkbox("stts", make([]byte, 8)), mkbox("stco", make([]byte, 8)))
+				mdia := mkbox("mdia", mkbox("mdhd", mdhd), mkbox("hdlr", make([]byte, 8), []byte("vide")), mkbox("minf", stbl))
+				path := filepath.Join(t.TempDir(), "hevc.mp4")
+				if err := os.WriteFile(path, mkbox("moov", mkbox("trak", mdia)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				reader, err := OpenVideoSampleReader(path)
+				if count == 1 {
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer reader.Close()
+					if reader.Codec() != CodecHEVC || reader.HEVCConfiguration().BitDepthLuma != 10 || reader.SampleCount() != 0 {
+						t.Fatal("incorrect HEVC track metadata")
+					}
+					if _, err := NewVideoDecoder(reader); err == nil {
+						t.Fatal("empty HEVC track bypassed decoder availability check")
+					}
+				} else if err == nil || err.Error() != "HEVC sample entry must contain one hvcC box" {
+					t.Fatalf("got %v, want invalid configuration count", err)
+				}
+			})
+		}
+	}
 }
 
 func TestVideoSampleReaderCompactFixtures(t *testing.T) {

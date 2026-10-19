@@ -22,6 +22,8 @@ func run(args []string) int {
 	input := flags.String("input", "", "first input video file")
 	output := flags.String("output", "", "output image path (.png or .jpg)")
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
+	readAll := flags.Bool("readall", false, "decode all video frames without writing images")
+	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
 	prefix := flags.String("prefix", "", "prefix prepended to the output image filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
 	if err := flags.Parse(flagsFirst(args)); err != nil {
@@ -49,6 +51,10 @@ func run(args []string) int {
 		printUsage()
 		return 2
 	}
+	if *readAll && (frameSet || *output != "") {
+		fmt.Fprintln(os.Stderr, "--readall cannot be used with --extractframe or --output")
+		return 2
+	}
 	if frameSet || *output != "" {
 		if !frameSet || *output == "" {
 			fmt.Fprintln(os.Stderr, "--extractframe and --output must be used together")
@@ -63,7 +69,7 @@ func run(args []string) int {
 			return 2
 		}
 		outputPath := prefixedOutput(*output, *prefix)
-		if err := extractFrame(paths[0], *frame, outputPath, *threads); err != nil {
+		if err := extractFrame(paths[0], *frame, outputPath, *threads, *verbose); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", paths[0], err)
 			return 1
 		}
@@ -72,6 +78,16 @@ func run(args []string) int {
 	}
 	status := 0
 	for _, p := range paths {
+		if *readAll {
+			count, err := readAllFrames(p, *threads, *verbose)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
+				status = 1
+			} else {
+				fmt.Printf("%s: read %d frames\n", p, count)
+			}
+			continue
+		}
 		v := vid.OpenFile(p)
 		if v.IsOpen() {
 			info := v.GetBasicInfo()
@@ -142,7 +158,42 @@ func flagsFirst(args []string) []string {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+}
+
+func readAllFrames(input string, threads int, verbose bool) (int, error) {
+	reader, err := vid.OpenVideoSampleReader(input)
+	if err != nil {
+		return 0, err
+	}
+	defer reader.Close()
+	decoder, err := vid.NewVideoDecoder(reader)
+	if err != nil {
+		return 0, err
+	}
+	decoder.SetThreads(threads)
+	decoder.SetVerbose(verbose)
+	count := reader.SampleCount()
+	for index := 0; index < count; index++ {
+		if index > 0 {
+			sample, err := reader.SampleAt(uint64(index))
+			if err != nil {
+				return index, fmt.Errorf("decode frame %d: read sample: %w", index, err)
+			}
+			if sample.IsSync {
+				decoder, err = vid.NewVideoDecoder(reader)
+				if err != nil {
+					return index, err
+				}
+				decoder.SetThreads(threads)
+				decoder.SetVerbose(verbose)
+			}
+		}
+		if _, err := decoder.DecodeFrame(uint64(index)); err != nil {
+			return index, fmt.Errorf("decode frame %d: %w", index, err)
+		}
+	}
+	return count, nil
 }
 
 func prefixedOutput(output, prefix string) string {
@@ -168,7 +219,7 @@ func writeOutputFile(output string, payload []byte) error {
 	return os.Rename(tempPath, output)
 }
 
-func extractFrame(input string, frame int, output string, threads int) error {
+func extractFrame(input string, frame int, output string, threads int, verbose bool) error {
 	extension := strings.ToLower(filepath.Ext(output))
 	if extension != ".png" && extension != ".jpg" {
 		return errors.New("--output must end in .png or .jpg")
@@ -178,8 +229,12 @@ func extractFrame(input string, frame int, output string, threads int) error {
 		return err
 	}
 	defer reader.Close()
-	decoder := vid.NewH264Decoder(reader)
+	decoder, err := vid.NewVideoDecoder(reader)
+	if err != nil {
+		return err
+	}
 	decoder.SetThreads(threads)
+	decoder.SetVerbose(verbose)
 	decoded, err := decoder.DecodeFrame(uint64(frame))
 	if err != nil {
 		return err

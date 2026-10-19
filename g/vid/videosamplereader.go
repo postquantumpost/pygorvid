@@ -1,7 +1,6 @@
 package vid
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -9,17 +8,6 @@ import (
 	"os"
 	"sort"
 )
-
-// AVCConfiguration describes the selected video track's AVC sample entry.
-type AVCConfiguration struct {
-	Profile       uint8
-	ProfileCompat uint8
-	Level         uint8
-	NALLengthSize uint8
-	SequenceSets  [][]byte
-	PictureSets   [][]byte
-	Timescale     uint32
-}
 
 // CompressedSample contains one length-prefixed MP4 video sample.
 type CompressedSample struct {
@@ -44,7 +32,7 @@ type sampleLocation struct {
 type VideoSampleReader struct {
 	file          *os.File
 	path          string
-	configuration AVCConfiguration
+	configuration CodecConfiguration
 	samples       []sampleLocation
 	nextIndex     int
 }
@@ -98,38 +86,9 @@ func newVideoSampleReader(file *os.File) (*VideoSampleReader, error) {
 	if len(stsd.entries) != 1 {
 		return nil, errors.New("multiple video sample descriptions are unsupported")
 	}
-	var avcEntry *avc1Box
-	for _, entry := range stsd.entries {
-		if typed, isAVC := entry.(*avc1Box); isAVC {
-			if avcEntry != nil {
-				return nil, errors.New("multiple avc1 sample descriptions are unsupported")
-			}
-			avcEntry = typed
-		}
-	}
-	if avcEntry == nil {
-		return nil, errors.New("first video track has no avc1 sample description")
-	}
-	var avcConfig *avcCBox
-	for _, child := range avcEntry.children {
-		if typed, isConfig := child.(*avcCBox); isConfig {
-			if avcConfig != nil {
-				return nil, errors.New("multiple avcC boxes are unsupported")
-			}
-			avcConfig = typed
-		}
-	}
-	if avcConfig == nil {
-		return nil, errors.New("avc1 sample description has no avcC box")
-	}
-	configuration := AVCConfiguration{
-		Profile:       avcConfig.profile,
-		ProfileCompat: avcConfig.profileCompat,
-		Level:         avcConfig.level,
-		NALLengthSize: avcConfig.nalLengthSize,
-		SequenceSets:  cloneNALUnits(avcConfig.sequenceSets),
-		PictureSets:   cloneNALUnits(avcConfig.pictureSets),
-		Timescale:     mdhd.timescale,
+	configuration, err := readCodecConfiguration(stsd.entries[0], mdhd.timescale)
+	if err != nil {
+		return nil, err
 	}
 
 	stsz, err := oneVideoBox[*stszBox](track, "stsz")
@@ -377,38 +336,29 @@ func insideMediaRange(start, end uint64, ranges [][2]uint64) bool {
 	return false
 }
 
-func cloneNALUnits(nals [][]byte) [][]byte {
-	clones := make([][]byte, len(nals))
-	for index, nal := range nals {
-		clones[index] = append([]byte(nil), nal...)
-	}
-	return clones
-}
-
-func validateLengthPrefixedNALs(data []byte) error {
-	for offset := 0; offset < len(data); {
-		if len(data)-offset < 4 {
-			return errors.New("truncated NAL length prefix")
-		}
-		nalSize := uint64(binary.BigEndian.Uint32(data[offset : offset+4]))
-		offset += 4
-		if nalSize == 0 {
-			return errors.New("NAL unit has zero length")
-		}
-		if nalSize > uint64(len(data)-offset) {
-			return errors.New("NAL unit is truncated")
-		}
-		offset += int(nalSize)
-	}
-	return nil
-}
-
 // Configuration returns a deep copy so callers cannot mutate reader state.
 func (r *VideoSampleReader) Configuration() AVCConfiguration {
-	configuration := r.configuration
-	configuration.SequenceSets = cloneNALUnits(r.configuration.SequenceSets)
-	configuration.PictureSets = cloneNALUnits(r.configuration.PictureSets)
+	if r.configuration.AVC == nil {
+		return AVCConfiguration{}
+	}
+	configuration := *r.configuration.AVC
+	configuration.SequenceSets = cloneNALUnits(configuration.SequenceSets)
+	configuration.PictureSets = cloneNALUnits(configuration.PictureSets)
 	return configuration
+}
+
+func (r *VideoSampleReader) Codec() VideoCodec { return r.configuration.Codec }
+
+func (r *VideoSampleReader) HEVCConfiguration() *HEVCConfiguration {
+	if r.configuration.HEVC == nil {
+		return nil
+	}
+	configuration := *r.configuration.HEVC
+	configuration.Arrays = make([]HEVCNALArray, len(r.configuration.HEVC.Arrays))
+	for index, array := range r.configuration.HEVC.Arrays {
+		configuration.Arrays[index] = HEVCNALArray{Complete: array.Complete, NALType: array.NALType, Units: cloneNALUnits(array.Units)}
+	}
+	return &configuration
 }
 
 func (r *VideoSampleReader) SampleCount() int { return len(r.samples) }
@@ -517,7 +467,7 @@ func (r *VideoSampleReader) sampleAtIndex(index int) (CompressedSample, error) {
 	if n != len(data) {
 		return CompressedSample{}, io.ErrUnexpectedEOF
 	}
-	if err := validateLengthPrefixedNALs(data); err != nil {
+	if err := validateLengthPrefixedNALs(data, r.configuration.nalLengthSize()); err != nil {
 		return CompressedSample{}, fmt.Errorf("sample %d: %w", index, err)
 	}
 	return CompressedSample{

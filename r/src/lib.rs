@@ -2,17 +2,31 @@
 
 mod basicinfo;
 mod bitreader;
+#[path = "h264_cabac.rs"]
 mod cabac;
+#[path = "h264_cabac_init.rs"]
 mod cabac_init;
+mod codec;
+mod codec_frame;
+mod codec_sample;
+mod h264_mp4;
+mod hevc_mp4;
+#[path = "h264_decoder.rs"]
 mod decoder;
+mod hevc_decoder;
 mod imageencoder;
 mod jpegencoder;
 mod mp4boxes;
 mod mp4file;
+#[path = "h264_nal.rs"]
 mod nal;
+#[path = "h264_pps.rs"]
 mod pps;
+#[path = "h264_reconstruction.rs"]
 mod reconstruction;
+#[path = "h264_slice.rs"]
 mod slice;
+#[path = "h264_sps.rs"]
 mod sps;
 mod videosamplereader;
 mod vidfile;
@@ -44,9 +58,13 @@ pub use cabac::{
     Intra16x16LumaMacroblockResult, Intra4x4LumaMacroblockResult, IntraChroma420MacroblockResult,
     CABAC_CONTEXT_COUNT,
 };
-pub use decoder::{default_decoder_threads, DecodeError, DependencySlice, H264Decoder};
+pub use decoder::{DecodeError, DependencySlice, H264Decoder};
+pub use codec::{default_decoder_threads, CodecConfiguration, CodecError, CodecErrorCode, VideoCodec, VideoDecoder};
+pub use codec_frame::Yuv420Frame;
+pub use hevc_decoder::HevcDecoder;
 pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
-pub use mp4boxes::AvcConfiguration;
+pub use h264_mp4::AvcConfiguration;
+pub use hevc_mp4::{HevcConfiguration, HevcNalArray};
 pub use mp4file::Mp4File;
 pub use nal::{ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals, NalHeader};
 pub use pps::{parse_pps, PpsInfo};
@@ -95,7 +113,7 @@ pub use reconstruction::{
     LumaDeblockingParameters, LumaDeblockingThresholds, LumaEdgeSamples, LumaIntra4x4Block,
     LumaStrongEdgeSamples, MotionVector, MotionVectorCandidate, MotionVectorPartitionShape,
     PocType0State, PocType12State, PresentationOrderBuffer, PresentationPicture, ReferencePicture,
-    ReferencePictureBuffer, Yuv420Frame, Yuv420FrameBuilder,
+    ReferencePictureBuffer, Yuv420FrameBuilder,
 };
 pub use slice::{
     group_slices_into_pictures, parse_slice_header, same_primary_picture, PictureIdentity,

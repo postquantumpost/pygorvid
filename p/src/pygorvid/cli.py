@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .colorconv import PixelConverter
-from .decoder import DecoderError, H264Decoder, default_decoder_threads
+from .codec import DecoderError, create_decoder, default_decoder_threads
 from .jpegencoder import JPEGEncoder
 from .mp4boxes import Mp4FormatError
 from .pixelbuffer import PixelColorRange
@@ -45,14 +45,17 @@ def _positive_int(value: str) -> int:
     return count
 
 
-def _extract_frame(input_path: str, frame: int, output_path: str, threads: "int | None" = None) -> None:
+def _extract_frame(
+    input_path: str, frame: int, output_path: str,
+    threads: "int | None" = None, verbose: bool = False,
+) -> None:
     output = Path(output_path)
     extension = output.suffix.lower()
     if extension not in {".png", ".jpg"}:
         raise ValueError("--output must end in .png or .jpg")
     reader = VideoSampleReader(input_path)
     try:
-        decoded = H264Decoder(reader, threads=threads).decode_frame(frame)
+        decoded = create_decoder(reader, threads=threads, debug_progress=verbose).decode_frame(frame)
     finally:
         reader.close()
     rgb = PixelConverter(PixelColorRange.LIMITED).convert_yuv420_to_rgb(
@@ -66,11 +69,31 @@ def _extract_frame(input_path: str, frame: int, output_path: str, threads: "int 
         temporary.replace(output)
 
 
+def _read_all_frames(
+    input_path: str, threads: "int | None" = None, verbose: bool = False,
+) -> int:
+    reader = VideoSampleReader(input_path)
+    try:
+        decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
+        for index in range(reader.sample_count):
+            try:
+                if index > 0 and reader.sample_at(index).is_sync:
+                    decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
+                decoder.decode_frame(index)
+            except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
+                raise DecoderError(f"decode frame {index}: {error}") from error
+        return reader.sample_count
+    finally:
+        reader.close()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="vidprobe")
     parser.add_argument("--input", help="first input video file")
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
+    parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
+    parser.add_argument("--verbose", action="store_true", help="print decoder progress and debug information")
     parser.add_argument(
         "--extractframe",
         type=_nonnegative_int,
@@ -88,6 +111,8 @@ def main(argv=None) -> int:
     if not files:
         parser.print_usage(sys.stderr)
         return 2
+    if args.readall and (args.extractframe is not None or args.output is not None):
+        parser.error("--readall cannot be used with --extractframe or --output")
     if (args.extractframe is None) != (args.output is None):
         parser.error("--extractframe and --output must be used together")
     if args.extractframe is not None:
@@ -97,7 +122,7 @@ def main(argv=None) -> int:
         if args.prefix is not None:
             output = output.with_name(args.prefix + output.name)
         try:
-            _extract_frame(files[0], args.extractframe, str(output), args.threads)
+            _extract_frame(files[0], args.extractframe, str(output), args.threads, args.verbose)
         except (OSError, ValueError, DecoderError, Mp4FormatError) as e:
             print(f"{files[0]}: {e}", file=sys.stderr)
             return 1
@@ -105,6 +130,15 @@ def main(argv=None) -> int:
         return 0
     status = 0
     for path in files:
+        if args.readall:
+            try:
+                count = _read_all_frames(path, args.threads, args.verbose)
+            except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
+                print(f"{path}: {error}", file=sys.stderr)
+                status = 1
+            else:
+                print(f"{path}: read {count} frames")
+            continue
         with openfile(path) as v:
             if v.isopen():
                 info = v.getbasicinfo()

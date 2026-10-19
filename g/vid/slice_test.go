@@ -166,7 +166,19 @@ func TestParseSliceHeaderPOCModesAndFieldFlags(t *testing.T) {
 func TestParseSliceHeaderIPBBranchesAndRedundantCount(t *testing.T) {
 	sps := parseTestSPS(t, makeCompleteSPS(100, 0, 42, "1"+"010"+"1"+"1", 0, 0, true, [4]uint32{}))
 	pps := makeSlicePPS(false)
+	pps.NumRefIdxL0DefaultActiveMinus1 = 4
+	pps.NumRefIdxL1DefaultActiveMinus1 = 2
 	frameAndPOC := fixedSliceBits(3, 4) + fixedSliceBits(5, 4)
+	for _, sliceType := range []uint32{0, 1, 5, 6} {
+		header, err := ParseSliceHeader(makeSliceNAL(0x41, 0, sliceType, 0, frameAndPOC), sps, pps)
+		wantL1 := uint32(0)
+		if sliceType%5 == 1 {
+			wantL1 = 2
+		}
+		if err != nil || header.NumRefIdxActiveOverride || header.NumRefIdxL0ActiveMinus1 != 4 || header.NumRefIdxL1ActiveMinus1 != wantL1 {
+			t.Fatalf("slice type %d did not inherit PPS reference counts: %+v, %v", sliceType, header, err)
+		}
+	}
 
 	iSlice, err := ParseSliceHeader(makeSliceNAL(0x41, 0, 2, 0, frameAndPOC), sps, pps)
 	if err != nil || iSlice.NumRefIdxActiveOverride || iSlice.HasDirectSpatialMVPred {

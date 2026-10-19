@@ -91,6 +91,38 @@ def make_mp4(
     return ftyp + moov + box(b"mdat", b"".join(samples)), samples
 
 
+@pytest.mark.parametrize("kind", [b"hvc1", b"hev1"])
+@pytest.mark.parametrize("configuration_count", [0, 1, 2])
+def test_video_sample_reader_identifies_hevc(tmp_path, kind, configuration_count):
+    configuration = bytearray(23)
+    configuration[0], configuration[1], configuration[12] = 1, 2, 120
+    configuration[13], configuration[15], configuration[16] = 0xF0, 0xFC, 0xFD
+    configuration[17], configuration[18], configuration[21], configuration[22] = 0xFA, 0xFA, 3, 3
+    for nal_type in (32, 33, 34):
+        configuration.extend((0x80 | nal_type, 0, 1, 0, 3, nal_type << 1, 1, 0x80))
+    entry = bytes(78) + box(b"hvcC", configuration) * configuration_count
+    stsd = box(b"stsd", struct.pack(">II", 0, 1) + box(kind, entry))
+    mdhd = bytearray(20)
+    struct.pack_into(">I", mdhd, 12, 1000)
+    stbl = box(b"stbl", stsd + box(b"stsz", bytes(12)) + box(b"stsc", bytes(8))
+               + box(b"stts", bytes(8)) + box(b"stco", bytes(8)))
+    mdia = box(b"mdia", box(b"mdhd", mdhd) + box(b"hdlr", bytes(8) + b"vide")
+               + box(b"minf", stbl))
+    path = tmp_path / "hevc.mp4"
+    path.write_bytes(box(b"moov", box(b"trak", mdia)))
+    if configuration_count == 1:
+        from pygorvid import CodecError, VideoCodec, create_decoder
+        with VideoSampleReader(path) as reader:
+            assert reader.codec == VideoCodec.HEVC
+            assert reader.configuration.bit_depth_luma == 10
+            assert reader.sample_count == 0
+            with pytest.raises(CodecError):
+                create_decoder(reader)
+    else:
+        with pytest.raises(Mp4FormatError, match="HEVC sample entry must contain one hvcC box"):
+            VideoSampleReader(path)
+
+
 @pytest.mark.parametrize(
     ("offset_kind", "constant_sample_size"),
     [(b"stco", False), (b"co64", True)],

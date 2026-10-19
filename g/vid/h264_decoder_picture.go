@@ -172,12 +172,6 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 	if len(samples) == 0 {
 		return Yuv420Frame{}, ErrDecoderFrameIndexOutOfRange
 	}
-	if decoder.nativeSyncSample != int64(samples[0].Index) {
-		decoder.referencePictureBuffer = &ReferencePictureBuffer{}
-		decoder.nativeReferenceBlocks = make(map[uint32][]nativeMacroblock)
-		decoder.nativePOC0, decoder.nativePOC12 = POCType0State{}, POCType12State{}
-		decoder.nativeSyncSample, decoder.nativeLastSample = int64(samples[0].Index), int64(samples[0].Index)-1
-	}
 	order := make([]int, len(decoder.sampleReader.samples))
 	for position := range order {
 		order[position] = position
@@ -189,6 +183,23 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 	for position, codedIndex := range order {
 		displayIndices[codedIndex] = uint64(position)
 	}
+	targetSampleIndex := -1
+	for codedIndex, displayIndex := range displayIndices {
+		if displayIndex == index {
+			targetSampleIndex = codedIndex
+			break
+		}
+	}
+	if decoder.nativeSyncSample != int64(samples[0].Index) || decoder.nativeLastSample < 0 ||
+		(targetSampleIndex >= 0 && decoder.nativeLastSample >= int64(targetSampleIndex)) {
+		decoder.referencePictureBuffer = &ReferencePictureBuffer{}
+		decoder.nativeReferenceBlocks = make(map[uint32][]nativeMacroblock)
+		decoder.nativePOC0, decoder.nativePOC12 = POCType0State{}, POCType12State{}
+		decoder.nativeMaximumLongTerm = -1
+		decoder.nativeSyncSample, decoder.nativeLastSample = int64(samples[0].Index), int64(samples[0].Index)-1
+	}
+	var requestedFrame Yuv420Frame
+	requestedFrameFound := false
 	for _, sample := range samples {
 		if int64(sample.Index) <= decoder.nativeLastSample {
 			continue
@@ -230,8 +241,14 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 				return Yuv420Frame{}, err
 			}
 		}
-		decoder.decodedFrames[displayIndex] = frame
+		decoder.cacheDecodedFrame(displayIndex, frame)
+		if displayIndex == index {
+			requestedFrame, requestedFrameFound = frame, true
+		}
 		decoder.nativeLastSample = int64(sample.Index)
+	}
+	if requestedFrameFound {
+		return cloneNativeFrame(requestedFrame), nil
 	}
 	frame, ok := decoder.decodedFrames[index]
 	if !ok {

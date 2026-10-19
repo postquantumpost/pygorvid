@@ -335,6 +335,11 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
                         return Err(invalid("num_ref_idx_l1_active_minus1 exceeds 31"));
                     }
                 }
+            } else {
+                header.num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
+                if header.slice_type % 5 == 1 {
+                    header.num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
+                }
             }
         }
         _ => {

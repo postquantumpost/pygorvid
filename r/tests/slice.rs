@@ -245,8 +245,20 @@ fn parses_poc_modes_and_field_picture_identity() {
 #[test]
 fn parses_i_p_b_prefixes_and_redundant_picture_count() {
     let sps = make_sps(0, false, true);
-    let pps = make_pps(false);
+    let mut pps = make_pps(false);
+    pps.num_ref_idx_l0_default_active_minus1 = 4;
+    pps.num_ref_idx_l1_default_active_minus1 = 2;
     let frame_and_poc = fixed_bits(3, 4) + &fixed_bits(5, 4);
+    for slice_type in [0, 1, 5, 6] {
+        let nal = make_slice(0x41, 0, slice_type, 0, &frame_and_poc);
+        let header = parse_slice_header(&nal, &sps, &pps).unwrap();
+        assert!(!header.num_ref_idx_active_override);
+        assert_eq!(header.num_ref_idx_l0_active_minus1, 4);
+        assert_eq!(
+            header.num_ref_idx_l1_active_minus1,
+            if slice_type % 5 == 1 { 2 } else { 0 }
+        );
+    }
 
     let i_slice = make_slice(0x41, 0, 2, 0, &frame_and_poc);
     let header = parse_slice_header(&i_slice, &sps, &pps).unwrap();

@@ -270,69 +270,7 @@ class MdatBox(Box):
         self.data_end = header.end
 
 
-class AvcCBox(Box):
-    def __init__(self, header: BoxHeader) -> None:
-        super().__init__(header)
-        self.profile = 0
-        self.profile_compat = 0
-        self.level = 0
-        self.nal_length_size = 0
-        self.sequence_sets: List[bytes] = []
-        self.picture_sets: List[bytes] = []
-
-    def read(self, f: BinaryIO) -> None:
-        payload_size = self.header.end - self.header.payload_start
-        if payload_size < 7:
-            raise Mp4FormatError("avcC box too short")
-        f.seek(self.header.payload_start)
-        data = f.read(payload_size)
-        if len(data) != payload_size or data[0] != 1:
-            raise Mp4FormatError("invalid AVCDecoderConfigurationRecord")
-        if data[4] & 0xFC != 0xFC or data[5] & 0xE0 != 0xE0:
-            raise Mp4FormatError("avcC reserved bits are invalid")
-        if data[4] & 0x03 != 0x03:
-            raise Mp4FormatError("only four-byte AVC NAL length prefixes are supported")
-        self.profile, self.profile_compat, self.level = data[1:4]
-        self.nal_length_size = 4
-        sequence_count = data[5] & 0x1F
-        if sequence_count == 0:
-            raise Mp4FormatError("avcC contains no sequence parameter sets")
-        self.sequence_sets, offset = _read_avcc_nals(data, 6, sequence_count, 7)
-        if offset >= len(data):
-            raise Mp4FormatError("avcC picture-set count missing")
-        picture_count = data[offset]
-        if picture_count == 0:
-            raise Mp4FormatError("avcC contains no picture parameter sets")
-        self.picture_sets, offset = _read_avcc_nals(data, offset + 1, picture_count, 8)
-        if offset < len(data):
-            if self.profile not in {44, 83, 86, 100, 110, 118, 122, 128, 134, 135, 138, 139, 144, 244} or len(data) - offset < 4:
-                raise Mp4FormatError("avcC has invalid trailing data")
-            if data[offset] & 0xFC != 0xFC or data[offset + 1] & 0xF8 != 0xF8 or data[offset + 2] & 0xF8 != 0xF8:
-                raise Mp4FormatError("avcC extension reserved bits are invalid")
-            extension_count = data[offset + 3]
-            _, offset = _read_avcc_nals(data, offset + 4, extension_count, 13)
-        if offset != len(data):
-            raise Mp4FormatError("avcC has invalid trailing data")
-
-
-def _read_avcc_nals(data: bytes, offset: int, count: int, nal_type: int) -> Tuple[List[bytes], int]:
-    nals = []
-    for _ in range(count):
-        if offset + 2 > len(data):
-            raise Mp4FormatError("avcC NAL length truncated")
-        size = struct.unpack(">H", data[offset : offset + 2])[0]
-        offset += 2
-        end = offset + size
-        if size == 0 or end > len(data):
-            raise Mp4FormatError("avcC NAL exceeds box size")
-        if data[offset] & 0x80 or data[offset] & 0x1F != nal_type:
-            raise Mp4FormatError(f"avcC parameter-set NAL has unexpected type; want {nal_type}")
-        nals.append(data[offset:end])
-        offset = end
-    return nals, offset
-
-
-class Avc1Box(ContainerBox):
+class VisualSampleEntryBox(ContainerBox):
     def __init__(self, header: BoxHeader) -> None:
         super().__init__(header)
         self.width = 0
@@ -340,7 +278,7 @@ class Avc1Box(ContainerBox):
 
     def read(self, f: BinaryIO) -> None:
         if self.header.end - self.header.payload_start < 78:
-            raise Mp4FormatError("avc1 sample entry too short")
+            raise Mp4FormatError(f"{self.header.type} sample entry too short")
         f.seek(self.header.payload_start + 24)
         self.width, self.height = struct.unpack(">HH", f.read(4))
         self.children = read_boxes(f, self.header.payload_start + 78, self.header.end)
@@ -405,13 +343,27 @@ _REGISTRY: Dict[str, Type[Box]] = {
     "co64": Co64Box,
     "mdat": MdatBox,
     "stsd": StsdBox,
-    "avc1": Avc1Box,
-    "avcC": AvcCBox,
 }
 
 
 def _new_box(header: BoxHeader) -> Box:
+    if header.type in {"avc1", "avcC"}:
+        from .h264_mp4 import Avc1Box, AvcCBox
+        return (Avc1Box if header.type == "avc1" else AvcCBox)(header)
+    if header.type in {"hvc1", "hev1", "hvcC"}:
+        from .hevc_mp4 import HevcSampleEntryBox, HvcCBox
+        return (HvcCBox if header.type == "hvcC" else HevcSampleEntryBox)(header)
     return _REGISTRY.get(header.type, UnknownBox)(header)
+
+
+def __getattr__(name: str):
+    if name in {"Avc1Box", "AvcCBox", "_read_avcc_nals"}:
+        from . import h264_mp4
+        return getattr(h264_mp4, name)
+    if name in {"HevcSampleEntryBox", "HvcCBox"}:
+        from . import hevc_mp4
+        return getattr(hevc_mp4, name)
+    raise AttributeError(name)
 
 
 def read_boxes(f: BinaryIO, start: int, end: int) -> List[Box]:

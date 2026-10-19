@@ -647,7 +647,7 @@ func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifferenceForPartition(
 	return decoder.decodeMotionVectorDifferenceWithContext(contextIncrement, contexts)
 }
 
-// DecodeReferenceIndex decodes ref_idx_l0/l1 truncated unary syntax.
+// DecodeReferenceIndex decodes ref_idx_l0/l1 unary syntax.
 // contexts represent six consecutive models from ctxIdxOffset; neighborContextInc is derived per clause 9.3.3.1.1.6.
 func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint32, neighborContextInc uint8, contexts *[6]CABACContextModel) (uint8, error) {
 	if contexts == nil || neighborContextInc > 3 {
@@ -675,7 +675,7 @@ func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint
 	refIdx := uint8(0)
 	if first {
 		refIdx = 1
-		for uint32(refIdx) < maxRefIdxMinus1 {
+		for {
 			contextIndex := 5
 			if refIdx == 1 {
 				contextIndex = 4
@@ -686,6 +686,9 @@ func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint
 			}
 			if !continued {
 				break
+			}
+			if uint32(refIdx) >= maxRefIdxMinus1 {
+				return 0, ErrCABACUnsupportedSyntax
 			}
 			refIdx++
 		}

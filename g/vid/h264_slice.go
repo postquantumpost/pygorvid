@@ -328,6 +328,11 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 					return SliceHeader{}, fmt.Errorf("num_ref_idx_l1_active_minus1 exceeds 31")
 				}
 			}
+		} else {
+			header.NumRefIdxL0ActiveMinus1 = pps.NumRefIdxL0DefaultActiveMinus1
+			if normalizedSliceType == 1 {
+				header.NumRefIdxL1ActiveMinus1 = pps.NumRefIdxL1DefaultActiveMinus1
+			}
 		}
 	default:
 		return SliceHeader{}, fmt.Errorf("unsupported slice_type %d", header.SliceType)

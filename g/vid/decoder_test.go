@@ -375,6 +375,56 @@ func TestDecoderThreadsDefaultToHalfTheProcessors(t *testing.T) {
 	}
 }
 
+func TestFrameCacheKeepsMostRecentlyDecodedFrames(t *testing.T) {
+	decoder := NewH264Decoder(nil)
+	if decoder.FrameCacheSize() != 8 {
+		t.Fatalf("default frame cache size = %d; want 8", decoder.FrameCacheSize())
+	}
+	if err := decoder.SetFrameCacheSize(2); err != nil {
+		t.Fatal(err)
+	}
+	for index := uint64(0); index < 4; index++ {
+		frame := Yuv420Frame{Width: 1, Height: 1, YStride: 1, UStride: 1, VStride: 1, Y: []byte{byte(index)}, U: []byte{byte(index)}, V: []byte{byte(index)}}
+		decoder.cacheDecodedFrame(index, frame)
+	}
+	if len(decoder.decodedFrames) != 2 || decoder.decodedFrames[0].Y != nil {
+		t.Fatalf("frame cache entries = %v; want only frames 2 and 3", decoder.decodedFrameOrder)
+	}
+	if _, ok := decoder.decodedFrames[2]; !ok {
+		t.Fatal("most recently decoded frame 2 was evicted")
+	}
+	if _, ok := decoder.decodedFrames[3]; !ok {
+		t.Fatal("most recently decoded frame 3 was evicted")
+	}
+	if err := decoder.SetFrameCacheSize(0); err != nil || len(decoder.decodedFrames) != 0 {
+		t.Fatalf("zero-sized cache = %d frames, err %v; want empty cache", len(decoder.decodedFrames), err)
+	}
+	if err := decoder.SetFrameCacheSize(-1); err == nil {
+		t.Fatal("negative frame cache size unexpectedly accepted")
+	}
+}
+
+func TestFrameCacheSizeBoundsDecodedFrames(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "h264", "high42-1080p.mp4")
+	reader, err := OpenVideoSampleReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	decoder := NewH264Decoder(reader)
+	if err := decoder.SetFrameCacheSize(2); err != nil {
+		t.Fatal(err)
+	}
+	for index := uint64(0); index < 4; index++ {
+		if _, err := decoder.DecodeFrame(index); err != nil {
+			t.Fatalf("DecodeFrame(%d): %v", index, err)
+		}
+	}
+	if len(decoder.decodedFrames) > decoder.FrameCacheSize() {
+		t.Fatalf("decoded frame cache size = %d; capacity %d", len(decoder.decodedFrames), decoder.FrameCacheSize())
+	}
+}
+
 func h264SmokeFrameHash(frame Yuv420Frame) uint64 {
 	hash := uint64(14695981039346656037)
 	for _, plane := range [][]uint8{frame.Y, frame.U, frame.V} {

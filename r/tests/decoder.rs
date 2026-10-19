@@ -78,6 +78,21 @@ fn decoder_threads_default_to_half_the_processors() {
 }
 
 #[test]
+fn decoded_frame_cache_is_bounded_and_configurable() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(fixture).unwrap());
+    assert_eq!(decoder.frame_cache_size(), 8);
+    decoder.set_frame_cache_size(1);
+    let expected = decoder.decode_frame(0).unwrap();
+    decoder.decode_frame(1).unwrap();
+    assert_eq!(decoder.frame_cache_len(), 1);
+    assert_eq!(decoder.decode_frame(0).unwrap(), expected);
+    decoder.set_frame_cache_size(0);
+    assert_eq!(decoder.frame_cache_len(), 0);
+}
+
+#[test]
 fn h264_decoder_checkpoint_auto_saves_and_restores_cached_frames() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples");
     let checkpoint_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(

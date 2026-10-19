@@ -1,4 +1,9 @@
-"""Deferred inter-macroblock reconstruction for multi-process slice decoding.
+"""Compatibility alias for H.264 deferred macroblock workers."""
+
+import sys
+from . import h264_deferred as _implementation
+
+sys.modules[__name__] = _implementation"""Deferred inter-macroblock reconstruction for multi-process slice decoding.
 
 Parsing a P/B slice only needs reconstructed samples when an intra macroblock predicts from
 its neighbors. With more than one thread, motion compensation and residual addition run in

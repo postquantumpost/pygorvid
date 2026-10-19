@@ -162,8 +162,17 @@ def test_poc_one_zero_deltas_poc_two_and_field_picture():
 
 def test_i_p_b_specific_slice_prefixes_and_redundant_count():
     sps = parse_slice_sps()
-    pps = parse_slice_pps()
+    pps = replace(
+        parse_slice_pps(),
+        num_ref_idx_l0_default_active_minus1=4,
+        num_ref_idx_l1_default_active_minus1=2,
+    )
     identity_bits = fixed_bits(3, 4) + fixed_bits(5, 4)
+    for slice_type in (0, 1, 5, 6):
+        header = parse_slice_header(make_slice(0x41, 0, slice_type, 0, identity_bits), sps, pps)
+        assert not header.num_ref_idx_active_override
+        assert header.num_ref_idx_l0_active_minus1 == 4
+        assert header.num_ref_idx_l1_active_minus1 == (2 if slice_type % 5 == 1 else 0)
 
     i_slice = parse_slice_header(make_slice(0x41, 0, 2, 0, identity_bits), sps, pps)
     assert not i_slice.num_ref_idx_active_override

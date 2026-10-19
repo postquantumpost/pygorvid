@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -x
+
+# Build the release images to ./dist/
+python3 -m venv tmp/release-tools
+tmp/release-tools/bin/python -m pip install build
+make release PYTHON="$PWD/tmp/release-tools/bin/python"
+
+# Install the images from ./dist/ to the local machine.
+dst='/opt'
+dst_rust="${dst}/pygorvid-rust"
+dst_rust_extract="${dst_rust}/1.0.0/"
+dst_go="${dst}/pygorvid-go"
+dst_go_extract="${dst_go}/1.0.0/"
+
+pro="/home/jph/work/pygorvid/"
+src="${pro}/dist/"
+src_rust="${src}/pygorvid-rust-1.0.0-x86_64-unknown-linux-gnu.tar.gz"
+src_go="${src}/pygorvid-go-1.0.0-linux-amd64.tar.gz"
+
+echo install ${src_rust} into ${dst_rust}
+sudo rm -r ${dst_rust}
+sudo mkdir -p ${dst_rust_extract}
+pushd ${dst_rust_extract}
+sudo tar --restrict -x -z -f ${src_rust}
+sudo chown -R root:root .
+popd
+
+echo install ${src_go} into ${dst_go}
+sudo rm -r ${dst_go}
+sudo mkdir -p ${dst_go_extract}
+pushd ${dst_go_extract}
+sudo tar --restrict -x -z -f ${src_go}
+sudo chown -R root:root .
+popd

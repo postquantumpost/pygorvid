@@ -536,15 +536,15 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - `r/src/videosamplereader.rs` and `r/tests/videosamplereader.rs` — Rust sample reader and synthetic/compact-fixture tests.
 - `g/vid/bitreader.go`, `p/src/pygorvid/bitreader.py`, and `r/src/bitreader.rs` — bounded bit readers with byte alignment and UE/SE decoding.
 - `g/vid/bitreader_test.go`, `p/tests/test_bitreader.py`, and `r/tests/bitreader.rs` — shared boundary, truncation, alignment, and Exp-Golomb vectors.
-- `g/vid/cabac.go`, `p/src/pygorvid/cabac.py`, and `r/src/cabac.rs` — CABAC context initialization/adaptation, arithmetic bins, mapped macroblock/intra/CBP syntax, luma4x4 significance and coefficient levels, and frame-scan-to-raster placement; dequantization/inverse transforms remain separate.
-- `g/vid/cabac_test.go`, `p/tests/test_cabac.py`, and CABAC unit tests in `r/src/cabac.rs` — cross-language bin/range-class vectors, syntax context derivation, significance/last maps, coefficient-level prefix/escape/sign, scan-to-raster placement, residual node-context adaptation, truncation rollback, and invalid-state checks.
-- `g/vid/nal.go`, `p/src/pygorvid/nal.py`, and `r/src/nal.rs` — NAL header parsing and strict EBSP-to-RBSP conversion.
+- `g/vid/h264_cabac.go`, `p/src/pygorvid/h264_cabac.py`, and `r/src/h264_cabac.rs` — CABAC context initialization/adaptation, arithmetic bins, mapped macroblock/intra/CBP syntax, luma4x4 significance and coefficient levels, and frame-scan-to-raster placement; dequantization/inverse transforms remain separate.
+- `g/vid/cabac_test.go`, `p/tests/test_cabac.py`, and CABAC unit tests in `r/src/h264_cabac.rs` — cross-language bin/range-class vectors, syntax context derivation, significance/last maps, coefficient-level prefix/escape/sign, scan-to-raster placement, residual node-context adaptation, truncation rollback, and invalid-state checks.
+- `g/vid/h264_nal.go`, `p/src/pygorvid/h264_nal.py`, and `r/src/h264_nal.rs` — NAL header parsing and strict EBSP-to-RBSP conversion.
 - `g/vid/nal_test.go`, `p/tests/test_nal.py`, and `r/tests/nal.rs` — header extraction, valid escapes, malformed EBSP, and RBSP edge vectors.
-- `g/vid/sps.go`, `p/src/pygorvid/sps.py`, and `r/src/sps.rs` — SPS profile, chroma, bit depth, dimensions/cropping, frame-number, POC, reference, and frame/field parsing.
+- `g/vid/h264_sps.go`, `p/src/pygorvid/h264_sps.py`, and `r/src/h264_sps.rs` — SPS profile, chroma, bit depth, dimensions/cropping, frame-number, POC, reference, and frame/field parsing.
 - `g/vid/sps_test.go`, `p/tests/test_sps.py`, and `r/tests/sps.rs` — SPS syntax, POC modes, reference/frame flags, dimensions/crops, and compact-fixture checks.
-- `g/vid/pps.go`, `p/src/pygorvid/pps.py`, and `r/src/pps.rs` — PPS identifiers, weighting, QP, deblocking, and transform-extension parsing.
+- `g/vid/h264_pps.go`, `p/src/pygorvid/h264_pps.py`, and `r/src/h264_pps.rs` — PPS identifiers, weighting, QP, deblocking, and transform-extension parsing.
 - `g/vid/pps_test.go`, `p/tests/test_pps.py`, and `r/tests/pps.rs` — PPS tool vectors, bounds, unsupported-tool errors, and compact-fixture checks.
-- `g/vid/slice.go`, `p/src/pygorvid/slice.py`, and `r/src/slice.rs` — supported I/P/B slice syntax, primary-picture comparison, and consecutive picture grouping.
+- `g/vid/h264_slice.go`, `p/src/pygorvid/h264_slice.py`, and `r/src/h264_slice.rs` — supported I/P/B slice syntax, primary-picture comparison, and consecutive picture grouping.
 - `g/vid/slice_test.go`, `p/tests/test_slice.py`, and `r/tests/slice.rs` — slice-header branches, identity-boundary vectors, picture grouping, malformed syntax, and compact-fixture scans.
 - `r/src/bin/vidprobe.rs` — replace `Command::new("ffmpeg")` extraction path.
 - `g/vid/basicinfo_test.go`, `p/tests/test_basicinfo.py`, and `r/tests/basicinfo.rs` — synthetic MP4 fixture patterns to extend for demux tests.

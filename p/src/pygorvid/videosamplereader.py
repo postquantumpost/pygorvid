@@ -1,12 +1,10 @@
-"""Read length-prefixed AVC samples from the first video track in an MP4."""
+"""Read length-prefixed compressed samples from an MP4 video track."""
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Iterator, List, Optional, Sequence, Tuple, Union
 
 from .mp4boxes import (
-    Avc1Box,
-    AvcCBox,
     HdlrBox,
     MdhdBox,
     Mp4FormatError,
@@ -19,18 +17,10 @@ from .mp4boxes import (
     find,
     read_boxes,
 )
-from .nal import NALUnitError, split_length_prefixed_nals
-
-
-@dataclass(frozen=True)
-class AVCConfiguration:
-    profile: int
-    profile_compat: int
-    level: int
-    nal_length_size: int
-    sequence_parameter_sets: Tuple[bytes, ...]
-    picture_parameter_sets: Tuple[bytes, ...]
-    timescale: int
+from .codec_sample import NALUnitError, split_length_prefixed_nals
+from .codec import read_codec_configuration
+from .h264_mp4 import AVCConfiguration
+from .hevc_mp4 import HEVCConfiguration
 
 
 @dataclass(frozen=True)
@@ -62,7 +52,7 @@ class VideoSampleReader:
         self._closed = True
         self._samples: List[_SampleLocation] = []
         self._next_index = 0
-        self.configuration: Optional[AVCConfiguration] = None
+        self.configuration: Optional[Union[AVCConfiguration, HEVCConfiguration]] = None
         try:
             self._file = self.path.open("rb")
             self._closed = False
@@ -88,21 +78,9 @@ class VideoSampleReader:
         if len(stsd_boxes) != 1 or not isinstance(stsd_boxes[0], StsdBox):
             raise Mp4FormatError("video track must contain one stsd box")
         entries = stsd_boxes[0].children
-        if len(entries) != 1 or not isinstance(entries[0], Avc1Box):
-            raise Mp4FormatError("only one avc1 sample description is supported")
-        avcc_boxes = [child for child in entries[0].children if isinstance(child, AvcCBox)]
-        if len(avcc_boxes) != 1:
-            raise Mp4FormatError("avc1 sample entry must contain one avcC box")
-        avcc = avcc_boxes[0]
-        self.configuration = AVCConfiguration(
-            profile=avcc.profile,
-            profile_compat=avcc.profile_compat,
-            level=avcc.level,
-            nal_length_size=avcc.nal_length_size,
-            sequence_parameter_sets=tuple(avcc.sequence_sets),
-            picture_parameter_sets=tuple(avcc.picture_sets),
-            timescale=timescale,
-        )
+        if len(entries) != 1:
+            raise Mp4FormatError("only one video sample description is supported")
+        self.configuration = read_codec_configuration(entries[0], timescale)
 
         stsz = self._one_box(track, "stsz", StszBox)
         stsc = self._one_box(track, "stsc", StscBox)
@@ -149,6 +127,11 @@ class VideoSampleReader:
             sync_numbers,
             media_ranges,
         )
+
+    @property
+    def codec(self):
+        assert self.configuration is not None
+        return self.configuration.codec
 
     @staticmethod
     def _first_video_track(boxes) -> TrakBox:

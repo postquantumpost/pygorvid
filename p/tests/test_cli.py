@@ -10,6 +10,77 @@ from pygorvid.cli import main
 FIXTURE = Path(__file__).resolve().parents[2] / "samples" / "decoder-smoke-16x16.mp4"
 
 
+def test_read_all_frames_and_multiple_inputs(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main([
+        str(FIXTURE), "--readall", "--input", str(FIXTURE), "--threads", "2",
+    ]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.count(f"{FIXTURE}: read 3 frames") == 2
+    assert not list(tmp_path.iterdir())
+    assert main(["--readall", "missing.mp4", str(FIXTURE), "--threads", "1"]) == 1
+    captured = capsys.readouterr()
+    assert "missing.mp4:" in captured.err
+    assert f"{FIXTURE}: read 3 frames" in captured.out
+
+
+@pytest.mark.parametrize("options", (
+    ("--extractframe", "0"),
+    ("--output", "out.png"),
+    ("--extractframe", "0", "--output", "out.png"),
+))
+def test_read_all_rejects_extraction_options(options):
+    with pytest.raises(SystemExit) as error:
+        main(["--readall", str(FIXTURE), *options])
+    assert error.value.code == 2
+
+
+def test_read_all_reports_failing_frame(monkeypatch, capsys):
+    from pygorvid import cli
+    from pygorvid.decoder import DecoderError
+
+    class FailingDecoder:
+        def __init__(self, reader, *, threads, debug_progress=False):
+            pass
+
+        def decode_frame(self, index):
+            if index == 1:
+                raise DecoderError("invalid frame data")
+
+    monkeypatch.setattr(cli, "create_decoder", FailingDecoder)
+    assert main(["--readall", str(FIXTURE), "--threads", "1"]) == 1
+    assert "decode frame 1: invalid frame data" in capsys.readouterr().err
+
+
+def test_verbose_flag_enables_decoder_progress(monkeypatch, capsys):
+    from pygorvid import cli
+
+    class FakeReader:
+        sample_count = 2
+
+        def __init__(self, path):
+            pass
+
+        def sample_at(self, index):
+            return type("Sample", (), {"is_sync": index == 0})()
+
+        def close(self):
+            pass
+
+    class FakeDecoder:
+        def __init__(self, reader, *, threads, debug_progress):
+            assert debug_progress
+
+        def decode_frame(self, index):
+            print(f"Frame {index}: 0%", file=__import__("sys").stderr)
+
+    monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
+    monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
+    assert main(["--readall", "fake.mp4", "--verbose"]) == 0
+    captured = capsys.readouterr()
+    assert "Frame 0: 0%" in captured.err and "Frame 1: 0%" in captured.err
+
+
 @pytest.mark.parametrize("extension", (".png", ".jpg", ".PNG", ".JPG"))
 @pytest.mark.parametrize("frame_index", (0, 1))
 def test_native_extraction(tmp_path, monkeypatch, extension, frame_index):
