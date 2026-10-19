@@ -2195,6 +2195,7 @@ pub struct CabacArithmeticDecoder<'a> {
     code_range: u32,
     code_offset: u32,
     terminated: bool,
+    cavlc: Option<crate::h264_cavlc_syntax::CavlcSyntax>,
 }
 
 type MacroblockSamples = ([u8; 256], [u8; 64], [u8; 64]);
@@ -2458,6 +2459,13 @@ pub fn derive_intra4x4_predicted_mode(
 }
 
 impl<'a> CabacArithmeticDecoder<'a> {
+    pub(crate) fn new_cavlc(data: &'a [u8], bit_offset: usize) -> io::Result<Self> {
+        let mut bits = BitReader::new(data);
+        for _ in 0..bit_offset { bits.read_bit()?; }
+        Ok(Self { bits, code_range: INITIAL_RANGE, code_offset: 0, terminated: false,
+            cavlc: Some(crate::h264_cavlc_syntax::CavlcSyntax::default()) })
+    }
+
     /// Initializes one byte-aligned CABAC substream after slice-header alignment bits.
     pub fn new(data: &'a [u8]) -> io::Result<Self> {
         let mut bits = BitReader::new(data);
@@ -2472,6 +2480,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: INITIAL_RANGE,
             code_offset,
             terminated: false,
+            cavlc: None,
         })
     }
 
@@ -2485,6 +2494,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
 
     /// Decodes one regular context-coded bin and updates its model.
     pub fn decode_bin(&mut self, model: &mut CabacContextModel) -> io::Result<bool> {
+        if self.cavlc.is_some() { return Err(invalid("unhandled CAVLC syntax reached arithmetic decoder")); }
         self.validate_bin_state()?;
         if model.state_index >= 64 {
             return Err(invalid("CABAC context state index is outside [0,63]"));
@@ -2529,6 +2539,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         contexts: &mut [CabacContextModel; 4],
         previous_delta: i32,
     ) -> io::Result<i32> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits); }
         self.validate_bin_state()?;
         if contexts.iter().any(|model| model.state_index >= 64) {
             return Err(invalid("mb_qp_delta requires valid contexts 60 through 63"));
@@ -2539,6 +2550,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut context_index = usize::from(previous_delta != 0);
@@ -2571,6 +2583,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(delta)
     }
@@ -2585,6 +2598,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_available: bool,
         top_skipped: bool,
     ) -> io::Result<bool> {
+        if let Some(syntax) = self.cavlc.as_mut() { return syntax.skipped(&mut self.bits); }
         if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
             return Err(invalid(
                 "CABAC mb_skip_flag is unsupported for this slice type",
@@ -2611,6 +2625,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut skip_contexts = [trial_contexts[11], trial_contexts[12], trial_contexts[13]];
@@ -2628,6 +2643,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacPSkipMacroblockResult::default());
         }
@@ -2671,6 +2687,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -2701,6 +2718,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut skip_contexts = [trial_contexts[24], trial_contexts[25], trial_contexts[26]];
@@ -2718,6 +2736,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacBDirectMacroblockResult::default());
         }
@@ -2726,6 +2745,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -2926,6 +2946,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         neighbor_context_increment: usize,
         contexts: &mut [CabacContextModel; 6],
     ) -> io::Result<u8> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::reference(&mut self.bits, max_ref_idx_minus1); }
         if max_ref_idx_minus1 > 31 {
             return Err(invalid("ref_idx maximum is outside [0,31]"));
         }
@@ -2945,6 +2966,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut ref_idx = 0_u8;
@@ -2965,6 +2987,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(ref_idx)
     }
@@ -2998,6 +3021,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_available: bool,
         top_intra16_or_pcm: bool,
     ) -> io::Result<u8> {
+        if let Some(syntax) = self.cavlc.as_mut() { return syntax.mb_type(&mut self.bits, slice_type); }
         if slice_type > 9 || slice_type % 5 != 2 {
             return Err(invalid(
                 "I-slice mb_type is unsupported for this slice type",
@@ -3014,6 +3038,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let first_context = usize::from(left_available && left_intra16_or_pcm)
@@ -3037,6 +3062,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(mb_type)
     }
@@ -3065,6 +3091,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut result = Intra16x16LumaMacroblockResult {
@@ -3164,6 +3191,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -3206,6 +3234,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         if !mode_already_decoded {
@@ -3317,6 +3346,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -3349,6 +3379,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut mb_type_contexts = [
@@ -3401,7 +3432,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             for sample in &mut cr_block {
                 *sample = trial.bits.read_bits(8)? as u8;
             }
-            let offset = trial.bits.read_bits(9)? as u32;
+            let offset = if trial.cavlc.is_some() { 0 } else { trial.bits.read_bits(9)? as u32 };
             if offset >= INITIAL_RANGE {
                 return Err(invalid(
                     "I_PCM CABAC offset is outside the arithmetic range",
@@ -3418,6 +3449,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(result);
         }
@@ -3690,6 +3722,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -3711,6 +3744,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mb_type = trial.decode_i_intra_mb_type(
@@ -3782,6 +3816,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut mode_contexts = [trial_contexts[68], trial_contexts[69]];
@@ -3847,6 +3882,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -3879,6 +3915,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut transform_contexts = [
@@ -3945,6 +3982,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
     }
@@ -3961,6 +3999,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         left_b_skip_or_direct: bool,
         top_b_skip_or_direct: bool,
     ) -> io::Result<u8> {
+        if let Some(syntax) = self.cavlc.as_mut() { return syntax.mb_type(&mut self.bits, slice_type); }
         if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
             return Err(invalid(
                 "CABAC inter mb_type is unsupported for this slice type",
@@ -3974,6 +4013,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = contexts.to_vec();
         let mb_type = if slice_type.is_multiple_of(5) {
@@ -3987,6 +4027,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         contexts.copy_from_slice(&trial_contexts);
         Ok(mb_type)
     }
@@ -4065,6 +4106,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         slice_type: u8,
         contexts: &mut [CabacContextModel],
     ) -> io::Result<u8> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(&mut self.bits, if slice_type % 5 == 0 { 3 } else { 12 }); }
         if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
             return Err(invalid(
                 "CABAC sub_mb_type is unsupported for this slice type",
@@ -4078,6 +4120,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut c = contexts.to_vec();
         let sub_type = if slice_type.is_multiple_of(5) {
@@ -4103,6 +4146,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         contexts.copy_from_slice(&c);
         Ok(sub_type)
     }
@@ -4120,6 +4164,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let inter_input = input.inter_input;
@@ -4184,6 +4229,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacPBMacroblockLayerResult {
                 skipped: true,
@@ -4203,6 +4249,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(CabacPBMacroblockLayerResult {
             skipped: false,
@@ -4335,10 +4382,17 @@ impl<'a> CabacArithmeticDecoder<'a> {
         F: FnMut(usize, &[CabacDecodedSliceMacroblock]) -> io::Result<CabacSliceMacroblockInput>,
     {
         let mut decoded = Vec::new();
+        let mut coefficient_counts: Vec<[u8; 24]> = Vec::new();
         let mut macroblock_address = first_macroblock_address;
         loop {
             if let Some(driver) = driver.as_deref_mut() {
                 driver.apply_ready(&mut decoded, builder)?;
+            }
+            if let Some(syntax) = self.cavlc.as_mut() {
+                let width = builder.picture_width_in_mbs();
+                let left = if macroblock_address % width != 0 { coefficient_counts.last().copied() } else { None };
+                let top = macroblock_address.checked_sub(width + first_macroblock_address).and_then(|index| coefficient_counts.get(index)).copied();
+                syntax.begin(left, top);
             }
             let mut macroblock_input = input_provider(macroblock_address, &decoded)?;
             let macroblock_result = loop {
@@ -4363,6 +4417,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     result => break result?,
                 }
             };
+            if let Some(syntax) = self.cavlc.as_ref() { coefficient_counts.push(syntax.counts); }
             decoded.push(CabacDecodedSliceMacroblock {
                 address: macroblock_address,
                 result: macroblock_result,
@@ -4500,6 +4555,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let macroblock_type = trial.decode_inter_mb_type(
@@ -4527,6 +4583,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacPBMacroblockPrediction::Intra(intra));
         }
@@ -4855,6 +4912,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(CabacPBMacroblockPrediction::Inter(result))
     }
@@ -5166,6 +5224,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         left_has_nonzero_mode: bool,
         top_has_nonzero_mode: bool,
     ) -> io::Result<u8> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(&mut self.bits, 3); }
         if contexts.iter().any(|model| model.state_index >= 64) {
             return Err(invalid(
                 "intra_chroma_pred_mode requires valid contexts 64 through 67",
@@ -5176,6 +5235,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let context_index = usize::from(left_has_nonzero_mode) + usize::from(top_has_nonzero_mode);
@@ -5193,6 +5253,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(mode)
     }
@@ -5203,6 +5264,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         predicted_mode: u8,
         contexts: &mut [CabacContextModel; 2],
     ) -> io::Result<u8> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::prediction_mode(&mut self.bits, predicted_mode); }
         if predicted_mode > 8 {
             return Err(invalid("CABAC intra4x4 prediction mode is outside [0,8]"));
         }
@@ -5216,6 +5278,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mode = if trial.decode_bin(&mut trial_contexts[0])? {
@@ -5232,6 +5295,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(mode)
     }
@@ -5250,6 +5314,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut modes = [0; 16];
@@ -5269,6 +5334,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(modes)
     }
@@ -5281,6 +5347,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         left_has_8x8_transform: bool,
         top_has_8x8_transform: bool,
     ) -> io::Result<bool> {
+        if self.cavlc.is_some() { return self.bits.read_bit(); }
         let context_index =
             usize::from(left_has_8x8_transform) + usize::from(top_has_8x8_transform);
         self.decode_bin(&mut contexts[context_index])
@@ -5293,6 +5360,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_cbp: u8,
         contexts: &mut [CabacContextModel; 4],
     ) -> io::Result<u8> {
+        if let Some(syntax) = self.cavlc.as_mut() { return syntax.luma_cbp(&mut self.bits); }
         if left_cbp > 15 || top_cbp > 15 {
             return Err(invalid("CABAC luma coded_block_pattern is outside [0,15]"));
         }
@@ -5307,6 +5375,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut pattern = 0u8;
@@ -5327,6 +5396,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(pattern)
     }
@@ -5338,6 +5408,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_cbp: u8,
         contexts: &mut [CabacContextModel; 8],
     ) -> io::Result<u8> {
+        if let Some(syntax) = self.cavlc.as_ref() { return Ok(syntax.chroma_cbp()); }
         if left_cbp > 2 || top_cbp > 2 {
             return Err(invalid("CABAC chroma coded_block_pattern is outside [0,2]"));
         }
@@ -5351,6 +5422,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let context_index = usize::from(left_cbp > 0) + 2 * usize::from(top_cbp > 0);
@@ -5365,6 +5437,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(pattern)
     }
@@ -5402,6 +5475,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_significant = *significant_contexts;
         let mut trial_last = *last_contexts;
@@ -5425,6 +5499,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *significant_contexts = trial_significant;
         *last_contexts = trial_last;
         Ok(significance)
@@ -5449,6 +5524,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_first = *first_context;
         let mut trial_greater = *greater_one_context;
@@ -5486,6 +5562,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *first_context = trial_first;
         *greater_one_context = trial_greater;
         Ok(absolute_level - 1)
@@ -5510,6 +5587,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         neighbor_magnitude: u64,
         contexts: &mut [CabacContextModel; 7],
     ) -> io::Result<i32> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits); }
         if contexts.iter().any(|context| context.state_index >= 64) {
             return Err(invalid("MVD context state index is outside [0,63]"));
         }
@@ -5542,6 +5620,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         context_index: u8,
         contexts: &mut [CabacContextModel; 7],
     ) -> io::Result<i32> {
+        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits); }
         if context_index > 2 {
             return Err(invalid("MVD context increment is outside [0,2]"));
         }
@@ -5551,6 +5630,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let greater_than_zero = trial.decode_bin(&mut trial_contexts[context_index])?;
@@ -5607,6 +5687,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(signed_magnitude)
     }
@@ -5631,6 +5712,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = *contexts;
         let mut levels = [0i32; 16];
@@ -5656,6 +5738,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(levels)
     }
@@ -5672,6 +5755,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_significant = *significant_contexts;
         let mut trial_last = *last_contexts;
@@ -5686,6 +5770,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *significant_contexts = trial_significant;
         *last_contexts = trial_last;
         *coefficient_contexts = trial_coefficients;
@@ -5716,6 +5801,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_coded_flag = *coded_flag_contexts;
         let mut trial_significant = *significant_contexts;
@@ -5740,6 +5826,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *coded_flag_contexts = trial_coded_flag;
         *significant_contexts = trial_significant;
         *last_contexts = trial_last;
@@ -5771,6 +5858,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_coded_flag = *coded_flag_contexts;
         let mut trial_significant = *significant_contexts;
@@ -5808,6 +5896,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         *coded_flag_contexts = trial_coded_flag;
         *significant_contexts = trial_significant;
         *last_contexts = trial_last;
@@ -5826,6 +5915,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         cond_term_flag_b: bool,
         contexts: &mut [CabacContextModel],
     ) -> io::Result<([i32; 16], bool)> {
+        if let Some(syntax) = self.cavlc.as_mut() { return syntax.residual(&mut self.bits, ctx_block_cat); }
         if contexts.len() != CABAC_CONTEXT_COUNT {
             return Err(invalid("residual block requires 460 slice contexts"));
         }
@@ -5841,6 +5931,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = contexts.to_vec();
         let mut levels = [0_i32; 16];
@@ -5882,6 +5973,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         contexts.copy_from_slice(&trial_contexts);
         Ok((levels, coded))
     }
@@ -5894,6 +5986,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         &mut self,
         contexts: &mut [CabacContextModel],
     ) -> io::Result<[i32; 64]> {
+        if let Some(syntax) = self.cavlc.as_mut() { return syntax.residual8x8(&mut self.bits); }
         if contexts.len() != CABAC_CONTEXT_COUNT {
             return Err(invalid("residual block requires 460 slice contexts"));
         }
@@ -5903,6 +5996,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             code_range: self.code_range,
             code_offset: self.code_offset,
             terminated: self.terminated,
+            cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = contexts.to_vec();
         let mut significant = [false; 64];
@@ -5932,6 +6026,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.code_range = trial.code_range;
         self.code_offset = trial.code_offset;
         self.terminated = trial.terminated;
+        self.cavlc = trial.cavlc;
         contexts.copy_from_slice(&trial_contexts);
         Ok(levels)
     }
@@ -6019,6 +6114,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
 
     /// Decodes a terminate bin; true means the caller must stop decoding.
     pub fn decode_terminate_bin(&mut self) -> io::Result<bool> {
+        if let Some(syntax) = self.cavlc.as_ref() { return Ok(syntax.finished(&self.bits)); }
         self.validate_bin_state()?;
         let mut bits = self.bits.clone();
         let mut code_range = self.code_range - 2;
@@ -6552,6 +6648,7 @@ mod tests {
             code_range,
             code_offset,
             terminated: false,
+            cavlc: None,
         }
     }
 

@@ -10,6 +10,8 @@ mod codec;
 mod codec_frame;
 mod codec_sample;
 mod h264_mp4;
+mod h264_cavlc;
+mod h264_cavlc_syntax;
 mod hevc_mp4;
 #[path = "h264_decoder.rs"]
 mod decoder;
@@ -64,6 +66,7 @@ pub use codec_frame::Yuv420Frame;
 pub use hevc_decoder::HevcDecoder;
 pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use h264_mp4::AvcConfiguration;
+pub use h264_cavlc::{decode_cavlc_residual_block, CavlcResidualBlock};
 pub use hevc_mp4::{HevcConfiguration, HevcNalArray};
 pub use mp4file::Mp4File;
 pub use nal::{ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals, NalHeader};

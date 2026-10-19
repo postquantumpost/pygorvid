@@ -329,6 +329,7 @@ type CABACArithmeticDecoder struct {
 	codeRange  uint32
 	codeOffset uint32
 	terminated bool
+	cavlc      *cavlcSyntax
 }
 
 // NewCABACArithmeticDecoder initializes the arithmetic engine from CABAC bytes.
@@ -355,6 +356,9 @@ func (decoder *CABACArithmeticDecoder) CodeOffset() uint32 { return decoder.code
 
 // DecodeBin decodes one regular context-coded bin and updates its model.
 func (decoder *CABACArithmeticDecoder) DecodeBin(model *CABACContextModel) (bool, error) {
+	if decoder.cavlc != nil {
+		return false, errors.New("unhandled CAVLC syntax reached arithmetic decoder")
+	}
 	if model == nil {
 		return false, ErrCABACContextState
 	}
@@ -387,6 +391,10 @@ func (decoder *CABACArithmeticDecoder) DecodeBin(model *CABACContextModel) (bool
 
 // DecodeMBQPDelta decodes mb_qp_delta using caller-initialized contexts 60-63.
 func (decoder *CABACArithmeticDecoder) DecodeMBQPDelta(contexts *[4]CABACContextModel, previousDelta int) (int, error) {
+	if decoder.cavlc != nil {
+		value, err := cavlcSigned(decoder.bits)
+		return int(value), err
+	}
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
@@ -397,6 +405,7 @@ func (decoder *CABACArithmeticDecoder) DecodeMBQPDelta(contexts *[4]CABACContext
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	contextIndex := 0
@@ -442,6 +451,9 @@ func (decoder *CABACArithmeticDecoder) DecodeMBQPDelta(contexts *[4]CABACContext
 
 // DecodeMBSkipFlag decodes mb_skip_flag from three caller-initialized P- or B-slice contexts.
 func (decoder *CABACArithmeticDecoder) DecodeMBSkipFlag(sliceType uint8, contexts *[3]CABACContextModel, leftAvailable, leftSkipped, topAvailable, topSkipped bool) (bool, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.skipped(decoder.bits)
+	}
 	if contexts == nil {
 		return false, ErrCABACContextState
 	}
@@ -505,6 +517,7 @@ func (decoder *CABACArithmeticDecoder) DecodePSkipMacroblock(input CABACPSkipMac
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var skipContexts [3]CABACContextModel
@@ -650,6 +663,9 @@ func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifferenceForPartition(
 // DecodeReferenceIndex decodes ref_idx_l0/l1 unary syntax.
 // contexts represent six consecutive models from ctxIdxOffset; neighborContextInc is derived per clause 9.3.3.1.1.6.
 func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint32, neighborContextInc uint8, contexts *[6]CABACContextModel) (uint8, error) {
+	if decoder.cavlc != nil {
+		return cavlcReference(decoder.bits, maxRefIdxMinus1)
+	}
 	if contexts == nil || neighborContextInc > 3 {
 		return 0, ErrCABACContextState
 	}
@@ -666,6 +682,7 @@ func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	first, err := trial.DecodeBin(&trialContexts[neighborContextInc])
@@ -700,6 +717,9 @@ func (decoder *CABACArithmeticDecoder) DecodeReferenceIndex(maxRefIdxMinus1 uint
 
 // DecodeIIntraMBType decodes I-slice mb_type using caller-initialized contexts 3-10.
 func (decoder *CABACArithmeticDecoder) DecodeIIntraMBType(sliceType uint8, contexts *[8]CABACContextModel, leftAvailable, leftIntra16OrPCM, topAvailable, topIntra16OrPCM bool) (uint8, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.mbType(decoder.bits, sliceType)
+	}
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
@@ -713,6 +733,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIIntraMBType(sliceType uint8, conte
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	firstContext := 0
@@ -783,6 +804,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIPCMIntraMacroblock(sliceType uint8
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	mbType, err := trial.DecodeIIntraMBType(sliceType, &trialContexts, leftAvailable, leftIntra16OrPCM, topAvailable, topIntra16OrPCM)
@@ -825,7 +847,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIPCMIntraMacroblock(sliceType uint8
 		}
 		vBlock[index] = uint8(sample)
 	}
-	offset, err := trial.bits.ReadBits(9)
+	offset, err := readPCMRestartOffset(&trial)
 	if err != nil {
 		return fmt.Errorf("I_PCM CABAC reinitialization: %w", err)
 	}
@@ -990,6 +1012,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraNxN4x4LumaMacroblock(contexts 
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var modeContexts [2]CABACContextModel
@@ -1066,6 +1089,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraNxN8x8LumaMacroblock(contexts 
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var transformContexts [3]CABACContextModel
@@ -1143,6 +1167,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra16x16LumaMacroblock(mbType uin
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	result.PredictionMode = (mbType - 1) % 4
@@ -1234,6 +1259,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	if !modeAlreadyDecoded {
@@ -1345,6 +1371,7 @@ func (decoder *CABACArithmeticDecoder) decodeIntraMacroblock(input CABACIIntraMa
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var mbType uint8
@@ -1395,7 +1422,7 @@ func (decoder *CABACArithmeticDecoder) decodeIntraMacroblock(input CABACIIntraMa
 			}
 			crBlock[index] = uint8(sample)
 		}
-		offset, err := trial.bits.ReadBits(9)
+		offset, err := readPCMRestartOffset(&trial)
 		if err != nil {
 			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM CABAC reinitialization: %w", err)
 		}
@@ -1703,6 +1730,9 @@ func deriveIntra16x16ACCondTerm(blockIndex, blockX, blockY int, isLeft bool, cod
 // from whole-slice contexts (Tables 9-37, 9-39, and 9-41). B neighbor flags report available
 // neighbors coded as B_Skip or B_Direct_16x16 (clause 9.3.3.1.1.3); P slices ignore neighbors.
 func (decoder *CABACArithmeticDecoder) DecodeInterMBType(sliceType uint8, contexts *[CABACContextCount]CABACContextModel, leftAvailable, topAvailable, leftBSkipOrDirect, topBSkipOrDirect bool) (uint8, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.mbType(decoder.bits, sliceType)
+	}
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
@@ -1711,6 +1741,7 @@ func (decoder *CABACArithmeticDecoder) DecodeInterMBType(sliceType uint8, contex
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var mbType uint8
@@ -1857,6 +1888,13 @@ func (decoder *CABACArithmeticDecoder) decodeIntraMBTypeSuffix(contexts *[CABACC
 
 // DecodeSubMBType decodes sub_mb_type for P/SP (0-3, ctxIdx 21-23) or B (0-12, ctxIdx 36-39) slices.
 func (decoder *CABACArithmeticDecoder) DecodeSubMBType(sliceType uint8, contexts *[CABACContextCount]CABACContextModel) (uint8, error) {
+	if decoder.cavlc != nil {
+		maximum := uint32(3)
+		if sliceType%5 == 1 {
+			maximum = 12
+		}
+		return cavlcUnsigned(decoder.bits, maximum)
+	}
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
@@ -1865,6 +1903,7 @@ func (decoder *CABACArithmeticDecoder) DecodeSubMBType(sliceType uint8, contexts
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var binErr error
@@ -1908,6 +1947,9 @@ func (decoder *CABACArithmeticDecoder) DecodeSubMBType(sliceType uint8, contexts
 // DecodeIntraChromaPredMode decodes intra_chroma_pred_mode using contexts 64-67.
 // leftHasNonzeroMode and topHasNonzeroMode include the caller's availability and intra checks.
 func (decoder *CABACArithmeticDecoder) DecodeIntraChromaPredMode(contexts *[4]CABACContextModel, leftHasNonzeroMode, topHasNonzeroMode bool) (uint8, error) {
+	if decoder.cavlc != nil {
+		return cavlcUnsigned(decoder.bits, 3)
+	}
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
@@ -1918,6 +1960,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChromaPredMode(contexts *[4]CA
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	contextIndex := 0
@@ -1958,6 +2001,9 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChromaPredMode(contexts *[4]CA
 
 // DecodeIntra4x4PredMode decodes prev_intra4x4_pred_mode_flag and rem_intra4x4_pred_mode.
 func (decoder *CABACArithmeticDecoder) DecodeIntra4x4PredMode(predictedMode uint8, contexts *[2]CABACContextModel) (uint8, error) {
+	if decoder.cavlc != nil {
+		return cavlcPredictionMode(decoder.bits, predictedMode)
+	}
 	if predictedMode > 8 {
 		return 0, ErrCABACIntraPredModeRange
 	}
@@ -1971,6 +2017,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra4x4PredMode(predictedMode uint
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	previousMode, err := trial.DecodeBin(&trialContexts[0])
@@ -2063,6 +2110,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra4x4PredModes(contexts *[2]CABA
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	for blockIndex := range modes {
@@ -2084,6 +2132,9 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra4x4PredModes(contexts *[2]CABA
 // DecodeTransformSize8x8Flag decodes transform_size_8x8_flag using contexts 399-401.
 // Neighbor flags must already account for availability and slice membership.
 func (decoder *CABACArithmeticDecoder) DecodeTransformSize8x8Flag(contexts *[3]CABACContextModel, leftHas8x8Transform, topHas8x8Transform bool) (bool, error) {
+	if decoder.cavlc != nil {
+		return decoder.bits.ReadBit()
+	}
 	if contexts == nil {
 		return false, ErrCABACContextState
 	}
@@ -2099,6 +2150,9 @@ func (decoder *CABACArithmeticDecoder) DecodeTransformSize8x8Flag(contexts *[3]C
 
 // DecodeLumaCodedBlockPattern decodes the four luma coded_block_pattern bins using contexts 73-76.
 func (decoder *CABACArithmeticDecoder) DecodeLumaCodedBlockPattern(leftCBP, topCBP uint8, contexts *[4]CABACContextModel) (uint8, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.lumaPattern(decoder.bits)
+	}
 	if leftCBP > 15 || topCBP > 15 {
 		return 0, ErrCABACCBPOutOfRange
 	}
@@ -2112,6 +2166,7 @@ func (decoder *CABACArithmeticDecoder) DecodeLumaCodedBlockPattern(leftCBP, topC
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var pattern uint8
@@ -2174,6 +2229,9 @@ func (decoder *CABACArithmeticDecoder) DecodeLumaCodedBlockPattern(leftCBP, topC
 
 // DecodeChromaCodedBlockPattern decodes the chroma coded_block_pattern bins using contexts 77-84.
 func (decoder *CABACArithmeticDecoder) DecodeChromaCodedBlockPattern(leftCBP, topCBP uint8, contexts *[8]CABACContextModel) (uint8, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.chromaCBP, nil
+	}
 	if leftCBP > 2 || topCBP > 2 {
 		return 0, ErrCABACChromaCBPOutOfRange
 	}
@@ -2187,6 +2245,7 @@ func (decoder *CABACArithmeticDecoder) DecodeChromaCodedBlockPattern(leftCBP, to
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	contextIndex := 0
@@ -2252,6 +2311,7 @@ func (decoder *CABACArithmeticDecoder) DecodeLuma4x4SignificanceMap(significantC
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialSignificantContexts := *significantContexts
 	trialLastContexts := *lastContexts
@@ -2295,6 +2355,7 @@ func (decoder *CABACArithmeticDecoder) commitTrial(trial *CABACArithmeticDecoder
 	decoder.codeRange = trial.codeRange
 	decoder.codeOffset = trial.codeOffset
 	decoder.terminated = trial.terminated
+	decoder.cavlc = trial.cavlc
 }
 
 // DecodeBypassBin decodes a bypass bin without changing the arithmetic range.
@@ -2319,6 +2380,9 @@ func (decoder *CABACArithmeticDecoder) DecodeBypassBin() (bool, error) {
 
 // DecodeTerminateBin decodes the termination bin; true means the caller must stop decoding.
 func (decoder *CABACArithmeticDecoder) DecodeTerminateBin() (bool, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.finished(decoder.bits), nil
+	}
 	if err := decoder.validateBinState(); err != nil {
 		return false, err
 	}
@@ -2384,6 +2448,7 @@ func (decoder *CABACArithmeticDecoder) DecodeCoeffAbsLevelMinus1(firstContext, g
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialFirst, trialGreaterOne := *firstContext, *greaterOneContext
 	first, err := trial.DecodeBin(&trialFirst)
@@ -2453,6 +2518,9 @@ func (decoder *CABACArithmeticDecoder) DecodeCoeffSign(absLevelMinus1 uint32) (i
 // DecodeMotionVectorDifference decodes one component using seven caller-selected consecutive contexts.
 // neighborMagnitude sums absolute left/top MVD components; contexts start at 40 horizontally or 47 vertically.
 func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifference(neighborMagnitude uint64, contexts *[7]CABACContextModel) (int32, error) {
+	if decoder.cavlc != nil {
+		return cavlcSigned(decoder.bits)
+	}
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
@@ -2473,6 +2541,9 @@ func (decoder *CABACArithmeticDecoder) DecodeMotionVectorDifference(neighborMagn
 }
 
 func (decoder *CABACArithmeticDecoder) decodeMotionVectorDifferenceWithContext(contextIndex uint8, contexts *[7]CABACContextModel) (int32, error) {
+	if decoder.cavlc != nil {
+		return cavlcSigned(decoder.bits)
+	}
 	if contexts == nil || contextIndex > 2 {
 		return 0, ErrCABACContextState
 	}
@@ -2483,6 +2554,7 @@ func (decoder *CABACArithmeticDecoder) decodeMotionVectorDifferenceWithContext(c
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	greaterThanZero, err := trial.DecodeBin(&trialContexts[contextIndex])
@@ -2578,6 +2650,7 @@ func (decoder *CABACArithmeticDecoder) DecodeLuma4x4ResidualLevels(significance 
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	nodeContext := uint8(0)
@@ -2615,6 +2688,7 @@ func (decoder *CABACArithmeticDecoder) DecodeLuma4x4ResidualBlock(significantCon
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialSignificantContexts := *significantContexts
 	trialLastContexts := *lastContexts
@@ -2658,6 +2732,7 @@ func (decoder *CABACArithmeticDecoder) DecodeLuma4x4ResidualBlockWithFlag(leftNo
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialCodedFlagContexts := *codedFlagContexts
 	trialSignificantContexts := *significantContexts
@@ -2697,6 +2772,7 @@ func (decoder *CABACArithmeticDecoder) DecodeChroma4x4ACResidualBlock(leftHasNon
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialCodedFlagContexts := *codedFlagContexts
 	trialSignificantContexts := *significantContexts
@@ -2790,6 +2866,9 @@ func DeriveCABACCodedBlockFlagCondTerm(neighborAvailable, currentIntra, neighbor
 // Levels are in coefficient-list order: list index i is scan position i for categories 0, 2, and 3,
 // and scan position i+1 for AC categories 1 and 4. Entries past maxNumCoeff are zero.
 func (decoder *CABACArithmeticDecoder) DecodeResidualBlock(ctxBlockCat uint8, condTermFlagA, condTermFlagB bool, contexts *[CABACContextCount]CABACContextModel) ([16]int32, bool, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.residual(decoder.bits, ctxBlockCat)
+	}
 	var levels [16]int32
 	if contexts == nil {
 		return levels, false, ErrCABACContextState
@@ -2804,6 +2883,7 @@ func (decoder *CABACArithmeticDecoder) DecodeResidualBlock(ctxBlockCat uint8, co
 	maxNumCoeff := cabacResidualMaxNumCoeff[ctxBlockCat]
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	codedInc := int(boolToUint8(condTermFlagA)) + 2*int(boolToUint8(condTermFlagB))
@@ -2897,6 +2977,9 @@ var cabacLuma8x8LastInc = [63]uint8{
 // callers invoke this only for 8x8 blocks whose coded_block_pattern bit is set.
 // Levels are in 8x8 frame-scan list order and contexts update transactionally.
 func (decoder *CABACArithmeticDecoder) DecodeLuma8x8ResidualBlock(contexts *[CABACContextCount]CABACContextModel) ([64]int32, error) {
+	if decoder.cavlc != nil {
+		return decoder.cavlc.residual8x8(decoder.bits)
+	}
 	var levels [64]int32
 	if contexts == nil {
 		return levels, ErrCABACContextState
@@ -2907,6 +2990,7 @@ func (decoder *CABACArithmeticDecoder) DecodeLuma8x8ResidualBlock(contexts *[CAB
 	}
 	readerCopy := *decoder.bits
 	trial := *decoder
+	trial.cavlc = decoder.cavlc.clone()
 	trial.bits = &readerCopy
 	trialContexts := *contexts
 	var significant [64]bool

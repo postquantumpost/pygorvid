@@ -327,7 +327,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
-	if (first.header.SliceType%5 != 0 && first.header.SliceType%5 != 1) || !first.pps.EntropyCodingMode {
+	if first.header.SliceType%5 != 0 && first.header.SliceType%5 != 1 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 	}
 	width, height := int(first.sps.CodedWidth/16), int(first.sps.CodedHeight/16)
@@ -350,16 +350,25 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 		if err != nil {
 			return Yuv420Frame{}, err
 		}
-		if slice.header.SliceDataBitOffset%8 != 0 || slice.header.SliceDataBitOffset/8 >= uint64(len(slice.rbsp)) {
+		if (slice.pps.EntropyCodingMode && slice.header.SliceDataBitOffset%8 != 0) || slice.header.SliceDataBitOffset/8 >= uint64(len(slice.rbsp)) {
 			return Yuv420Frame{}, ErrBitstreamExhausted
 		}
-		arithmetic, err := NewCABACArithmeticDecoder(slice.rbsp[slice.header.SliceDataBitOffset/8:])
+		var arithmetic *CABACArithmeticDecoder
+		if slice.pps.EntropyCodingMode {
+			arithmetic, err = NewCABACArithmeticDecoder(slice.rbsp[slice.header.SliceDataBitOffset/8:])
+		} else {
+			arithmetic, err = newCAVLCSyntaxDecoder(slice.rbsp, slice.header.SliceDataBitOffset)
+		}
 		if err != nil {
 			return Yuv420Frame{}, err
 		}
+		coefficientCounts := make([][24]uint8, 0)
 		for address := int(slice.header.FirstMacroblockInSlice); ; address++ {
 			if address >= len(history) {
 				return Yuv420Frame{}, fmt.Errorf("slice exceeds the picture")
+			}
+			if arithmetic.cavlc != nil {
+				arithmetic.cavlc.begin(address, int(slice.header.FirstMacroblockInSlice), builder.pictureWidthInMbs, coefficientCounts)
 			}
 			input := nativeIntraInput(slice, address, history, qpy, previousDelta, false)
 			current := nativeMacroblock{slice: slice, result: CABACIIntraMacroblockResult{MacroblockType: 255, QPY: qpy}}
@@ -577,6 +586,9 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 				if err := pool.submit(job); err != nil {
 					return Yuv420Frame{}, err
 				}
+			}
+			if arithmetic.cavlc != nil {
+				coefficientCounts = append(coefficientCounts, arithmetic.cavlc.counts)
 			}
 			end, err := arithmetic.DecodeTerminateBin()
 			if err != nil {

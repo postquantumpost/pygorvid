@@ -117,7 +117,7 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
-	if first.header.SliceType%5 != 2 || !first.pps.EntropyCodingMode {
+	if first.header.SliceType%5 != 2 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 	}
 	builder, err := NewYuv420FrameBuilder(int(first.sps.CodedWidth/16), int(first.sps.CodedHeight/16), 0, 0, 0, 0)
@@ -132,17 +132,26 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 		if err != nil {
 			return Yuv420Frame{}, err
 		}
-		if slice.header.SliceDataBitOffset%8 != 0 || slice.header.SliceDataBitOffset/8 >= uint64(len(slice.rbsp)) {
+		if (slice.pps.EntropyCodingMode && slice.header.SliceDataBitOffset%8 != 0) || slice.header.SliceDataBitOffset/8 >= uint64(len(slice.rbsp)) {
 			return Yuv420Frame{}, ErrBitstreamExhausted
 		}
-		arithmetic, err := NewCABACArithmeticDecoder(slice.rbsp[slice.header.SliceDataBitOffset/8:])
+		var arithmetic *CABACArithmeticDecoder
+		if slice.pps.EntropyCodingMode {
+			arithmetic, err = NewCABACArithmeticDecoder(slice.rbsp[slice.header.SliceDataBitOffset/8:])
+		} else {
+			arithmetic, err = newCAVLCSyntaxDecoder(slice.rbsp, slice.header.SliceDataBitOffset)
+		}
 		if err != nil {
 			return Yuv420Frame{}, err
 		}
 		previousDelta := 0
+		coefficientCounts := make([][24]uint8, 0)
 		for address := int(slice.header.FirstMacroblockInSlice); ; address++ {
 			if address >= len(history) {
 				return Yuv420Frame{}, fmt.Errorf("slice exceeds the picture")
+			}
+			if arithmetic.cavlc != nil {
+				arithmetic.cavlc.begin(address, int(slice.header.FirstMacroblockInSlice), builder.pictureWidthInMbs, coefficientCounts)
 			}
 			input := nativeIntraInput(slice, address, history, qpy, previousDelta, true)
 			result, err := arithmetic.DecodeIIntraMacroblock(input, &contexts, builder, address)
@@ -152,6 +161,9 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 			history[address] = &result
 			decoder.nativeBlocks[address] = nativeMacroblock{result: result, intra: true, slice: slice}
 			qpy, previousDelta = result.QPY, result.QPDelta
+			if arithmetic.cavlc != nil {
+				coefficientCounts = append(coefficientCounts, arithmetic.cavlc.counts)
+			}
 			end, err := arithmetic.DecodeTerminateBin()
 			if err != nil {
 				return Yuv420Frame{}, err

@@ -1213,10 +1213,7 @@ impl H264Decoder {
             .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
             .cloned()
             .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
-        if !pps.entropy_coding_mode {
-            return Err(invalid("dependency slice does not use CABAC"));
-        }
-        if dependency_slice.header.slice_data_bit_offset % 8 != 0 {
+        if pps.entropy_coding_mode && dependency_slice.header.slice_data_bit_offset % 8 != 0 {
             return Err(invalid("CABAC slice-data offset is not byte-aligned"));
         }
         let rbsp = crate::ebsp_to_rbsp(
@@ -1229,7 +1226,11 @@ impl H264Decoder {
         let cabac_data = rbsp
             .get(byte_offset..)
             .ok_or_else(|| invalid("CABAC slice-data offset exceeds the NAL unit"))?;
-        let mut cabac = crate::CabacArithmeticDecoder::new(cabac_data)?;
+        let mut cabac = if pps.entropy_coding_mode {
+            crate::CabacArithmeticDecoder::new(cabac_data)?
+        } else {
+            crate::CabacArithmeticDecoder::new_cavlc(&rbsp, dependency_slice.header.slice_data_bit_offset)?
+        };
         let slice_qpy = i32::try_from(
             26_i64 + pps.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta,
         )
@@ -1402,9 +1403,6 @@ impl H264Decoder {
             .iter()
             .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
             .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
-        if !pps.entropy_coding_mode {
-            return Err(invalid("dependency slice does not use CABAC"));
-        }
         let width_in_mbs = usize::try_from(sps.coded_width / 16)
             .map_err(|_| invalid("picture width exceeds the host address space"))?;
         let height_in_mbs = usize::try_from(sps.coded_height / 16)
@@ -1751,9 +1749,6 @@ impl H264Decoder {
             .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
             .cloned()
             .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
-        if !pps.entropy_coding_mode {
-            return Err(invalid("dependency slice does not use CABAC"));
-        }
         if pps.weighted_pred || pps.weighted_bipred_idc != 0 {
             return Err(invalid("weighted inter prediction is unsupported"));
         }

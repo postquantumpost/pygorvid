@@ -20,6 +20,21 @@ fn decoder_checkpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn cavlc_ipb_frames_match_reference() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264");
+    let expected = fs::read(root.join("cavlc-32x32-reference.yuv")).unwrap();
+    for threads in [1, 4] {
+        let mut decoder = H264Decoder::new(VideoSampleReader::open(root.join("cavlc-32x32.mp4")).unwrap());
+        decoder.set_threads(threads);
+        for (index, reference) in expected.chunks_exact(32 * 32 * 3 / 2).enumerate() {
+            let frame = decoder.decode_frame(index as u64).unwrap();
+            let actual = [frame.y, frame.u, frame.v].concat();
+            assert_eq!(actual, reference, "CAVLC frame {index}, threads {threads}");
+        }
+    }
+}
+
+#[test]
 fn a_decoder_smoke_16x16() {
     assert_decoder_smoke_fixture(
         "decoder-smoke-16x16.mp4",

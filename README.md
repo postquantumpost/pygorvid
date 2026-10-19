@@ -44,7 +44,15 @@ prints only its normal per-file result.
 Go, Python, and Rust frame extraction use the native MP4 reader, H.264 decoder,
 RGB conversion, and PNG/JPEG encoders. No runtime `ffmpeg` or external image
 library is required. Extraction supports the implemented progressive, 8-bit
-4:2:0 CABAC H.264 subset; unsupported streams fail explicitly.
+4:2:0 H.264 subset with CABAC or CAVLC entropy coding; unsupported streams
+fail explicitly.
+
+CAVLC support includes slice/macroblock syntax, skip runs, coefficient decoding,
+neighboring coefficient-count contexts, and reconstruction for I/P/B pictures.
+The implementations live in codec-specific `h264_cavlc*` files and reuse the
+existing H.264 prediction, inverse transforms, and filtering. A compact eight-frame
+32x32 I/P/B fixture in `testdata/h264/cavlc-32x32.mp4` is compared against raw
+reference YUV output in all three languages, including multithreaded decoding.
 
 The MP4 box readers recognize HEVC `hvc1`/`hev1` sample entries and parse `hvcC`
 configuration records, including profile, level, bit depths, NAL length size,
@@ -130,13 +138,15 @@ What is tested and working:
 - Elgato
 - OBS
 - Linux Video Trimmer
-
-What is not tested but I have sample videos available:
-- Android phone video, horizontal
-- Android phone video, vertical
-- DJI drone video
 - Dashcam video, low resolution
 - Dashcam video, high resolution
+
+What is not supported
+- Android phone video, horizontal, it uses HEVC
+- Android phone video, vertical, it uses HEVC
+- DJI drone video, it uses HEVC
+
+What is not tested but I have sample videos available:
 
 What is not tested:
 - full set of ITU sample data

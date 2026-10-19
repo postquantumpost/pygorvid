@@ -661,15 +661,17 @@ class H264Decoder:
             sequence_set = sequence_sets_by_id.get(picture_set.sequence_parameter_set_id)
             if sequence_set is None:
                 raise DecoderError("dependency slice references an unavailable SPS")
-            if not picture_set.entropy_coding_mode:
-                raise DecoderError("dependency slice does not use CABAC")
             bit_offset = dependency_slice.header.slice_data_bit_offset
-            if bit_offset % 8:
+            if picture_set.entropy_coding_mode and bit_offset % 8:
                 raise DecoderError("CABAC slice-data offset is not byte-aligned")
             rbsp = ebsp_to_rbsp(dependency_slice.nal_unit[1:])
-            cabac = CABACArithmeticDecoder(
-                rbsp[bit_offset // 8 :], timeout_check=timeout_check
-            )
+            if picture_set.entropy_coding_mode:
+                cabac = CABACArithmeticDecoder(
+                    rbsp[bit_offset // 8 :], timeout_check=timeout_check
+                )
+            else:
+                from .h264_cavlc_syntax import new_cavlc_syntax_decoder
+                cabac = new_cavlc_syntax_decoder(rbsp, bit_offset, timeout_check)
             slice_qpy = 26 + picture_set.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta
             contexts = initialize_slice_contexts(
                 dependency_slice.header.slice_type,
@@ -1094,8 +1096,6 @@ class H264Decoder:
             sequence_set = sequence_sets_by_id.get(picture_set.sequence_parameter_set_id)
             if sequence_set is None:
                 raise DecoderError("dependency slice references an unavailable SPS")
-            if not picture_set.entropy_coding_mode:
-                raise DecoderError("dependency slice does not use CABAC")
             if picture_set.weighted_pred or picture_set.weighted_bipred_idc:
                 raise DecoderError("weighted inter prediction is unsupported")
 

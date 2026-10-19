@@ -6,6 +6,7 @@ from typing import Literal
 
 from .bitreader import BitReader, BitstreamError
 from .h264_cabac_init import CONTEXT_INIT_TABLE
+from .h264_cavlc_syntax import CAVLCSyntax
 from .h264_deferred import (
     PLACEHOLDER_SAMPLES as _PLACEHOLDER_SAMPLES,
     InterResidual as _InterResidual,
@@ -1473,6 +1474,7 @@ class CABACArithmeticDecoder:
             raise CABACError("CABAC initial offset is outside the arithmetic range")
         self._code_range = self.INITIAL_RANGE
         self._terminated = False
+        self._cavlc = None
 
     @property
     def code_range(self) -> int:
@@ -1483,6 +1485,8 @@ class CABACArithmeticDecoder:
         return self._code_offset
 
     def decode_bin(self, model: CABACContextModel) -> bool:
+        if getattr(self, "_cavlc", None) is not None:
+            raise CABACError("unhandled CAVLC syntax reached arithmetic decoder")
         if not isinstance(model, CABACContextModel) or not 0 <= model._state_index < 64:
             raise CABACError("CABAC context state index is outside [0,63]")
         self._validate_bin_state()
@@ -1507,6 +1511,8 @@ class CABACArithmeticDecoder:
         return decoded
 
     def decode_mb_qp_delta(self, contexts: list[CABACContextModel], previous_delta: int) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.signed(self._bits)
         if not isinstance(contexts, list) or len(contexts) != 4 or any(
             not isinstance(model, CABACContextModel) or not 0 <= model._state_index < 64
             for model in contexts
@@ -1522,6 +1528,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(4)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -1547,6 +1554,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -1561,6 +1569,8 @@ class CABACArithmeticDecoder:
         top_available: bool,
         top_skipped: bool,
     ) -> bool:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.skipped(self._bits)
         if slice_type > 9 or slice_type % 5 not in (0, 1):
             raise CABACError("CABAC mb_skip_flag is unsupported for this slice type")
         if not isinstance(contexts, list) or len(contexts) != 3:
@@ -1877,6 +1887,8 @@ class CABACArithmeticDecoder:
         neighbor_context_increment: int,
         contexts: list[CABACContextModel],
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.reference(self._bits, max_ref_idx_minus1)
         """Decode unary ref_idx_l0/l1 using a six-context offset bank."""
         if (
             not isinstance(max_ref_idx_minus1, int)
@@ -1907,6 +1919,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(6)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -1927,6 +1940,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -1955,6 +1969,8 @@ class CABACArithmeticDecoder:
         top_available: bool,
         top_intra16_or_pcm: bool,
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.mb_type(self._bits, slice_type)
         if slice_type > 9 or slice_type % 5 != 2:
             raise CABACError("I-slice mb_type is unsupported for this slice type")
         if not isinstance(contexts, list) or len(contexts) != 8 or any(
@@ -1972,6 +1988,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(8)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -1994,6 +2011,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -2504,7 +2522,7 @@ class CABACArithmeticDecoder:
                 y_block = bytes(trial._bits.read_bits(8) for _ in range(256))
                 cb_block = bytes(trial._bits.read_bits(8) for _ in range(64))
                 cr_block = bytes(trial._bits.read_bits(8) for _ in range(64))
-                offset = trial._bits.read_bits(9)
+                offset = trial._bits.read_bits(9) if trial._cavlc is None else 0
             except BitstreamError as error:
                 raise CABACError(f"truncated I_PCM macroblock: {error}") from error
             if offset >= 510:
@@ -2760,7 +2778,7 @@ class CABACArithmeticDecoder:
         except BitstreamError as error:
             raise CABACError(f"truncated I_PCM samples: {error}") from error
         try:
-            offset = trial._bits.read_bits(9)
+            offset = trial._bits.read_bits(9) if trial._cavlc is None else 0
         except BitstreamError as error:
             raise CABACError(f"truncated I_PCM CABAC reinitialization: {error}") from error
         if offset >= self.INITIAL_RANGE:
@@ -2784,6 +2802,8 @@ class CABACArithmeticDecoder:
         left_b_skip_or_direct: bool = False,
         top_b_skip_or_direct: bool = False,
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.mb_type(self._bits, slice_type)
         """Decode P/SP mb_type (0-3, intra 5-30) or B mb_type (0-22, intra 23-48).
 
         Contexts are the whole-slice ctxIdx 0-459 list (Tables 9-37, 9-39, 9-41).
@@ -2846,6 +2866,8 @@ class CABACArithmeticDecoder:
         return mb_type + int(self.decode_bin(contexts[offset + 3]))
 
     def decode_sub_mb_type(self, slice_type: int, contexts: list[CABACContextModel]) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.unsigned(self._bits, 3 if slice_type % 5 == 0 else 12)
         """Decode sub_mb_type for P/SP (0-3, ctxIdx 21-23) or B (0-12, ctxIdx 36-39)."""
         if not isinstance(slice_type, int) or not 0 <= slice_type <= 9 or slice_type % 5 not in (0, 1):
             raise CABACError("CABAC sub_mb_type is unsupported for this slice type")
@@ -3032,10 +3054,17 @@ class CABACArithmeticDecoder:
         driver,
     ) -> tuple[CABACSliceMacroblockResult, ...]:
         decoded = []
+        coefficient_counts = []
         macroblock_address = first_macroblock_address
         while True:
             if driver is not None:
                 driver.apply_ready(decoded, builder)
+            if getattr(self, "_cavlc", None) is not None:
+                width = builder.picture_width_in_mbs
+                left = coefficient_counts[-1] if macroblock_address % width and coefficient_counts else None
+                top_index = macroblock_address - first_macroblock_address - width
+                top = coefficient_counts[top_index] if top_index >= 0 else None
+                self._cavlc.begin(left, top)
             while True:
                 macroblock_input = input_provider(macroblock_address, decoded)
                 try:
@@ -3052,6 +3081,8 @@ class CABACArithmeticDecoder:
                 result = macroblock_result.macroblock
             else:
                 result = macroblock_result
+            if getattr(self, "_cavlc", None) is not None:
+                coefficient_counts.append(tuple(self._cavlc.counts))
             decoded.append(CABACSliceMacroblockResult(macroblock_address, result))
             if driver is not None:
                 job = driver.take_job()
@@ -3807,6 +3838,8 @@ class CABACArithmeticDecoder:
         left_has_nonzero_mode: bool,
         top_has_nonzero_mode: bool,
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.unsigned(self._bits, 3)
         if not isinstance(contexts, list) or len(contexts) != 4 or any(
             not isinstance(model, CABACContextModel) or not 0 <= model._state_index < 64
             for model in contexts
@@ -3822,6 +3855,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(4)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -3841,6 +3875,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -3849,6 +3884,8 @@ class CABACArithmeticDecoder:
     def decode_intra4x4_pred_mode(
         self, predicted_mode: int, contexts: list[CABACContextModel]
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.prediction_mode(self._bits, predicted_mode)
         if not 0 <= predicted_mode <= 8:
             raise CABACError("CABAC intra4x4 prediction mode is outside [0,8]")
         if not isinstance(contexts, list) or len(contexts) != 2 or any(
@@ -3866,6 +3903,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(2)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -3884,6 +3922,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -3912,6 +3951,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(2)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -3930,6 +3970,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -3941,6 +3982,8 @@ class CABACArithmeticDecoder:
         left_has_8x8_transform: bool,
         top_has_8x8_transform: bool,
     ) -> bool:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._bits.read_bit()
         if not isinstance(contexts, list) or len(contexts) != 3:
             raise CABACError("transform_size_8x8_flag requires context models 399 through 401")
         context_index = int(left_has_8x8_transform) + int(top_has_8x8_transform)
@@ -3952,6 +3995,8 @@ class CABACArithmeticDecoder:
         top_cbp: int,
         contexts: list[CABACContextModel],
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.luma_pattern(self._bits)
         if not 0 <= left_cbp <= 15 or not 0 <= top_cbp <= 15:
             raise CABACError("CABAC luma coded_block_pattern is outside [0,15]")
         if not isinstance(contexts, list) or len(contexts) != 4 or any(
@@ -3969,6 +4014,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(4)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -3988,6 +4034,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -3999,6 +4046,8 @@ class CABACArithmeticDecoder:
         top_cbp: int,
         contexts: list[CABACContextModel],
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.chroma_cbp
         if not 0 <= left_cbp <= 2 or not 0 <= top_cbp <= 2:
             raise CABACError("CABAC chroma coded_block_pattern is outside [0,2]")
         if not isinstance(contexts, list) or len(contexts) != 8 or any(
@@ -4016,6 +4065,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(8)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -4032,6 +4082,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -4074,6 +4125,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_significant = [CABACContextModel.__new__(CABACContextModel) for _ in range(15)]
         trial_last = [CABACContextModel.__new__(CABACContextModel) for _ in range(15)]
         for target, source in zip(trial_significant, significant_contexts):
@@ -4099,6 +4151,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(significant_contexts, trial_significant):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -4128,6 +4181,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_first = CABACContextModel.__new__(CABACContextModel)
         trial_greater = CABACContextModel.__new__(CABACContextModel)
         trial_first._state_index = first_context._state_index
@@ -4156,6 +4210,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         first_context._state_index = trial_first._state_index
         first_context._value_mps = trial_first._value_mps
         greater_one_context._state_index = trial_greater._state_index
@@ -4172,6 +4227,8 @@ class CABACArithmeticDecoder:
     def decode_motion_vector_difference(
         self, neighbor_magnitude: int, contexts: list[CABACContextModel]
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.signed(self._bits)
         """Decode one MVD component using seven contexts starting at 40 or 47."""
         if (
             not isinstance(neighbor_magnitude, int)
@@ -4214,6 +4271,8 @@ class CABACArithmeticDecoder:
         context_index: int,
         contexts: list[CABACContextModel],
     ) -> int:
+        if getattr(self, "_cavlc", None) is not None:
+            return CAVLCSyntax.signed(self._bits)
         if not isinstance(contexts, list) or len(contexts) != 7 or any(
             not isinstance(model, CABACContextModel)
             or not 0 <= model._state_index < 64
@@ -4229,6 +4288,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(7)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -4271,6 +4331,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -4300,6 +4361,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = [CABACContextModel.__new__(CABACContextModel) for _ in range(10)]
         for target, source in zip(trial_contexts, contexts):
             target._state_index = source._state_index
@@ -4324,6 +4386,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for target, source in zip(contexts, trial_contexts):
             target._state_index = source._state_index
             target._value_mps = source._value_mps
@@ -4354,6 +4417,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_banks = [
             [CABACContextModel.__new__(CABACContextModel) for _ in bank]
             for bank in context_banks
@@ -4371,6 +4435,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for targets, sources in zip(context_banks, trial_banks):
             for target, source in zip(targets, sources):
                 target._state_index = source._state_index
@@ -4414,6 +4479,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_banks = [
             [CABACContextModel.__new__(CABACContextModel) for _ in bank]
             for bank in context_banks
@@ -4436,6 +4502,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for targets, sources in zip(context_banks, trial_banks):
             for target, source in zip(targets, sources):
                 target._state_index = source._state_index
@@ -4476,6 +4543,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_banks = [
             [CABACContextModel.__new__(CABACContextModel) for _ in bank]
             for bank in context_banks
@@ -4510,6 +4578,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         for targets, sources in zip(context_banks, trial_banks):
             for target, source in zip(targets, sources):
                 target._state_index = source._state_index
@@ -4549,6 +4618,8 @@ class CABACArithmeticDecoder:
         cond_term_flag_b: bool,
         contexts: list[CABACContextModel],
     ) -> tuple[list[int], bool]:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.residual(self._bits, ctx_block_cat)
         """Decode coded_block_flag and residual_block_cabac for ctxBlockCat 0-4 (4:2:0).
 
         Contexts are the whole-slice ctxIdx 0-459 list and update transactionally.
@@ -4599,6 +4670,8 @@ class CABACArithmeticDecoder:
         return levels, coded
 
     def decode_luma8x8_residual_block(self, contexts: list[CABACContextModel]) -> list[int]:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.residual8x8(self._bits)
         """Decode residual_block_cabac for ctxBlockCat 5 in a frame macroblock.
 
         coded_block_flag is not parsed because it is inferred to be 1 when
@@ -4670,6 +4743,7 @@ class CABACArithmeticDecoder:
         trial._code_range = self._code_range
         trial._code_offset = self._code_offset
         trial._terminated = self._terminated
+        trial._cavlc = self._cavlc.clone() if getattr(self, "_cavlc", None) is not None else None
         trial_contexts = contexts.copy()
         indices = range(len(contexts)) if context_indices is None else context_indices
         for index in indices:
@@ -4691,6 +4765,7 @@ class CABACArithmeticDecoder:
         self._code_range = trial._code_range
         self._code_offset = trial._code_offset
         self._terminated = trial._terminated
+        self._cavlc = getattr(trial, "_cavlc", None)
         if context_indices is None:
             context_pairs = zip(contexts, trial_contexts)
         else:
@@ -4715,6 +4790,8 @@ class CABACArithmeticDecoder:
         return decoded
 
     def decode_terminate_bin(self) -> bool:
+        if getattr(self, "_cavlc", None) is not None:
+            return self._cavlc.finished(self._bits)
         self._validate_bin_state()
         start_offset = self._bits._bit_offset
         original_range, original_offset = self._code_range, self._code_offset
