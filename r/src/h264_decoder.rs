@@ -729,7 +729,10 @@ impl H264Decoder {
     pub fn new(sample_reader: crate::videosamplereader::VideoSampleReader) -> Self {
         let first_sync_sample_index = sample_reader.first_sync_sample_index();
         let sample_count = sample_reader.sample_count();
-        let configuration = sample_reader.avc_configuration().cloned().unwrap_or_default();
+        let configuration = sample_reader
+            .avc_configuration()
+            .cloned()
+            .unwrap_or_default();
         let mut unsupported_feature = sample_reader.codec() != crate::VideoCodec::H264;
         let mut sequence_parameter_sets = Vec::new();
         for nal in &configuration.sequence_parameter_sets {
@@ -1236,7 +1239,10 @@ impl H264Decoder {
         let mut cabac = if pps.entropy_coding_mode {
             crate::CabacArithmeticDecoder::new(cabac_data)?
         } else {
-            crate::CabacArithmeticDecoder::new_cavlc(&rbsp, dependency_slice.header.slice_data_bit_offset)?
+            crate::CabacArithmeticDecoder::new_cavlc(
+                &rbsp,
+                dependency_slice.header.slice_data_bit_offset,
+            )?
         };
         let slice_qpy = i32::try_from(
             26_i64 + pps.pic_init_qp_minus26 + dependency_slice.header.slice_qp_delta,

@@ -37,8 +37,9 @@ def _luma_block(frame, macroblock_x, macroblock_y, x, y, width, height, motion, 
     from .h264_reconstruction import _LumaFractionalSampleCache
 
     mv_x, mv_y = motion
+    frame._validate_plane(frame.y, frame.width, frame.height, frame.y_stride)
     interpolator = _LumaFractionalSampleCache(
-        frame.luma_plane_bytes(), frame.width, frame.height, frame.width, timeout_check
+        frame.y, frame.width, frame.height, frame.y_stride, timeout_check
     )
     return [
         interpolator.sample(
@@ -59,13 +60,14 @@ def _chroma_blocks(frame, macroblock_x, macroblock_y, x, y, width, height, motio
     chroma_width = (frame.width + 1) // 2
     chroma_height = (frame.height + 1) // 2
     planes = []
-    for plane in (frame.u_plane_bytes(), frame.v_plane_bytes()):
+    for plane, stride in ((frame.u, frame.u_stride), (frame.v, frame.v_stride)):
+        frame._validate_plane(plane, chroma_width, chroma_height, stride)
         planes.append([
             interpolate_chroma_fractional_sample(
                 plane,
                 chroma_width,
                 chroma_height,
-                chroma_width,
+                stride,
                 macroblock_x * 8 + x // 2 + column + (mv_x >> 3),
                 macroblock_y * 8 + y // 2 + row + (mv_y >> 3),
                 mv_x & 7,

@@ -14,13 +14,16 @@ class Yuv420Frame:
     u: bytes
     v: bytes
 
-    def _plane_bytes(self, plane: bytes, width: int, height: int, stride: int) -> bytes:
+    def _validate_plane(self, plane: bytes, width: int, height: int, stride: int) -> None:
         if any(not isinstance(value, int) or isinstance(value, bool) for value in (width, height, stride)):
             raise ValueError("reference picture frame layout is invalid or truncated")
         if stride <= 0 or stride < width:
             raise ValueError("reference picture frame layout is invalid or truncated")
         if len(plane) < stride * height:
             raise ValueError("reference picture frame layout is invalid or truncated")
+
+    def _plane_bytes(self, plane: bytes, width: int, height: int, stride: int) -> bytes:
+        self._validate_plane(plane, width, height, stride)
         if stride == width and isinstance(plane, bytes) and len(plane) == width * height:
             return plane
         return b"".join(plane[row * stride : row * stride + width] for row in range(height))
@@ -40,5 +43,4 @@ class Yuv420Frame:
 
     def luma_plane_matches(self, reference: bytes) -> bool:
         return self.luma_plane_bytes() == bytes(reference)
-
 

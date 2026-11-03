@@ -24,7 +24,8 @@ fn cavlc_ipb_frames_match_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264");
     let expected = fs::read(root.join("cavlc-32x32-reference.yuv")).unwrap();
     for threads in [1, 4] {
-        let mut decoder = H264Decoder::new(VideoSampleReader::open(root.join("cavlc-32x32.mp4")).unwrap());
+        let mut decoder =
+            H264Decoder::new(VideoSampleReader::open(root.join("cavlc-32x32.mp4")).unwrap());
         decoder.set_threads(threads);
         for (index, reference) in expected.chunks_exact(32 * 32 * 3 / 2).enumerate() {
             let frame = decoder.decode_frame(index as u64).unwrap();
@@ -493,7 +494,9 @@ fn decoder_high52_filtered_p_picture_matches_reference_planes() {
     let mut decoder =
         H264Decoder::new_with_checkpoint_dir(reader, decoder_checkpoint_path("idr")).unwrap();
     let references_before = decoder.reference_pictures();
-    let restored_p_picture = references_before.iter().any(|reference| reference.identifier == 4);
+    let restored_p_picture = references_before
+        .iter()
+        .any(|reference| reference.identifier == 4);
     let mut frame = decoder.decode_frame(4).unwrap();
     assert_eq!((frame.width, frame.height), (3840, 2160));
     let hashes = [&frame.y, &frame.u, &frame.v].map(|plane| {

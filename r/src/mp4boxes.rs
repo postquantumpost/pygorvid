@@ -556,7 +556,12 @@ pub struct VisualSampleEntryBox {
 
 impl VisualSampleEntryBox {
     pub(crate) fn new(header: BoxHeader) -> Self {
-        Self { header, children: Vec::new(), width: 0, height: 0 }
+        Self {
+            header,
+            children: Vec::new(),
+            width: 0,
+            height: 0,
+        }
     }
 }
 
@@ -566,7 +571,10 @@ impl Mp4Box for VisualSampleEntryBox {
     }
     fn read(&mut self, r: &mut dyn ReadSeek) -> io::Result<()> {
         if self.header.end - self.header.payload_start() < 78 {
-            return Err(invalid(format!("{} sample entry too short", String::from_utf8_lossy(&self.header.kind))));
+            return Err(invalid(format!(
+                "{} sample entry too short",
+                String::from_utf8_lossy(&self.header.kind)
+            )));
         }
         r.seek(SeekFrom::Start(self.header.payload_start() + 24))?;
         let mut dimensions = [0u8; 4];

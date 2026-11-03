@@ -222,3 +222,6 @@ AGENTS.md
 samples
 tmp
 .vscode/settings.json
+docs/
+itutests
+stream

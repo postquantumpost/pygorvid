@@ -216,11 +216,18 @@ fn reads_hevc_metadata_and_validates_configuration_count() {
                 assert_eq!(reader.codec(), pygorvid::VideoCodec::Hevc);
                 assert_eq!(reader.hevc_configuration().unwrap().bit_depth_luma, 10);
                 assert_eq!(reader.sample_count(), 0);
-                let error = pygorvid::VideoDecoder::new(reader).err().expect("decoder must report unavailability even for an empty track");
+                let error = pygorvid::VideoDecoder::new(reader)
+                    .err()
+                    .expect("decoder must report unavailability even for an empty track");
                 assert!(matches!(error, pygorvid::DecodeError::Codec(_)));
             } else {
-                let error = VideoSampleReader::open(&path).err().expect("invalid configuration count");
-                assert_eq!(error.to_string(), "HEVC sample entry must contain one hvcC box");
+                let error = VideoSampleReader::open(&path)
+                    .err()
+                    .expect("invalid configuration count");
+                assert_eq!(
+                    error.to_string(),
+                    "HEVC sample entry must contain one hvcC box"
+                );
             }
             fs::remove_dir_all(dir).unwrap();
         }

@@ -4,10 +4,10 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::h264_mp4::AvcConfiguration;
 use crate::codec::{CodecConfiguration, VideoCodec};
-use crate::mp4boxes::{find, read_boxes, Mp4Box};
 use crate::codec_sample::split_length_prefixed_nals;
+use crate::h264_mp4::AvcConfiguration;
+use crate::mp4boxes::{find, read_boxes, Mp4Box};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressedSample {
@@ -176,7 +176,8 @@ impl VideoSampleReader {
     }
 
     pub fn configuration(&self) -> &AvcConfiguration {
-        self.avc_configuration().expect("AVC configuration requested for a non-H.264 track")
+        self.avc_configuration()
+            .expect("AVC configuration requested for a non-H.264 track")
     }
 
     pub fn codec(&self) -> VideoCodec {

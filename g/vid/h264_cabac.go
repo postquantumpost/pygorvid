@@ -540,20 +540,20 @@ func (decoder *CABACArithmeticDecoder) DecodePSkipMacroblock(input CABACPSkipMac
 		!(input.Top.RefIdx == 0 && input.Top.Vector == (MotionVector{})) {
 		result.MotionVector = PredictMotionVector(0, input.Left, input.Top, input.TopRight, input.TopLeft)
 	}
-	refY, err := input.ReferenceFrame.LumaPlaneBytes()
-	if err != nil {
-		return CABACPSkipMacroblockResult{}, err
+	refY, refCb, refCr := input.ReferenceFrame.Y, input.ReferenceFrame.U, input.ReferenceFrame.V
+	yStride, cbStride, crStride := input.ReferenceFrame.YStride, input.ReferenceFrame.UStride, input.ReferenceFrame.VStride
+	if yStride <= 0 {
+		yStride = input.ReferenceFrame.Width
 	}
-	refCb, err := input.ReferenceFrame.UPlaneBytes()
-	if err != nil {
-		return CABACPSkipMacroblockResult{}, err
+	chromaWidth, chromaHeight := (input.ReferenceFrame.Width+1)/2, (input.ReferenceFrame.Height+1)/2
+	if cbStride <= 0 {
+		cbStride = chromaWidth
 	}
-	refCr, err := input.ReferenceFrame.VPlaneBytes()
-	if err != nil {
-		return CABACPSkipMacroblockResult{}, err
+	if crStride <= 0 {
+		crStride = chromaWidth
 	}
 	lumaSampler, err := newLumaFractionalSampleSampler(
-		refY, input.ReferenceFrame.Width, input.ReferenceFrame.Height, input.ReferenceFrame.Width,
+		refY, input.ReferenceFrame.Width, input.ReferenceFrame.Height, yStride,
 	)
 	if err != nil {
 		return CABACPSkipMacroblockResult{}, err
@@ -570,17 +570,16 @@ func (decoder *CABACArithmeticDecoder) DecodePSkipMacroblock(input CABACPSkipMac
 			}
 		}
 	}
-	chromaWidth, chromaHeight := (input.ReferenceFrame.Width+1)/2, (input.ReferenceFrame.Height+1)/2
 	for row := 0; row < 8; row++ {
 		for column := 0; column < 8; column++ {
 			index := row*8 + column
 			xInt := mbX*8 + column + (motionX >> 3)
 			yInt := mbY*8 + row + (motionY >> 3)
-			result.Cb[index], err = interpolateChromaFractionalSample(refCb, chromaWidth, chromaHeight, chromaWidth, xInt, yInt, uint8(motionX&7), uint8(motionY&7))
+			result.Cb[index], err = interpolateChromaFractionalSample(refCb, chromaWidth, chromaHeight, cbStride, xInt, yInt, uint8(motionX&7), uint8(motionY&7))
 			if err != nil {
 				return CABACPSkipMacroblockResult{}, err
 			}
-			result.Cr[index], err = interpolateChromaFractionalSample(refCr, chromaWidth, chromaHeight, chromaWidth, xInt, yInt, uint8(motionX&7), uint8(motionY&7))
+			result.Cr[index], err = interpolateChromaFractionalSample(refCr, chromaWidth, chromaHeight, crStride, xInt, yInt, uint8(motionX&7), uint8(motionY&7))
 			if err != nil {
 				return CABACPSkipMacroblockResult{}, err
 			}

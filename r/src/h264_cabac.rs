@@ -2464,9 +2464,16 @@ pub fn derive_intra4x4_predicted_mode(
 impl<'a> CabacArithmeticDecoder<'a> {
     pub(crate) fn new_cavlc(data: &'a [u8], bit_offset: usize) -> io::Result<Self> {
         let mut bits = BitReader::new(data);
-        for _ in 0..bit_offset { bits.read_bit()?; }
-        Ok(Self { bits, code_range: INITIAL_RANGE, code_offset: 0, terminated: false,
-            cavlc: Some(crate::h264_cavlc_syntax::CavlcSyntax::default()) })
+        for _ in 0..bit_offset {
+            bits.read_bit()?;
+        }
+        Ok(Self {
+            bits,
+            code_range: INITIAL_RANGE,
+            code_offset: 0,
+            terminated: false,
+            cavlc: Some(crate::h264_cavlc_syntax::CavlcSyntax::default()),
+        })
     }
 
     /// Initializes one byte-aligned CABAC substream after slice-header alignment bits.
@@ -2497,7 +2504,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
 
     /// Decodes one regular context-coded bin and updates its model.
     pub fn decode_bin(&mut self, model: &mut CabacContextModel) -> io::Result<bool> {
-        if self.cavlc.is_some() { return Err(invalid("unhandled CAVLC syntax reached arithmetic decoder")); }
+        if self.cavlc.is_some() {
+            return Err(invalid("unhandled CAVLC syntax reached arithmetic decoder"));
+        }
         self.validate_bin_state()?;
         if model.state_index >= 64 {
             return Err(invalid("CABAC context state index is outside [0,63]"));
@@ -2542,7 +2551,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         contexts: &mut [CabacContextModel; 4],
         previous_delta: i32,
     ) -> io::Result<i32> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits);
+        }
         self.validate_bin_state()?;
         if contexts.iter().any(|model| model.state_index >= 64) {
             return Err(invalid("mb_qp_delta requires valid contexts 60 through 63"));
@@ -2601,7 +2612,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_available: bool,
         top_skipped: bool,
     ) -> io::Result<bool> {
-        if let Some(syntax) = self.cavlc.as_mut() { return syntax.skipped(&mut self.bits); }
+        if let Some(syntax) = self.cavlc.as_mut() {
+            return syntax.skipped(&mut self.bits);
+        }
         if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
             return Err(invalid(
                 "CABAC mb_skip_flag is unsupported for this slice type",
@@ -2646,7 +2659,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
-        self.cavlc = trial.cavlc;
+            self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacPSkipMacroblockResult::default());
         }
@@ -2739,7 +2752,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
-        self.cavlc = trial.cavlc;
+            self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacBDirectMacroblockResult::default());
         }
@@ -2949,7 +2962,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
         neighbor_context_increment: usize,
         contexts: &mut [CabacContextModel; 6],
     ) -> io::Result<u8> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::reference(&mut self.bits, max_ref_idx_minus1); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::reference(
+                &mut self.bits,
+                max_ref_idx_minus1,
+            );
+        }
         if max_ref_idx_minus1 > 31 {
             return Err(invalid("ref_idx maximum is outside [0,31]"));
         }
@@ -3024,7 +3042,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_available: bool,
         top_intra16_or_pcm: bool,
     ) -> io::Result<u8> {
-        if let Some(syntax) = self.cavlc.as_mut() { return syntax.mb_type(&mut self.bits, slice_type); }
+        if let Some(syntax) = self.cavlc.as_mut() {
+            return syntax.mb_type(&mut self.bits, slice_type);
+        }
         if slice_type > 9 || slice_type % 5 != 2 {
             return Err(invalid(
                 "I-slice mb_type is unsupported for this slice type",
@@ -3435,7 +3455,11 @@ impl<'a> CabacArithmeticDecoder<'a> {
             for sample in &mut cr_block {
                 *sample = trial.bits.read_bits(8)? as u8;
             }
-            let offset = if trial.cavlc.is_some() { 0 } else { trial.bits.read_bits(9)? as u32 };
+            let offset = if trial.cavlc.is_some() {
+                0
+            } else {
+                trial.bits.read_bits(9)? as u32
+            };
             if offset >= INITIAL_RANGE {
                 return Err(invalid(
                     "I_PCM CABAC offset is outside the arithmetic range",
@@ -3452,7 +3476,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
-        self.cavlc = trial.cavlc;
+            self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(result);
         }
@@ -4003,7 +4027,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         left_b_skip_or_direct: bool,
         top_b_skip_or_direct: bool,
     ) -> io::Result<u8> {
-        if let Some(syntax) = self.cavlc.as_mut() { return syntax.mb_type(&mut self.bits, slice_type); }
+        if let Some(syntax) = self.cavlc.as_mut() {
+            return syntax.mb_type(&mut self.bits, slice_type);
+        }
         if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
             return Err(invalid(
                 "CABAC inter mb_type is unsupported for this slice type",
@@ -4110,7 +4136,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
         slice_type: u8,
         contexts: &mut [CabacContextModel],
     ) -> io::Result<u8> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(&mut self.bits, if slice_type % 5 == 0 { 3 } else { 12 }); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(
+                &mut self.bits,
+                if slice_type % 5 == 0 { 3 } else { 12 },
+            );
+        }
         if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
             return Err(invalid(
                 "CABAC sub_mb_type is unsupported for this slice type",
@@ -4233,7 +4264,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
-        self.cavlc = trial.cavlc;
+            self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacPBMacroblockLayerResult {
                 skipped: true,
@@ -4394,8 +4425,15 @@ impl<'a> CabacArithmeticDecoder<'a> {
             }
             if let Some(syntax) = self.cavlc.as_mut() {
                 let width = builder.picture_width_in_mbs();
-                let left = if macroblock_address % width != 0 { coefficient_counts.last().copied() } else { None };
-                let top = macroblock_address.checked_sub(width + first_macroblock_address).and_then(|index| coefficient_counts.get(index)).copied();
+                let left = if macroblock_address % width != 0 {
+                    coefficient_counts.last().copied()
+                } else {
+                    None
+                };
+                let top = macroblock_address
+                    .checked_sub(width + first_macroblock_address)
+                    .and_then(|index| coefficient_counts.get(index))
+                    .copied();
                 syntax.begin(left, top);
             }
             let mut macroblock_input = input_provider(macroblock_address, &decoded)?;
@@ -4421,7 +4459,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     result => break result?,
                 }
             };
-            if let Some(syntax) = self.cavlc.as_ref() { coefficient_counts.push(syntax.counts); }
+            if let Some(syntax) = self.cavlc.as_ref() {
+                coefficient_counts.push(syntax.counts);
+            }
             decoded.push(CabacDecodedSliceMacroblock {
                 address: macroblock_address,
                 result: macroblock_result,
@@ -4587,7 +4627,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
             self.terminated = trial.terminated;
-        self.cavlc = trial.cavlc;
+            self.cavlc = trial.cavlc;
             *contexts = trial_contexts;
             return Ok(CabacPBMacroblockPrediction::Intra(intra));
         }
@@ -5233,7 +5273,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         left_has_nonzero_mode: bool,
         top_has_nonzero_mode: bool,
     ) -> io::Result<u8> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(&mut self.bits, 3); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(&mut self.bits, 3);
+        }
         if contexts.iter().any(|model| model.state_index >= 64) {
             return Err(invalid(
                 "intra_chroma_pred_mode requires valid contexts 64 through 67",
@@ -5273,7 +5315,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
         predicted_mode: u8,
         contexts: &mut [CabacContextModel; 2],
     ) -> io::Result<u8> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::prediction_mode(&mut self.bits, predicted_mode); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::prediction_mode(
+                &mut self.bits,
+                predicted_mode,
+            );
+        }
         if predicted_mode > 8 {
             return Err(invalid("CABAC intra4x4 prediction mode is outside [0,8]"));
         }
@@ -5356,7 +5403,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         left_has_8x8_transform: bool,
         top_has_8x8_transform: bool,
     ) -> io::Result<bool> {
-        if self.cavlc.is_some() { return self.bits.read_bit(); }
+        if self.cavlc.is_some() {
+            return self.bits.read_bit();
+        }
         let context_index =
             usize::from(left_has_8x8_transform) + usize::from(top_has_8x8_transform);
         self.decode_bin(&mut contexts[context_index])
@@ -5369,7 +5418,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_cbp: u8,
         contexts: &mut [CabacContextModel; 4],
     ) -> io::Result<u8> {
-        if let Some(syntax) = self.cavlc.as_mut() { return syntax.luma_cbp(&mut self.bits); }
+        if let Some(syntax) = self.cavlc.as_mut() {
+            return syntax.luma_cbp(&mut self.bits);
+        }
         if left_cbp > 15 || top_cbp > 15 {
             return Err(invalid("CABAC luma coded_block_pattern is outside [0,15]"));
         }
@@ -5417,7 +5468,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         top_cbp: u8,
         contexts: &mut [CabacContextModel; 8],
     ) -> io::Result<u8> {
-        if let Some(syntax) = self.cavlc.as_ref() { return Ok(syntax.chroma_cbp()); }
+        if let Some(syntax) = self.cavlc.as_ref() {
+            return Ok(syntax.chroma_cbp());
+        }
         if left_cbp > 2 || top_cbp > 2 {
             return Err(invalid("CABAC chroma coded_block_pattern is outside [0,2]"));
         }
@@ -5596,7 +5649,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         neighbor_magnitude: u64,
         contexts: &mut [CabacContextModel; 7],
     ) -> io::Result<i32> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits);
+        }
         if contexts.iter().any(|context| context.state_index >= 64) {
             return Err(invalid("MVD context state index is outside [0,63]"));
         }
@@ -5629,7 +5684,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         context_index: u8,
         contexts: &mut [CabacContextModel; 7],
     ) -> io::Result<i32> {
-        if self.cavlc.is_some() { return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits); }
+        if self.cavlc.is_some() {
+            return crate::h264_cavlc_syntax::CavlcSyntax::signed(&mut self.bits);
+        }
         if context_index > 2 {
             return Err(invalid("MVD context increment is outside [0,2]"));
         }
@@ -5924,7 +5981,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         cond_term_flag_b: bool,
         contexts: &mut [CabacContextModel],
     ) -> io::Result<([i32; 16], bool)> {
-        if let Some(syntax) = self.cavlc.as_mut() { return syntax.residual(&mut self.bits, ctx_block_cat); }
+        if let Some(syntax) = self.cavlc.as_mut() {
+            return syntax.residual(&mut self.bits, ctx_block_cat);
+        }
         if contexts.len() != CABAC_CONTEXT_COUNT {
             return Err(invalid("residual block requires 460 slice contexts"));
         }
@@ -5995,7 +6054,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         &mut self,
         contexts: &mut [CabacContextModel],
     ) -> io::Result<[i32; 64]> {
-        if let Some(syntax) = self.cavlc.as_mut() { return syntax.residual8x8(&mut self.bits); }
+        if let Some(syntax) = self.cavlc.as_mut() {
+            return syntax.residual8x8(&mut self.bits);
+        }
         if contexts.len() != CABAC_CONTEXT_COUNT {
             return Err(invalid("residual block requires 460 slice contexts"));
         }
@@ -6123,7 +6184,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
 
     /// Decodes a terminate bin; true means the caller must stop decoding.
     pub fn decode_terminate_bin(&mut self) -> io::Result<bool> {
-        if let Some(syntax) = self.cavlc.as_ref() { return Ok(syntax.finished(&self.bits)); }
+        if let Some(syntax) = self.cavlc.as_ref() {
+            return Ok(syntax.finished(&self.bits));
+        }
         self.validate_bin_state()?;
         let mut bits = self.bits.clone();
         let mut code_range = self.code_range - 2;
@@ -6339,14 +6402,12 @@ fn compensate_inter_partition(
     {
         return Err(invalid("inter prediction partition geometry is invalid"));
     }
-    let y_plane = frame.luma_plane()?;
-    let cb_plane = frame.u_plane()?;
-    let cr_plane = frame.v_plane()?;
+    frame.validate_planes()?;
     let luma_sampler = crate::reconstruction::LumaFractionalSampleSampler::new(
-        &y_plane,
+        &frame.y,
         frame.width,
         frame.height,
-        frame.width,
+        frame.y_stride,
     )?;
     let motion_x = isize::try_from(motion.x)
         .map_err(|_| invalid("inter prediction motion vector is outside the supported range"))?;
@@ -6407,20 +6468,20 @@ fn compensate_inter_partition(
                 })?;
             let index = row * output_chroma_width + column;
             cb[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
-                &cb_plane,
+                &frame.u,
                 chroma_width,
                 chroma_height,
-                chroma_width,
+                frame.u_stride,
                 x,
                 y,
                 (motion.x & 7) as u8,
                 (motion.y & 7) as u8,
             )?;
             cr[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
-                &cr_plane,
+                &frame.v,
                 chroma_width,
                 chroma_height,
-                chroma_width,
+                frame.v_stride,
                 x,
                 y,
                 (motion.x & 7) as u8,
@@ -6437,14 +6498,12 @@ fn p_skip_samples(
     macroblock_y: usize,
     motion_vector: crate::MotionVector,
 ) -> io::Result<MacroblockSamples> {
-    let ref_y = reference.luma_plane()?;
-    let ref_cb = reference.u_plane()?;
-    let ref_cr = reference.v_plane()?;
+    reference.validate_planes()?;
     let luma_sampler = crate::reconstruction::LumaFractionalSampleSampler::new(
-        &ref_y,
+        &reference.y,
         reference.width,
         reference.height,
-        reference.width,
+        reference.y_stride,
     )?;
     let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
     let motion_x = isize::try_from(motion_vector.x)
@@ -6494,12 +6553,15 @@ fn p_skip_samples(
                     invalid("P_Skip chroma coordinate is outside the supported range")
                 })?;
             let index = row * 8 + column;
-            for (plane, target) in [(&ref_cb, &mut cb), (&ref_cr, &mut cr)] {
+            for (plane, stride, target) in [
+                (&reference.u, reference.u_stride, &mut cb),
+                (&reference.v, reference.v_stride, &mut cr),
+            ] {
                 target[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
                     plane,
                     chroma_width,
                     chroma_height,
-                    chroma_width,
+                    stride,
                     x,
                     y,
                     (motion_vector.x & 7) as u8,
@@ -6551,14 +6613,12 @@ fn compensate_b_direct_reference(
     macroblock_y: usize,
     motion: crate::MotionVector,
 ) -> io::Result<([u8; 256], [u8; 64], [u8; 64])> {
-    let y_plane = frame.luma_plane()?;
-    let cb_plane = frame.u_plane()?;
-    let cr_plane = frame.v_plane()?;
+    frame.validate_planes()?;
     let luma_sampler = crate::reconstruction::LumaFractionalSampleSampler::new(
-        &y_plane,
+        &frame.y,
         frame.width,
         frame.height,
-        frame.width,
+        frame.y_stride,
     )?;
     let motion_x = isize::try_from(motion.x)
         .map_err(|_| invalid("B_Direct motion vector is outside the supported range"))?;
@@ -6611,20 +6671,20 @@ fn compensate_b_direct_reference(
                 })?;
             let index = row * 8 + column;
             cb[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
-                &cb_plane,
+                &frame.u,
                 chroma_width,
                 chroma_height,
-                chroma_width,
+                frame.u_stride,
                 x,
                 y,
                 (motion.x & 7) as u8,
                 (motion.y & 7) as u8,
             )?;
             cr[index] = crate::reconstruction::interpolate_chroma_fractional_sample(
-                &cr_plane,
+                &frame.v,
                 chroma_width,
                 chroma_height,
-                chroma_width,
+                frame.v_stride,
                 x,
                 y,
                 (motion.x & 7) as u8,

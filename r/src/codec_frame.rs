@@ -17,6 +17,52 @@ pub struct Yuv420Frame {
 }
 
 impl Yuv420Frame {
+    pub(crate) fn validate_planes(&self) -> io::Result<()> {
+        let chroma_width = self.width / 2 + self.width % 2;
+        let chroma_height = self.height / 2 + self.height % 2;
+        if self.y_stride == self.width
+            && self.u_stride == chroma_width
+            && self.v_stride == chroma_width
+            && (self.width == 0
+                || self.height == 0
+                || self
+                    .width
+                    .checked_mul(self.height)
+                    .map_or(false, |required| self.y.len() >= required))
+            && (chroma_width == 0
+                || chroma_height == 0
+                || chroma_width
+                    .checked_mul(chroma_height)
+                    .map_or(false, |required| self.u.len() >= required))
+            && (chroma_width == 0
+                || chroma_height == 0
+                || chroma_width
+                    .checked_mul(chroma_height)
+                    .map_or(false, |required| self.v.len() >= required))
+        {
+            return Ok(());
+        }
+        for (plane, width, height, stride) in [
+            (&self.y, self.width, self.height, self.y_stride),
+            (&self.u, chroma_width, chroma_height, self.u_stride),
+            (&self.v, chroma_width, chroma_height, self.v_stride),
+        ] {
+            if width > 0
+                && height > 0
+                && (stride == 0
+                    || stride < width
+                    || stride
+                        .checked_mul(height)
+                        .map_or(true, |required| plane.len() < required))
+            {
+                return Err(invalid(
+                    "reference picture frame layout is invalid or truncated",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn plane_bytes(
         &self,
         plane: &[u8],

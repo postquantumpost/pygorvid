@@ -202,7 +202,8 @@ fn read_all_frames(input: &str, threads: usize, verbose: bool) -> Result<usize, 
     let count = reader.sample_count();
     let mut decoder = pygorvid::VideoDecoder::new(
         pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?,
-    ).map_err(|error| error.to_string())?;
+    )
+    .map_err(|error| error.to_string())?;
     decoder.set_threads(threads);
     decoder.set_verbose(verbose);
     for index in 0..count {
@@ -214,7 +215,8 @@ fn read_all_frames(input: &str, threads: usize, verbose: bool) -> Result<usize, 
         {
             decoder = pygorvid::VideoDecoder::new(
                 pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?,
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             decoder.set_threads(threads);
             decoder.set_verbose(verbose);
         }

@@ -2092,10 +2092,12 @@ pub fn gather_luma_quarter_sample_neighborhood(
         return Ok(samples);
     }
 
-    let x_indices: [usize; 6] =
-        std::array::from_fn(|column| clip_luma_reference_coordinate(x_int, column as isize - 2, width));
-    let row_starts: [usize; 6] =
-        std::array::from_fn(|row| clip_luma_reference_coordinate(y_int, row as isize - 2, height) * stride);
+    let x_indices: [usize; 6] = std::array::from_fn(|column| {
+        clip_luma_reference_coordinate(x_int, column as isize - 2, width)
+    });
+    let row_starts: [usize; 6] = std::array::from_fn(|row| {
+        clip_luma_reference_coordinate(y_int, row as isize - 2, height) * stride
+    });
     for (row, sample_row) in samples.iter_mut().enumerate() {
         for (sample, &x) in sample_row.iter_mut().zip(&x_indices) {
             *sample = plane[row_starts[row] + x];
