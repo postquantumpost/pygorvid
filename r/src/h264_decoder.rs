@@ -478,20 +478,22 @@ fn slice_reference_lists(
     } else {
         crate::build_b_reference_lists(references, picture_order_count)
     };
-    list0 = crate::apply_reference_list_modifications(
+    list0 = crate::reconstruction::apply_reference_list_modifications_with_active_count(
         &list0,
         references,
         header.frame_num,
         max_frame_num,
         &header.ref_pic_list_reordering_l0,
+        header.num_ref_idx_l0_active_minus1 as usize + 1,
     )?;
     if header.slice_type % 5 == 1 {
-        list1 = crate::apply_reference_list_modifications(
+        list1 = crate::reconstruction::apply_reference_list_modifications_with_active_count(
             &list1,
             references,
             header.frame_num,
             max_frame_num,
             &header.ref_pic_list_reordering_l1,
+            header.num_ref_idx_l1_active_minus1 as usize + 1,
         )?;
     }
     let active_l0 = if header.num_ref_idx_active_override {
@@ -1766,9 +1768,6 @@ impl H264Decoder {
             .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
             .cloned()
             .ok_or_else(|| invalid("dependency slice references an unavailable SPS"))?;
-        if pps.weighted_pred || pps.weighted_bipred_idc != 0 {
-            return Err(invalid("weighted inter prediction is unsupported"));
-        }
 
         let max_frame_num = 1_u32
             .checked_shl(sps.log2_max_frame_num_minus4 + 4)
@@ -1941,6 +1940,11 @@ impl H264Decoder {
         let left_skipped = macroblock_neighbors.left_skipped;
         let top_skipped = macroblock_neighbors.top_skipped;
         let inter_input = crate::CabacInterMacroblockInput {
+            weighting: crate::InterWeighting {
+                table: header.prediction_weight_table.clone(),
+                implicit: header.slice_type % 5 == 1 && pps.weighted_bipred_idc == 2,
+                current_picture_order_count: current_poc,
+            },
             slice_type: header.slice_type,
             macroblock_x,
             macroblock_y,
@@ -2026,6 +2030,7 @@ impl H264Decoder {
                 })?;
             let colocated_top_left = colocated_facts[0];
             Some(crate::CabacBDirectMacroblockInput {
+                weighting: inter_input.weighting.clone(),
                 slice_type: header.slice_type,
                 macroblock_x,
                 macroblock_y,

@@ -2217,13 +2217,25 @@ pub fn apply_reference_list_modifications(
     maximum_frame_num: u32,
     modifications: &[RefPicListModification],
 ) -> io::Result<Vec<ReferencePicture>> {
+    apply_reference_list_modifications_with_active_count(
+        initial, references, current_frame_num, maximum_frame_num, modifications, initial.len(),
+    )
+}
+
+pub(crate) fn apply_reference_list_modifications_with_active_count(
+    initial: &[ReferencePicture],
+    references: &[ReferencePicture],
+    current_frame_num: u32,
+    maximum_frame_num: u32,
+    modifications: &[RefPicListModification],
+    active_count: usize,
+) -> io::Result<Vec<ReferencePicture>> {
     if maximum_frame_num == 0 || current_frame_num >= maximum_frame_num {
         return Err(io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "current frame number must be within a positive MaxFrameNum",
         ));
     }
-    let active_count = initial.len();
     let mut result = initial.to_vec();
     let mut pic_num_pred = u64::from(current_frame_num);
     let max_pic_num = u64::from(maximum_frame_num);
@@ -2296,6 +2308,7 @@ pub fn apply_reference_list_modifications(
         result.truncate(active_count);
         ref_index += 1;
     }
+    result.truncate(active_count);
     Ok(result)
 }
 

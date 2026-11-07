@@ -112,7 +112,7 @@ func (decoder *H264Decoder) compensateNativeDirect(current *nativeMacroblock, co
 			prediction.direct = true
 			setNativePrediction(current, part, list, prediction)
 			setNativePrediction(&decoder.nativeBlocks[address], part, list, prediction)
-			*compensations = append(*compensations, nativeCompensation{frame: lists[list][prediction.refIndex].Frame, part: part, motion: prediction.motion, average: active})
+			*compensations = append(*compensations, nativeCompensation{frame: lists[list][prediction.refIndex].Frame, part: part, motion: prediction.motion, average: active, list: list, refIndex: prediction.refIndex, reference: lists[list][prediction.refIndex].Reference})
 			active = true
 		}
 	}

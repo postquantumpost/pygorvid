@@ -36,6 +36,7 @@ type SliceHeader struct {
 	RefPicListReorderingL1     bool
 	RefPicListL0               []RefPicListModification
 	RefPicListL1               []RefPicListModification
+	PredictionWeightTable      *PredictionWeightTable
 	NoOutputOfPriorPics        bool
 	LongTermReference          bool
 	AdaptiveRefPicMarking      bool
@@ -352,7 +353,11 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 	weightedPredApplicable := pps.WeightedPred && (normalizedSliceType == 0 || normalizedSliceType == 3)
 	weightedBipredApplicable := pps.WeightedBipredIDC == 1 && normalizedSliceType == 1
 	if weightedPredApplicable || weightedBipredApplicable {
-		return SliceHeader{}, fmt.Errorf("unsupported weighted prediction in slice header")
+		header.PredictionWeightTable, err = readPredictionWeightTable(reader, sps,
+			[2]uint32{header.NumRefIdxL0ActiveMinus1, header.NumRefIdxL1ActiveMinus1}, normalizedSliceType == 1)
+		if err != nil {
+			return SliceHeader{}, fmt.Errorf("slice pred_weight_table: %w", err)
+		}
 	}
 	if nalHeader.ReferenceIDC != 0 {
 		if header.IDR {

@@ -1528,10 +1528,13 @@ func BuildBReferenceLists(pictures []ReferencePicture, currentPictureOrderCnt in
 
 // ApplyReferenceListModifications applies parsed frame-coded list commands to an initialized list.
 func ApplyReferenceListModifications(initial, references []ReferencePicture, currentFrameNum, maximumFrameNum uint32, modifications []RefPicListModification) ([]ReferencePicture, error) {
+	return applyReferenceListModifications(initial, references, currentFrameNum, maximumFrameNum, modifications, len(initial))
+}
+
+func applyReferenceListModifications(initial, references []ReferencePicture, currentFrameNum, maximumFrameNum uint32, modifications []RefPicListModification, activeCount int) ([]ReferencePicture, error) {
 	if maximumFrameNum == 0 || currentFrameNum >= maximumFrameNum {
 		return nil, ErrReferenceFrameNum
 	}
-	activeCount := len(initial)
 	result := append([]ReferencePicture(nil), initial...)
 	picNumPred := uint64(currentFrameNum)
 	maxPicNum := uint64(maximumFrameNum)
@@ -1592,10 +1595,10 @@ func ApplyReferenceListModifications(initial, references []ReferencePicture, cur
 		result = append(result, ReferencePicture{})
 		copy(result[refIndex+1:], result[refIndex:len(result)-1])
 		result[refIndex] = target
-		result = result[:activeCount]
+		result = result[:min(activeCount, len(result))]
 		refIndex++
 	}
-	return result, nil
+	return result[:min(activeCount, len(result))], nil
 }
 
 // MotionVectorDifferenceNeighborMagnitudes sums absolute left/top MVD components, treating absent neighbors as zero.

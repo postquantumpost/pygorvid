@@ -1,6 +1,7 @@
 package vid
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,36 @@ import (
 
 func TestADecoderSmoke16x16(t *testing.T) {
 	assertDecoderSmokeFixture(t, "decoder-smoke-16x16.mp4", 16, [2]uint64{0xcabf755e2a6b7d56, 0x29631735ff370504})
+}
+
+func TestWeightedIPBFramesMatchReference(t *testing.T) {
+	root := filepath.Join("..", "..", "testdata", "h264")
+	expected, err := os.ReadFile(filepath.Join(root, "weighted-32x32-reference.yuv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const frameSize = 32 * 32 * 3 / 2
+	for _, threads := range []int{1, 4} {
+		reader, err := OpenVideoSampleReader(filepath.Join(root, "weighted-32x32.mp4"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoder := NewH264Decoder(reader)
+		decoder.SetThreads(threads)
+		for index := 0; index < len(expected)/frameSize; index++ {
+			frame, err := decoder.DecodeFrame(uint64(index))
+			if err != nil {
+				reader.Close()
+				t.Fatal(err)
+			}
+			actual := append(append(append([]byte{}, frame.Y...), frame.U...), frame.V...)
+			if !bytes.Equal(actual, expected[index*frameSize:(index+1)*frameSize]) {
+				reader.Close()
+				t.Fatalf("weighted frame %d, threads %d differs", index, threads)
+			}
+		}
+		reader.Close()
+	}
 }
 
 func TestNativeDecoderFirstUnfilteredIDRMacroblock(t *testing.T) {

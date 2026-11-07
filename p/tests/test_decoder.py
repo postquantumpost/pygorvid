@@ -39,6 +39,22 @@ def test_b_decoder_smoke_64x64():
         "decoder-smoke-64x64.mp4", 64, (0xDD69FBA2006D59E0, 0x93ECF9BED15545A5)
     )
 
+def test_weighted_ipb_frames_match_reference():
+    expected = (ROOT / "testdata" / "h264" / "weighted-32x32-reference.yuv").read_bytes()
+    frame_size = 32 * 32 * 3 // 2
+    for threads in (1, 4):
+        reader = VideoSampleReader(ROOT / "testdata" / "h264" / "weighted-32x32.mp4")
+        try:
+            decoder = H264Decoder(reader, threads=threads)
+            for index in range(len(expected) // frame_size):
+                frame = decoder.decode_frame(index)
+                actual = bytes(frame.y) + bytes(frame.u) + bytes(frame.v)
+                assert actual == expected[index * frame_size:(index + 1) * frame_size], (
+                    f"weighted frame {index}, threads {threads} differs"
+                )
+        finally:
+            reader.close()
+
 
 def test_decoder_frame_cache_retains_most_recent_decoded_frames():
     decoder = H264Decoder(frame_cache_size=2)

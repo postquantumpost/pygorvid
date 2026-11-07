@@ -33,6 +33,7 @@ pub struct SliceHeader {
     pub num_ref_idx_l1_active_minus1: u32,
     pub ref_pic_list_reordering_l0: Vec<RefPicListModification>,
     pub ref_pic_list_reordering_l1: Vec<RefPicListModification>,
+    pub prediction_weight_table: Option<crate::PredictionWeightTable>,
     pub no_output_of_prior_pics: bool,
     pub long_term_reference: bool,
     pub adaptive_ref_pic_marking: bool,
@@ -257,6 +258,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
         num_ref_idx_l1_active_minus1: 0,
         ref_pic_list_reordering_l0: Vec::new(),
         ref_pic_list_reordering_l1: Vec::new(),
+        prediction_weight_table: None,
         no_output_of_prior_pics: false,
         long_term_reference: false,
         adaptive_ref_pic_marking: false,
@@ -360,7 +362,12 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
         pps.weighted_pred && (normalized_slice_type == 0 || normalized_slice_type == 3);
     let weighted_bipred_applicable = pps.weighted_bipred_idc == 1 && normalized_slice_type == 1;
     if weighted_pred_applicable || weighted_bipred_applicable {
-        return Err(invalid("unsupported weighted prediction in slice header"));
+        header.prediction_weight_table = Some(crate::PredictionWeightTable::read(
+            &mut reader,
+            sps,
+            [header.num_ref_idx_l0_active_minus1, header.num_ref_idx_l1_active_minus1],
+            normalized_slice_type == 1,
+        )?);
     }
     if nal_header.reference_idc != 0 {
         if header.idr {

@@ -2372,6 +2372,7 @@ def apply_reference_list_modifications(
     current_frame_num: int,
     maximum_frame_num: int,
     modifications: Sequence[RefPicListModification],
+    active_count: Optional[int] = None,
 ) -> list[ReferencePicture]:
     """Apply parsed frame-coded short- and long-term reference-list commands."""
     if (
@@ -2384,7 +2385,10 @@ def apply_reference_list_modifications(
     ):
         raise ValueError("current frame number must be within a positive MaxFrameNum")
     result = list(initial)
-    active_count = len(result)
+    if active_count is None:
+        active_count = len(result)
+    elif not isinstance(active_count, int) or isinstance(active_count, bool) or not 0 <= active_count <= 32:
+        raise ValueError("active reference count is outside [0,32]")
     pic_num_pred = current_frame_num
     ref_index = 0
     for modification in modifications:
@@ -2437,7 +2441,7 @@ def apply_reference_list_modifications(
         result.insert(ref_index, target)
         del result[active_count:]
         ref_index += 1
-    return result
+    return result[:active_count]
 
 
 def motion_vector_difference_neighbor_magnitudes(

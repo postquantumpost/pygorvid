@@ -7,6 +7,7 @@ from typing import Literal
 from .bitreader import BitReader, BitstreamError
 from .h264_cabac_init import CONTEXT_INIT_TABLE
 from .h264_cavlc_syntax import CAVLCSyntax
+from .h264_weighted_prediction import InterWeighting
 from .h264_deferred import (
     PLACEHOLDER_SAMPLES as _PLACEHOLDER_SAMPLES,
     InterResidual as _InterResidual,
@@ -51,6 +52,7 @@ class CABACPSkipMacroblockInput:
     top_right_candidate: object | None = None
     top_left_candidate: object | None = None
     reference_frame: object | None = None
+    weighting: InterWeighting = InterWeighting()
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,7 @@ class CABACBDirectMacroblockInput:
     colocated_motion_vector: tuple[int, int] = (0, 0)
     colocated_motion_field: tuple[object, ...] = ()
     current_picture_order_count: int = 0
+    weighting: InterWeighting = InterWeighting()
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,7 @@ class CABACInterMacroblockInput:
         tuple[CABACBReferencePicture, ...], tuple[CABACBReferencePicture, ...]
     ] = ((), ())
     partition_neighbors: tuple[CABACInterPartitionNeighbors, ...] = ()
+    weighting: InterWeighting = InterWeighting()
 
 
 @dataclass(frozen=True)
@@ -773,8 +777,14 @@ def derive_cabac_inter_macroblock_neighbor_state_from_history(
             reference_indices = decoded.reference_indices
             motion_vectors = decoded.motion_vectors
             motion_differences = ((0, 0), (0, 0))
-            skipped = skipped or decoded.skipped
+            skipped = True
         elif isinstance(decoded, CABACInterMacroblockResult):
+            group = (local_y // 8) * 2 + local_x // 8
+            skipped = skipped or (b_slice and (
+                decoded.macroblock_type == 0
+                or (decoded.macroblock_type == 22
+                    and decoded.sub_macroblock_types[group] == 0)
+            ))
             partition = next(
                 (
                     item
@@ -1643,7 +1653,8 @@ class CABACArithmeticDecoder:
         samples = _reconstruct_or_defer(
             "pskip",
             (frame,),
-            (input.macroblock_x, input.macroblock_y, motion),
+            (input.macroblock_x, input.macroblock_y, motion,
+             input.weighting.select((0, -1), (None, None))),
             getattr(trial, "_timeout_check", None),
         )
         if samples is not None:
@@ -1868,7 +1879,11 @@ class CABACArithmeticDecoder:
         samples = _reconstruct_or_defer(
             "bdirect",
             tuple(selected),
-            (motion_vectors, input.macroblock_x, input.macroblock_y),
+            (motion_vectors, input.macroblock_x, input.macroblock_y,
+             input.weighting.select(reference_indices, (
+                 list0[reference_indices[0]] if prediction_flags[0] else None,
+                 list1[reference_indices[1]] if prediction_flags[1] else None,
+             ))),
             getattr(self, "_timeout_check", None),
         )
         if samples is not None:
@@ -2970,6 +2985,7 @@ class CABACArithmeticDecoder:
                 top_right_candidate=top_right_candidate,
                 top_left_candidate=list_neighbors.top_left_candidate,
                 reference_frame=inter_input.reference_lists[0][0].frame,
+                weighting=inter_input.weighting,
             )
             skip_result = trial.decode_p_skip_macroblock(
                 skip_input, trial_contexts, builder, address
@@ -3565,7 +3581,11 @@ class CABACArithmeticDecoder:
                 )
                 vector = motion_vectors[list_index]
                 selected.append((frame_index, (vector.x, vector.y)))
-            job_partitions.append((x, y, width, height, tuple(selected)))
+            weights = input.weighting.select(tuple(ref_indices), (
+                input.reference_lists[0][ref_indices[0]] if flags[0] else None,
+                input.reference_lists[1][ref_indices[1]] if flags[1] else None,
+            ))
+            job_partitions.append((x, y, width, height, tuple(selected), weights))
             partition_results.append(
                 CABACInterMacroblockPartition(
                     x, y, width, height, tuple(flags), tuple(ref_indices),

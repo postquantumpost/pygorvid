@@ -126,6 +126,8 @@ pub use slice::{
     RefPicListModification, SliceHeader,
 };
 pub use sps::{parse_sps, SpsInfo};
+mod h264_weighted_prediction;
+pub use h264_weighted_prediction::{InterWeighting, PredictionWeight, PredictionWeightTable};
 pub use videosamplereader::{CompressedSample, VideoSampleReader};
 pub use vidfile::{construct, open_file, VidFile};
 

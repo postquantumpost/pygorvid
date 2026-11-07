@@ -38,6 +38,7 @@ from .h264_slice import (
     same_primary_picture,
 )
 from .h264_sps import SPSParseError, parse_sps
+from .h264_weighted_prediction import InterWeighting
 from .videosamplereader import VideoSampleReader
 from .codec import DecoderError, VideoCodec, default_decoder_threads
 
@@ -1096,8 +1097,6 @@ class H264Decoder:
             sequence_set = sequence_sets_by_id.get(picture_set.sequence_parameter_set_id)
             if sequence_set is None:
                 raise DecoderError("dependency slice references an unavailable SPS")
-            if picture_set.weighted_pred or picture_set.weighted_bipred_idc:
-                raise DecoderError("weighted inter prediction is unsupported")
 
             max_frame_num = 1 << (sequence_set.log2_max_frame_num_minus4 + 4)
             current_poc = self._picture_order_count(header, sequence_set)
@@ -1106,8 +1105,8 @@ class H264Decoder:
                 dependency_slice, picture_set, sequence_set, current_poc
             )
             references = self.reference_picture_buffer.references()
-            active_l0 = len(list0) - 1
-            active_l1 = max(0, len(list1) - 1)
+            active_l0 = header.num_ref_idx_l0_active_minus1
+            active_l1 = header.num_ref_idx_l1_active_minus1
 
             def decoded_references(pictures):
                 result = []
@@ -1200,6 +1199,11 @@ class H264Decoder:
                     previous_qp_delta = previous_macroblock.qp_delta
 
             inter_input = CABACInterMacroblockInput(
+                weighting=InterWeighting(
+                    header.prediction_weight_table,
+                    header.slice_type % 5 == 1 and picture_set.weighted_bipred_idc == 2,
+                    current_poc,
+                ),
                 slice_type=header.slice_type,
                 macroblock_x=macroblock_address % width_in_mbs,
                 macroblock_y=macroblock_address // width_in_mbs,
@@ -1289,6 +1293,7 @@ class H264Decoder:
                 list0_neighbors = direct_neighbors.partition_neighbors.list0
                 list1_neighbors = direct_neighbors.partition_neighbors.list1
                 b_skip_input = CABACBDirectMacroblockInput(
+                    weighting=inter_input.weighting,
                     slice_type=header.slice_type,
                     macroblock_x=inter_input.macroblock_x,
                     macroblock_y=inter_input.macroblock_y,
@@ -1349,11 +1354,13 @@ class H264Decoder:
             list0 = apply_reference_list_modifications(
                 list0, references, header.frame_num, max_frame_num,
                 header.ref_pic_list_reordering_l0,
+                header.num_ref_idx_l0_active_minus1 + 1,
             )
         if header.slice_type % 5 == 1 and header.ref_pic_list_reordering_l1:
             list1 = apply_reference_list_modifications(
                 list1, references, header.frame_num, max_frame_num,
                 header.ref_pic_list_reordering_l1,
+                header.num_ref_idx_l1_active_minus1 + 1,
             )
         active_l0 = (
             header.num_ref_idx_l0_active_minus1

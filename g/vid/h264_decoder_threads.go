@@ -1,16 +1,20 @@
 package vid
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 )
 
 type nativeCompensation struct {
-	frame   Yuv420Frame
-	part    nativePartition
-	motion  MotionVector
-	average bool
+	list      int
+	refIndex  int32
+	reference ReferencePicture
+	frame     Yuv420Frame
+	part      nativePartition
+	motion    MotionVector
+	average   bool
 }
 
 type nativeInterResidual struct {
@@ -20,6 +24,7 @@ type nativeInterResidual struct {
 
 // nativeReconstruction holds the sample work for one inter macroblock, deferred until parsing finishes it.
 type nativeReconstruction struct {
+	weighting     nativeWeighting
 	result        *CABACIIntraMacroblockResult
 	builder       *Yuv420FrameBuilder
 	address       int
@@ -31,11 +36,18 @@ type nativeReconstruction struct {
 }
 
 func (job *nativeReconstruction) run() error {
-	for _, compensation := range job.compensations {
-		if err := compensateNativePartition(job.result, compensation.frame, job.address, job.width, compensation.part, compensation.motion, compensation.average); err != nil {
+	if job.weighting.table != nil || job.weighting.implicit {
+		if err := job.runWeightedPredictions(); err != nil {
 			return err
 		}
+	} else {
+		for _, compensation := range job.compensations {
+			if err := compensateNativePartition(job.result, compensation.frame, job.address, job.width, compensation.part, compensation.motion, compensation.average); err != nil {
+				return err
+			}
+		}
 	}
+
 	if job.residual != nil {
 		for index, value := range job.residual.luma {
 			addNativeResidual(&job.result.Luma[index], value)
@@ -46,6 +58,60 @@ func (job *nativeReconstruction) run() error {
 		}
 	}
 	return job.builder.PlaceMacroblock(job.address, job.result.Luma, job.result.Cb, job.result.Cr)
+}
+
+func (job *nativeReconstruction) runWeightedPredictions() error {
+	done := make([]bool, len(job.compensations))
+	for index, compensation := range job.compensations {
+		if done[index] {
+			continue
+		}
+		part := compensation.part
+		var selected [2]*nativeCompensation
+		var predictions [2]CABACIIntraMacroblockResult
+		for other := index; other < len(job.compensations); other++ {
+			candidate := &job.compensations[other]
+			geometry := candidate.part
+			if done[other] || geometry.x != part.x || geometry.y != part.y || geometry.width != part.width || geometry.height != part.height {
+				continue
+			}
+			if candidate.list < 0 || candidate.list > 1 || selected[candidate.list] != nil {
+				return fmt.Errorf("inter partition prediction list is invalid")
+			}
+			selected[candidate.list] = candidate
+			if err := compensateNativePartition(&predictions[candidate.list], candidate.frame, job.address, job.width, part, candidate.motion, false); err != nil {
+				return err
+			}
+			done[other] = true
+		}
+		weights, err := job.weighting.selectWeights(selected)
+		if err != nil {
+			return err
+		}
+		active := [2]bool{selected[0] != nil, selected[1] != nil}
+		for component := 0; component < 3; component++ {
+			target, first, second := job.result.Luma[:], predictions[0].Luma[:], predictions[1].Luma[:]
+			x, y, width, height, stride := part.x, part.y, part.width, part.height, 16
+			if component > 0 {
+				x, y, width, height, stride = x/2, y/2, width/2, height/2, 8
+				target, first, second = job.result.Cb[:], predictions[0].Cb[:], predictions[1].Cb[:]
+				if component == 2 {
+					target, first, second = job.result.Cr[:], predictions[0].Cr[:], predictions[1].Cr[:]
+				}
+			}
+			for row := y; row < y+height; row++ {
+				for column := x; column < x+width; column++ {
+					offset := row*stride + column
+					value, err := combineWeightedPrediction(first[offset], second[offset], active, weights, component)
+					if err != nil {
+						return err
+					}
+					target[offset] = value
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // nativeReconstructionPool runs inter macroblock reconstruction on worker goroutines.

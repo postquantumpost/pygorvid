@@ -10,6 +10,7 @@ the single-threaded decode.
 import dataclasses
 import multiprocessing
 import threading
+from .h264_weighted_prediction import PredictionWeightError, combine
 
 
 class InterResidual:
@@ -90,40 +91,57 @@ def _average(first, second):
 
 
 def _p_skip_samples(frames, params, timeout_check):
-    macroblock_x, macroblock_y, motion = params
-    return _prediction(frames[0], macroblock_x, macroblock_y, 0, 0, 16, 16, motion, timeout_check)
+    macroblock_x, macroblock_y, motion, weights = params
+    samples = _prediction(frames[0], macroblock_x, macroblock_y, 0, 0, 16, 16, motion, timeout_check)
+    if weights is None:
+        return samples
+    return tuple([combine(sample, None, weights, component) for sample in plane]
+                 for component, plane in enumerate(samples))
 
 
 def _b_direct_samples(frames, params, timeout_check):
-    motion_vectors, macroblock_x, macroblock_y = params
+    motion_vectors, macroblock_x, macroblock_y, weights = params
     predictions = [
         None if frame is None else _prediction(
             frame, macroblock_x, macroblock_y, 0, 0, 16, 16, motion, timeout_check
         )
         for frame, motion in zip(frames, motion_vectors)
     ]
-    if predictions[0] is None:
-        return predictions[1]
-    if predictions[1] is None:
-        return predictions[0]
-    return tuple(_average(a, b) for a, b in zip(predictions[0], predictions[1]))
+    return _combine_predictions(predictions, weights)
+
+
+def _combine_predictions(predictions, weights):
+    first, second = predictions
+    if first is None and second is None:
+        raise PredictionWeightError("inter partition has no active prediction list")
+    if weights is None:
+        if first is None:
+            return second
+        if second is None:
+            return first
+        return tuple(_average(a, b) for a, b in zip(first, second))
+    lengths = tuple(
+        len(plane) for plane in (first if first is not None else second)
+    )
+    return tuple([
+        combine(first[component][index] if first is not None else None,
+                second[component][index] if second is not None else None, weights, component)
+        for index in range(length)
+    ] for component, length in enumerate(lengths))
 
 
 def _inter_samples(frames, params, timeout_check):
     partitions, macroblock_x, macroblock_y, _frame_width, _frame_height, residual = params
     luma, cb, cr = bytearray(256), bytearray(64), bytearray(64)
-    for x, y, width, height, selected in partitions:
+    for x, y, width, height, selected, weights in partitions:
         predictions = [
-            _prediction(
-                frames[frame_index], macroblock_x, macroblock_y, x, y, width, height,
-                motion, timeout_check,
+            None if entry is None else _prediction(
+                frames[entry[0]], macroblock_x, macroblock_y, x, y, width, height,
+                entry[1], timeout_check,
             )
-            for frame_index, motion in (entry for entry in selected if entry is not None)
+            for entry in selected
         ]
-        if len(predictions) == 2:
-            samples = tuple(_average(a, b) for a, b in zip(predictions[0], predictions[1]))
-        else:
-            samples = predictions[0]
+        samples = _combine_predictions(predictions, weights)
         for row in range(height):
             luma[(y + row) * 16 + x:(y + row) * 16 + x + width] = bytes(
                 samples[0][row * width:(row + 1) * width]

@@ -149,6 +149,7 @@ pub struct CabacInterNeighbor {
 
 #[derive(Clone, Debug)]
 pub struct CabacPSkipMacroblockInput {
+    pub weighting: crate::InterWeighting,
     pub slice_type: u8,
     pub macroblock_x: usize,
     pub macroblock_y: usize,
@@ -195,6 +196,7 @@ pub struct CabacBReferencePicture {
 
 #[derive(Debug, Clone)]
 pub struct CabacBDirectMacroblockInput {
+    pub weighting: crate::InterWeighting,
     pub slice_type: u8,
     pub macroblock_x: usize,
     pub macroblock_y: usize,
@@ -264,6 +266,7 @@ pub struct CabacInterPartitionNeighbors {
 
 #[derive(Clone, Debug)]
 pub struct CabacInterMacroblockInput {
+    pub weighting: crate::InterWeighting,
     pub slice_type: u8,
     pub macroblock_x: usize,
     pub macroblock_y: usize,
@@ -791,8 +794,9 @@ fn cabac_history_partition_fact(
     sample_x: usize,
     sample_y: usize,
     list_index: usize,
+    b_slice: bool,
 ) -> (CabacInterNeighbor, Option<crate::MotionVectorCandidate>) {
-    let skipped;
+    let mut skipped;
     let (prediction_flags, reference_indices, motion_vectors, motion_differences) =
         match &entry.result {
             CabacSliceMacroblockResult::Intra(_) => {
@@ -837,6 +841,11 @@ fn cabac_history_partition_fact(
                         [crate::MotionVector::default(); 2],
                     ),
                     CabacPBMacroblockPrediction::Inter(decoded) => {
+                        let group = (sample_y / 8) * 2 + sample_x / 8;
+                        skipped |= b_slice
+                            && (decoded.macroblock_type == 0
+                                || decoded.macroblock_type == 22
+                                    && decoded.sub_macroblock_types.get(group) == Some(&0));
                         let Some(partition) = decoded.partitions.iter().find(|partition| {
                             partition.x <= sample_x
                                 && sample_x < partition.x + partition.width
@@ -936,7 +945,7 @@ pub fn derive_cabac_inter_macroblock_neighbor_state_from_history(
             sample_y,
         )
         .map(|(entry, local_x, local_y)| {
-            cabac_history_partition_fact(entry, local_x, local_y, list_index)
+            cabac_history_partition_fact(entry, local_x, local_y, list_index, slice_type % 5 == 1)
         })
         .unwrap_or_default()
     };
@@ -2693,8 +2702,22 @@ impl<'a> CabacArithmeticDecoder<'a> {
             ..CabacPSkipMacroblockResult::default()
         };
         let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
-        let job: ReconstructionJob =
-            Box::new(move || p_skip_samples(&reference, macroblock_x, macroblock_y, motion_vector));
+        let weights = input.weighting.select([0, -1], [None, None])?;
+        let job: ReconstructionJob = Box::new(move || {
+            let mut samples = p_skip_samples(&reference, macroblock_x, macroblock_y, motion_vector)?;
+            if weights.is_none() {
+                return Ok(samples);
+            }
+            for sample in &mut samples.0 {
+                *sample = crate::h264_weighted_prediction::combine(Some(*sample), None, weights, 0)?;
+            }
+            for (component, plane) in [(1, &mut samples.1), (2, &mut samples.2)] {
+                for sample in plane {
+                    *sample = crate::h264_weighted_prediction::combine(Some(*sample), None, weights, component)?;
+                }
+            }
+            Ok(samples)
+        });
         if let Some(job) = defer_reconstruction(job) {
             (result.luma, result.cb, result.cr) = job()?;
             builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
@@ -2938,6 +2961,10 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 .ok_or_else(|| invalid("B_Direct selected reference index is unavailable"))?;
             references[list_index] = Some((list[index].frame.clone(), motion_vectors[list_index]));
         }
+        let weights = input.weighting.select(reference_indices, [
+            (reference_indices[0] >= 0).then(|| &input.list0_references[reference_indices[0] as usize]),
+            (reference_indices[1] >= 0).then(|| &input.list1_references[reference_indices[1] as usize]),
+        ])?;
         let mut result = CabacBDirectMacroblockResult {
             skipped,
             reference_indices,
@@ -2947,7 +2974,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         };
         let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
         let job: ReconstructionJob =
-            Box::new(move || b_direct_samples(&references, macroblock_x, macroblock_y));
+            Box::new(move || b_direct_samples(&references, macroblock_x, macroblock_y, weights));
         if let Some(job) = defer_reconstruction(job) {
             (result.luma, result.cb, result.cr) = job()?;
             builder.place_macroblock(address, &result.luma, &result.cb, &result.cr)?;
@@ -4218,6 +4245,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 neighbors.top_right_candidate
             };
             let skip_input = CabacPSkipMacroblockInput {
+                weighting: inter_input.weighting.clone(),
                 slice_type: inter_input.slice_type,
                 macroblock_x: inter_input.macroblock_x,
                 macroblock_y: inter_input.macroblock_y,
@@ -4785,7 +4813,11 @@ impl<'a> CabacArithmeticDecoder<'a> {
                         false,
                         false,
                         &mut ref_contexts,
-                    )?);
+                    ).map_err(|error| invalid(format!(
+                        "macroblock ({}, {}), type {macroblock_type}, partition {first_index}, list {list_index}, maximum {}: {error}",
+                        input.macroblock_x, input.macroblock_y,
+                        input.max_reference_index_minus1[list_index],
+                    )))?);
                     trial_contexts[54..60].copy_from_slice(&ref_contexts);
                     value
                 };
@@ -4906,6 +4938,10 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 ));
             }
             partition_predictions.push(InterPartitionPrediction {
+                weights: input.weighting.select(references, [
+                    (references[0] >= 0).then(|| &input.reference_lists[0][references[0] as usize]),
+                    (references[1] >= 0).then(|| &input.reference_lists[1][references[1] as usize]),
+                ])?,
                 x: specification.x,
                 y: specification.y,
                 width: specification.width,
@@ -6307,6 +6343,7 @@ impl InterResidual {
 }
 
 struct InterPartitionPrediction {
+    weights: Option<crate::h264_weighted_prediction::SampleWeights>,
     x: usize,
     y: usize,
     width: usize,
@@ -6340,17 +6377,11 @@ fn inter_prediction_samples(
         for row in 0..partition.height {
             for column in 0..partition.width {
                 let local_index = row * partition.width + column;
-                let sample = match (prediction0, prediction1) {
-                    (Some(first), Some(second)) => {
-                        (u16::from(first.0[local_index]) + u16::from(second.0[local_index]) + 1)
-                            >> 1
-                    }
-                    (Some(first), None) => u16::from(first.0[local_index]),
-                    (None, Some(second)) => u16::from(second.0[local_index]),
-                    (None, None) => {
-                        return Err(invalid("inter partition has no active prediction list"))
-                    }
-                } as u8;
+                let sample = crate::h264_weighted_prediction::combine(
+                    prediction0.map(|first| first.0[local_index]),
+                    prediction1.map(|second| second.0[local_index]),
+                    partition.weights, 0,
+                )?;
                 luma[(partition.y + row) * 16 + partition.x + column] = sample;
             }
         }
@@ -6358,7 +6389,7 @@ fn inter_prediction_samples(
             for column in 0..partition.width / 2 {
                 let local_index = row * (partition.width / 2) + column;
                 let destination = (partition.y / 2 + row) * 8 + partition.x / 2 + column;
-                let average = |component: usize| -> u8 {
+                let average = |component: usize| -> io::Result<u8> {
                     let sample = |prediction: &(Vec<u8>, Vec<u8>, Vec<u8>)| {
                         if component == 1 {
                             prediction.1[local_index]
@@ -6366,17 +6397,13 @@ fn inter_prediction_samples(
                             prediction.2[local_index]
                         }
                     };
-                    match (prediction0, prediction1) {
-                        (Some(first), Some(second)) => {
-                            ((u16::from(sample(first)) + u16::from(sample(second)) + 1) >> 1) as u8
-                        }
-                        (Some(first), None) => sample(first),
-                        (None, Some(second)) => sample(second),
-                        (None, None) => 0,
-                    }
+                    crate::h264_weighted_prediction::combine(
+                        prediction0.map(sample), prediction1.map(sample),
+                        partition.weights, component,
+                    )
                 };
-                cb[destination] = average(1);
-                cr[destination] = average(2);
+                cb[destination] = average(1)?;
+                cr[destination] = average(2)?;
             }
         }
     }
@@ -6577,6 +6604,7 @@ fn b_direct_samples(
     references: &[Option<(std::sync::Arc<crate::Yuv420Frame>, crate::MotionVector)>; 2],
     macroblock_x: usize,
     macroblock_y: usize,
+    weights: Option<crate::h264_weighted_prediction::SampleWeights>,
 ) -> io::Result<MacroblockSamples> {
     let mut predictions = [None, None];
     for (prediction, reference) in predictions.iter_mut().zip(references) {
@@ -6589,22 +6617,22 @@ fn b_direct_samples(
             )?);
         }
     }
-    let [prediction0, prediction1] = predictions;
-    Ok(match (prediction0, prediction1) {
-        (Some((y0, cb0, cr0)), Some((y1, cb1, cr1))) => {
-            let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
-            for index in 0..256 {
-                luma[index] = ((u16::from(y0[index]) + u16::from(y1[index]) + 1) >> 1) as u8;
-            }
-            for index in 0..64 {
-                cb[index] = ((u16::from(cb0[index]) + u16::from(cb1[index]) + 1) >> 1) as u8;
-                cr[index] = ((u16::from(cr0[index]) + u16::from(cr1[index]) + 1) >> 1) as u8;
-            }
-            (luma, cb, cr)
-        }
-        (Some(samples), None) | (None, Some(samples)) => samples,
-        (None, None) => return Err(invalid("B_Direct has no active prediction list")),
-    })
+    let (first, second) = (predictions[0].as_ref(), predictions[1].as_ref());
+    let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
+    for index in 0..256 {
+        luma[index] = crate::h264_weighted_prediction::combine(
+            first.map(|p| p.0[index]), second.map(|p| p.0[index]), weights, 0,
+        )?;
+    }
+    for index in 0..64 {
+        cb[index] = crate::h264_weighted_prediction::combine(
+            first.map(|p| p.1[index]), second.map(|p| p.1[index]), weights, 1,
+        )?;
+        cr[index] = crate::h264_weighted_prediction::combine(
+            first.map(|p| p.2[index]), second.map(|p| p.2[index]), weights, 2,
+        )?;
+    }
+    Ok((luma, cb, cr))
 }
 
 fn compensate_b_direct_reference(
@@ -6706,6 +6734,48 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn b_direct_history_does_not_contribute_to_reference_or_mvd_contexts() {
+        let mut decoded = CabacInterMacroblockResult {
+            macroblock_type: 0,
+            sub_macroblock_types: Vec::new(),
+            partitions: vec![CabacInterMacroblockPartition {
+                x: 0, y: 0, width: 16, height: 16,
+                prediction_flags: [true, false], reference_indices: [1, -1],
+                motion_vectors: [crate::MotionVector::default(); 2],
+                motion_vector_differences: [crate::MotionVector { x: 10, y: 10 }; 2],
+            }],
+            luma: [0; 256], cb: [0; 64], cr: [0; 64],
+            coded_block_pattern_luma: 0, coded_block_pattern_chroma: 0,
+            transform_size_8x8: false, qp_delta: 0, qpy: 26,
+            luma_4x4_coded_block_flags: [false; 16], luma_8x8_nonzero: [false; 4],
+            chroma_dc_coded: [false; 2], chroma_ac_coded_flags: [[false; 4]; 2],
+        };
+        for (b_slice, mb_type, sub_types, expected) in [
+            (false, 0, Vec::new(), 1),
+            (true, 0, Vec::new(), 0),
+            (true, 22, vec![0, 1, 1, 1], 0),
+            (true, 22, vec![1, 0, 1, 1], 1),
+        ] {
+            decoded.macroblock_type = mb_type;
+            decoded.sub_macroblock_types = sub_types;
+            let entry = CabacDecodedSliceMacroblock {
+                address: 0,
+                result: CabacSliceMacroblockResult::Inter(CabacPBMacroblockLayerResult {
+                    skipped: false, macroblock: CabacPBMacroblockPrediction::Inter(decoded.clone()),
+                }),
+            };
+            let (neighbor, candidate) = cabac_history_partition_fact(&entry, 0, 0, 0, b_slice);
+            assert_eq!(derive_cabac_reference_index_context_increment(
+                neighbor, CabacInterNeighbor::default(), false, false,
+            ), expected);
+            assert_eq!(derive_cabac_mvd_context_increment(
+                neighbor, CabacInterNeighbor::default(), 0, false, false,
+            ).unwrap(), expected);
+            assert_eq!(candidate.unwrap().reference_index, Some(1));
+        }
+    }
 
     fn decoder_with_state(
         data: &[u8],
@@ -7986,6 +8056,7 @@ mod tests {
             v: cr.clone(),
         };
         let input = CabacPSkipMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8032,6 +8103,7 @@ mod tests {
             vector: crate::MotionVector { x: 4, y: -8 },
         };
         let input = CabacPSkipMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8078,6 +8150,7 @@ mod tests {
             vector: crate::MotionVector { x: 8, y: 4 },
         };
         let input = CabacPSkipMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 1,
             macroblock_y: 1,
@@ -8134,6 +8207,7 @@ mod tests {
             v: vec![0; 64],
         };
         let input = CabacPSkipMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8193,6 +8267,7 @@ mod tests {
         list1_references: Vec<CabacBReferencePicture>,
     ) -> CabacBDirectMacroblockInput {
         CabacBDirectMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 1,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8267,6 +8342,7 @@ mod tests {
             vector: crate::MotionVector { x: 4, y: -8 },
         };
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8331,6 +8407,7 @@ mod tests {
             encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| context_index);
         }
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 1,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8392,6 +8469,7 @@ mod tests {
                 ..Default::default()
             };
             let input = CabacInterMacroblockInput {
+                weighting: crate::InterWeighting::default(),
                 slice_type: 0,
                 macroblock_x: 0,
                 macroblock_y: 0,
@@ -8442,6 +8520,7 @@ mod tests {
             encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| 47);
         }
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8508,6 +8587,7 @@ mod tests {
             cr: [0; 64],
         };
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 1,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8609,6 +8689,7 @@ mod tests {
             long_term: false,
         };
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8726,6 +8807,7 @@ mod tests {
         }
         encoder.bypass(false);
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8810,6 +8892,7 @@ mod tests {
             long_term: false,
         };
         let input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8850,6 +8933,7 @@ mod tests {
         }; CABAC_CONTEXT_COUNT];
         contexts[11].value_mps = true;
         let inter_input = CabacInterMacroblockInput {
+            weighting: crate::InterWeighting::default(),
             slice_type: 0,
             macroblock_x: 0,
             macroblock_y: 0,
@@ -8896,6 +8980,7 @@ mod tests {
         let direct_input = b_direct_input(vec![b_reference(77, 0)], vec![b_reference(77, 1)]);
         let input = CabacPBMacroblockLayerInput {
             inter_input: CabacInterMacroblockInput {
+                weighting: crate::InterWeighting::default(),
                 slice_type: 1,
                 macroblock_x: 0,
                 macroblock_y: 0,
@@ -8945,6 +9030,7 @@ mod tests {
         encoder.encode_bin_string(&mut encoder_contexts, "0", &|_, _| 77);
         let input = CabacPBMacroblockLayerInput {
             inter_input: CabacInterMacroblockInput {
+                weighting: crate::InterWeighting::default(),
                 slice_type: 0,
                 macroblock_x: 0,
                 macroblock_y: 0,
@@ -9028,6 +9114,7 @@ mod tests {
             Ok(CabacSliceMacroblockInput::Inter(
                 CabacPBMacroblockLayerInput {
                     inter_input: CabacInterMacroblockInput {
+                        weighting: crate::InterWeighting::default(),
                         slice_type: 0,
                         macroblock_x: address,
                         macroblock_y: 0,

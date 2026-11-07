@@ -36,6 +36,71 @@ fn fixed_bits(value: u32, width: usize) -> String {
     format!("{value:0width$b}")
 }
 
+#[test]
+fn weighted_slice_tables_preserve_defaults_offsets_and_data_alignment() {
+    let sps = make_sps(0, false, true);
+    for b_slice in [false, true] {
+        let mut pps = make_pps(false);
+        pps.weighted_pred = !b_slice;
+        pps.weighted_bipred_idc = u8::from(b_slice);
+        let mut table = ue_bits(7) + &ue_bits(1);
+        table += "01";
+        table += &se_bits(-2);
+        table += &se_bits(3);
+        table += &se_bits(4);
+        table += &se_bits(-5);
+        if b_slice {
+            table += "00";
+        }
+        let nal = weighted_slice_nal(b_slice, &table);
+        let header = parse_slice_header(&nal, &sps, &pps).unwrap();
+        let weights = header.prediction_weight_table.unwrap();
+        assert_eq!(weights.denominators, [7, 1, 1]);
+        assert_eq!(weights.lists[0][0].weights, [128, -2, 4]);
+        assert_eq!(weights.lists[0][0].offsets, [0, 3, -5]);
+        assert_eq!(weights.lists[1].len(), usize::from(b_slice));
+        if b_slice {
+            assert_eq!(weights.lists[1][0].weights, [128, 2, 2]);
+        }
+        assert_eq!(header.slice_qp_delta, 0);
+        assert_eq!(header.slice_data_bit_offset % 8, 0);
+    }
+}
+
+#[test]
+fn weighted_slice_tables_reject_invalid_denominators_weights_and_truncation() {
+    let sps = make_sps(0, false, true);
+    let mut pps = make_pps(false);
+    pps.weighted_pred = true;
+    for table in [
+        ue_bits(8),
+        ue_bits(0) + &ue_bits(8),
+        ue_bits(0) + &ue_bits(0) + "1" + &se_bits(128) + &se_bits(0) + "0",
+        ue_bits(0) + &ue_bits(0) + "1" + &se_bits(0) + &se_bits(-129) + "0",
+    ] {
+        assert!(parse_slice_header(&weighted_slice_nal(false, &table), &sps, &pps).is_err());
+    }
+    let mut nal = weighted_slice_nal(false, &(ue_bits(0) + &ue_bits(0) + "00"));
+    nal.truncate(2);
+    assert!(parse_slice_header(&nal, &sps, &pps).is_err());
+}
+
+fn weighted_slice_nal(b_slice: bool, table: &str) -> Vec<u8> {
+    let mut bits = ue_bits(0) + &ue_bits(u32::from(b_slice)) + &ue_bits(0);
+    bits += "00000000";
+    bits += if b_slice { "1000" } else { "00" };
+    bits += table;
+    bits += &ue_bits(0);
+    bits += &se_bits(0);
+    bits += &ue_bits(1);
+    while bits.len() % 8 != 0 {
+        bits.push('1');
+    }
+    let mut nal = vec![0x01];
+    nal.extend(pack_bits(&bits));
+    nal
+}
+
 fn make_sps(poc_type: u32, delta_always_zero: bool, frame_mbs_only: bool) -> SpsInfo {
     let mut bits = ue_bits(0) + &ue_bits(1) + &ue_bits(0) + &ue_bits(0) + "00";
     bits += &ue_bits(0);

@@ -6,6 +6,9 @@ from .bitreader import BitReader, BitstreamError
 from .h264_nal import NALUnitError, ebsp_to_rbsp, parse_nal_header
 from .h264_pps import PPSInfo
 from .h264_sps import SPSInfo
+from .h264_weighted_prediction import (
+    PredictionWeightError, PredictionWeightTable, read_prediction_weight_table,
+)
 
 
 class SliceHeaderError(ValueError):
@@ -66,6 +69,7 @@ class SliceHeader:
     slice_beta_offset_div2: int
     slice_data_bit_offset: int
     pic_order_cnt_type: int
+    prediction_weight_table: PredictionWeightTable | None = None
 
     def picture_identity(self) -> "PictureIdentity":
         return PictureIdentity(
@@ -271,7 +275,14 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
     weighted_pred_applicable = pps.weighted_pred and normalized_slice_type in (0, 3)
     weighted_bipred_applicable = pps.weighted_bipred_idc == 1 and normalized_slice_type == 1
     if weighted_pred_applicable or weighted_bipred_applicable:
-        raise SliceHeaderError("unsupported weighted prediction in slice header")
+        try:
+            result["prediction_weight_table"] = read_prediction_weight_table(
+                reader, sps,
+                (result["num_ref_idx_l0_active_minus1"], result["num_ref_idx_l1_active_minus1"]),
+                normalized_slice_type == 1,
+            )
+        except (BitstreamError, PredictionWeightError) as error:
+            raise SliceHeaderError(f"slice pred_weight_table: {error}") from error
 
     if nal_header.reference_idc:
         if is_idr:

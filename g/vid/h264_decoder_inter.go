@@ -188,7 +188,11 @@ func (decoder *H264Decoder) nativeReferenceLists(slice nativeSlice, poc int64) (
 		if index == 1 {
 			modifications = slice.header.RefPicListL1
 		}
-		modified, err := ApplyReferenceListModifications(lists[index], references, slice.header.FrameNum, 1<<(slice.sps.Log2MaxFrameNumMinus4+4), modifications)
+		maximum := slice.header.NumRefIdxL0ActiveMinus1
+		if index == 1 {
+			maximum = slice.header.NumRefIdxL1ActiveMinus1
+		}
+		modified, err := applyReferenceListModifications(lists[index], references, slice.header.FrameNum, 1<<(slice.sps.Log2MaxFrameNumMinus4+4), modifications, int(maximum)+1)
 		if err != nil {
 			return decoded, err
 		}
@@ -416,7 +420,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 				}
 				prediction := nativePrediction{used: true, reference: lists[0][0].Reference.ID, refIndex: 0, motion: motion, referenceDecoded: true, motionDecoded: true}
 				setNativePrediction(&current, part, 0, prediction)
-				compensations = append(compensations, nativeCompensation{frame: lists[0][0].Frame, part: part, motion: motion})
+				compensations = append(compensations, nativeCompensation{frame: lists[0][0].Frame, part: part, motion: motion, list: 0, refIndex: 0, reference: lists[0][0].Reference})
 				previousDelta = 0
 			} else if skipped {
 				current.direct = true
@@ -538,7 +542,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 							prediction := nativePrediction{used: true, refIndex: part.refs[list], reference: lists[list][part.refs[list]].Reference.ID, motion: motion, difference: difference, referenceDecoded: true, motionDecoded: true}
 							setNativePrediction(&decoder.nativeBlocks[address], part, list, prediction)
 							setNativePrediction(&current, part, list, prediction)
-							compensations = append(compensations, nativeCompensation{frame: lists[list][part.refs[list]].Frame, part: part, motion: motion, average: list == 1 && part.lists[0]})
+							compensations = append(compensations, nativeCompensation{frame: lists[list][part.refs[list]].Frame, part: part, motion: motion, average: list == 1 && part.lists[0], list: list, refIndex: part.refs[list], reference: lists[list][part.refs[list]].Reference})
 						}
 					}
 					var lumaContexts [4]CABACContextModel
@@ -592,7 +596,10 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 			decoder.nativeBlocks[address] = current
 			history[address] = &decoder.nativeBlocks[address].result
 			if !current.intra {
-				job := &nativeReconstruction{result: history[address], builder: builder, address: address, width: width, compensations: compensations, residual: residual}
+				job := &nativeReconstruction{
+					result: history[address], builder: builder, address: address, width: width, compensations: compensations, residual: residual,
+					weighting: nativeWeighting{table: slice.header.PredictionWeightTable, implicit: bSlice && slice.pps.WeightedBipredIDC == 2, poc: poc},
+				}
 				if err := pool.submit(job); err != nil {
 					return Yuv420Frame{}, err
 				}

@@ -47,6 +47,18 @@ library is required. Extraction supports the implemented progressive, 8-bit
 4:2:0 H.264 subset with CABAC or CAVLC entropy coding; unsupported streams
 fail explicitly.
 
+Weighted prediction is supported for this subset: explicit P/B slice weight
+tables and implicit B-slice POC-derived weights apply to luma and both chroma
+planes, including skip/direct partitions, before residual reconstruction.
+B-direct neighbors are excluded from CABAC reference-index and MVD context
+increments, while their motion vectors remain available for prediction.
+The eight-frame fading test pattern in `testdata/h264/weighted-32x32.mp4`
+exercises explicit P and implicit B weighting and is checked against reference
+YUV with one and four decoder threads. It was encoded with x264 parameters
+`keyint=30:scenecut=0:bframes=2:b-adapt=0:ref=1:weightp=2:weightb=1`.
+Reference-list reordering uses the signaled active count, allowing the same
+stored picture to occupy multiple entries with different prediction weights.
+
 CAVLC support includes slice/macroblock syntax, skip runs, coefficient decoding,
 neighboring coefficient-count contexts, and reconstruction for I/P/B pictures.
 The implementations live in codec-specific `h264_cavlc*` files and reuse the

@@ -20,6 +20,33 @@ fn decoder_checkpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn weighted_ipb_frames_match_reference() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264");
+    let expected = fs::read(root.join("weighted-32x32-reference.yuv")).unwrap();
+    for threads in [1, 4] {
+        let mut decoder = H264Decoder::new(
+            VideoSampleReader::open(root.join("weighted-32x32.mp4")).unwrap(),
+        );
+        decoder.set_threads(threads);
+        let pictures = decoder.dependency_slice_pictures(7).unwrap();
+        assert!(pictures.iter().flatten().any(|slice| {
+            slice.header.prediction_weight_table.as_ref().is_some_and(|table| {
+                table.lists.iter().flatten().any(|entry| {
+                    entry.weights.iter().zip(table.denominators).any(|(&weight, denominator)| {
+                        weight != 1 << denominator
+                    }) || entry.offsets != [0; 3]
+                })
+            })
+        }), "fixture must exercise non-default explicit weights");
+        for (index, reference) in expected.chunks_exact(32 * 32 * 3 / 2).enumerate() {
+            let frame = decoder.decode_frame(index as u64).unwrap();
+            let actual = [frame.y, frame.u, frame.v].concat();
+            assert_eq!(actual, reference, "weighted frame {index}, threads {threads}");
+        }
+    }
+}
+
+#[test]
 fn cavlc_ipb_frames_match_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264");
     let expected = fs::read(root.join("cavlc-32x32-reference.yuv")).unwrap();
@@ -769,6 +796,7 @@ fn decoder_builds_p_and_spatial_b_macroblock_inputs_from_reference_state() {
                 transform_size_8x8: false,
                 qp_delta: 0,
                 qpy: 26,
+                luma_8x8_nonzero: [false; 4],
                 luma_4x4_coded_block_flags: [false; 16],
                 chroma_dc_coded: [false; 2],
                 chroma_ac_coded_flags: [[false; 4]; 2],
@@ -875,6 +903,7 @@ fn decoder_resets_previous_qp_delta_after_a_skipped_macroblock() {
         transform_size_8x8: false,
         qpy: 29,
         qp_delta: 3,
+        luma_8x8_nonzero: [false; 4],
         luma_4x4_coded_block_flags: [false; 16],
         chroma_dc_coded: [false; 2],
         chroma_ac_coded_flags: [[false; 4]; 2],
