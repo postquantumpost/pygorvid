@@ -69,7 +69,7 @@ from .decoder import (
     default_decoder_threads,
 )
 from .mp4file import Mp4File
-from .nal import NALHeader, NALUnitError, ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals
+from .nal import NALHeader, NALUnitError, ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals
 from .colorconv import PixelConversionError, PixelConverter
 from .jpegencoder import (
     DEFAULT_JPEG_QUALITY,
@@ -327,6 +327,7 @@ __all__ = [
     "ebsp_to_rbsp",
     "parse_nal_header",
     "split_length_prefixed_nals",
+    "split_h264_sample_nals",
     "PPSInfo",
     "PPSParseError",
     "parse_pps",

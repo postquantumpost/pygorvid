@@ -28,7 +28,7 @@ from .h264_reconstruction import (
     Yuv420Frame,
     Yuv420FrameBuilder,
 )
-from .h264_nal import NALUnitError, ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals
+from .h264_nal import NALUnitError, ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals
 from .h264_pps import PPSParseError, parse_pps
 from .h264_slice import (
     MemoryManagementOperation,
@@ -582,7 +582,7 @@ class H264Decoder:
         groups: list[list[DependencySlice]] = []
         for sample in samples:
             try:
-                nal_units = split_length_prefixed_nals(sample.data, configuration.nal_length_size)
+                nal_units = split_h264_sample_nals(sample.data, configuration.nal_length_size)
             except NALUnitError as error:
                 raise DecoderError(f"sample {sample.index}: {error}") from error
             for nal_unit in nal_units:

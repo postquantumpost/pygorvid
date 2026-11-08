@@ -23,26 +23,28 @@ func TestWeightedIPBFramesMatchReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	const frameSize = 32 * 32 * 3 / 2
-	for _, threads := range []int{1, 4} {
-		reader, err := OpenVideoSampleReader(filepath.Join(root, "weighted-32x32.mp4"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		decoder := NewH264Decoder(reader)
-		decoder.SetThreads(threads)
-		for index := 0; index < len(expected)/frameSize; index++ {
-			frame, err := decoder.DecodeFrame(uint64(index))
+	for _, name := range []string{"weighted-32x32.mp4", "weighted-eos-32x32.mp4"} {
+		for _, threads := range []int{1, 4} {
+			reader, err := OpenVideoSampleReader(filepath.Join(root, name))
 			if err != nil {
-				reader.Close()
 				t.Fatal(err)
 			}
-			actual := append(append(append([]byte{}, frame.Y...), frame.U...), frame.V...)
-			if !bytes.Equal(actual, expected[index*frameSize:(index+1)*frameSize]) {
-				reader.Close()
-				t.Fatalf("weighted frame %d, threads %d differs", index, threads)
+			decoder := NewH264Decoder(reader)
+			decoder.SetThreads(threads)
+			for index := 0; index < len(expected)/frameSize; index++ {
+				frame, err := decoder.DecodeFrame(uint64(index))
+				if err != nil {
+					reader.Close()
+					t.Fatal(err)
+				}
+				actual := append(append(append([]byte{}, frame.Y...), frame.U...), frame.V...)
+				if !bytes.Equal(actual, expected[index*frameSize:(index+1)*frameSize]) {
+					reader.Close()
+					t.Fatalf("%s: frame %d, threads %d differs", name, index, threads)
+				}
 			}
+			reader.Close()
 		}
-		reader.Close()
 	}
 }
 

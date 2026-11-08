@@ -72,7 +72,9 @@ pub use hevc_decoder::HevcDecoder;
 pub use hevc_mp4::{HevcConfiguration, HevcNalArray};
 pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use mp4file::Mp4File;
-pub use nal::{ebsp_to_rbsp, parse_nal_header, split_length_prefixed_nals, NalHeader};
+pub use nal::{
+    ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals, NalHeader,
+};
 pub use pps::{parse_pps, PpsInfo};
 pub use reconstruction::{
     apply_luma_deblocking_edge, apply_luma_deblocking_edge_segment,

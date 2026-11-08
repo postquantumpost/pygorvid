@@ -35,6 +35,35 @@ status 1. `--readall` cannot be combined with `--extractframe` or `--output`.
 This uses the same native MP4/H.264 decoder and supported codec subset as frame
 extraction; it does not just read compressed samples.
 
+For a late H.264 framing or slice-header error, inspect only the selected
+presentation frame without decoding its predecessors:
+
+```sh
+timeout 60s cargo run --release --quiet --manifest-path r/Cargo.toml \
+  --example check_h264_sample -- samples/rannirune1d.mp4 943
+```
+
+The diagnostic reads MP4 metadata, maps the presentation index to its decode-order
+sample, seeks directly to that sample, and checks its NAL framing, EBSP and slice
+headers. It reports compressed byte counts and NAL tails; it does not reconstruct
+pixels or validate reference pictures. Frame 943 in this file maps to sample 944
+and requires only 14,981 compressed bytes, not the preceding 943 frames.
+
+All three H.264 decoders recover a narrowly recognized malformed MP4 encoding:
+a three- or four-byte Annex B start code followed by an empty end-of-sequence
+(`0a`) or end-of-stream (`0b`) NAL appended inside the sample's final VCL NAL
+(type 1 or 5). The H.264 sample splitter separates this marker before strict
+EBSP conversion. Generic MP4 sample bytes and length-prefix splitting are
+unchanged, as are HEVC framing and rejection of other malformed EBSP sequences.
+This is compatibility handling, not conformant MP4 NAL encapsulation.
+
+The compact `testdata/h264/rannirune-eos.hex` regression contains the original
+SPS, PPS and failing 1,092-byte final NAL from that sample (one hex record per
+line). `weighted-eos-32x32.mp4` is derived from `weighted-32x32.mp4` by appending
+the same five-byte marker to its final slice and adjusting the NAL length,
+sample size and `mdat` size. It must decode to the original reference YUV in
+all three languages with one and four threads.
+
 `--threads N` sets the number of decoder threads (default: half the available
 processors). Output is identical for every thread count. The Python decoder uses
 forked worker processes for this, since CPython threads share one interpreter lock.

@@ -23,9 +23,12 @@ fn decoder_checkpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
 fn weighted_ipb_frames_match_reference() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264");
     let expected = fs::read(root.join("weighted-32x32-reference.yuv")).unwrap();
-    for threads in [1, 4] {
+    for (name, threads) in ["weighted-32x32.mp4", "weighted-eos-32x32.mp4"]
+        .into_iter()
+        .flat_map(|name| [1, 4].map(|threads| (name, threads)))
+    {
         let mut decoder = H264Decoder::new(
-            VideoSampleReader::open(root.join("weighted-32x32.mp4")).unwrap(),
+            VideoSampleReader::open(root.join(name)).unwrap(),
         );
         decoder.set_threads(threads);
         let pictures = decoder.dependency_slice_pictures(7).unwrap();
@@ -41,7 +44,7 @@ fn weighted_ipb_frames_match_reference() {
         for (index, reference) in expected.chunks_exact(32 * 32 * 3 / 2).enumerate() {
             let frame = decoder.decode_frame(index as u64).unwrap();
             let actual = [frame.y, frame.u, frame.v].concat();
-            assert_eq!(actual, reference, "weighted frame {index}, threads {threads}");
+            assert_eq!(actual, reference, "{name}: frame {index}, threads {threads}");
         }
     }
 }

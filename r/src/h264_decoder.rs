@@ -1082,7 +1082,7 @@ impl H264Decoder {
         let samples = self.decode_order_dependency_samples(presentation_index)?;
         let mut pictures: Vec<Vec<DependencySlice>> = Vec::new();
         for sample in samples {
-            let nal_units = crate::split_length_prefixed_nals(&sample.data, nal_length_size)
+            let nal_units = crate::split_h264_sample_nals(&sample.data, nal_length_size)
                 .map_err(|error| invalid(format!("sample {}: {error}", sample.index)))?;
             for nal_unit in nal_units {
                 let nal_header = crate::parse_nal_header(nal_unit)

@@ -33,25 +33,12 @@ type nativeMacroblock struct {
 
 func (decoder *H264Decoder) nativeSlices(sample CompressedSample) ([]nativeSlice, error) {
 	configuration := decoder.sampleReader.Configuration()
-	lengthSize := int(configuration.NALLengthSize)
-	if lengthSize < 1 || lengthSize > 4 {
-		return nil, ErrDecoderUnsupportedFeature
+	nals, err := SplitH264SampleNALs(sample.Data, configuration.NALLengthSize)
+	if err != nil {
+		return nil, err
 	}
 	var slices []nativeSlice
-	for offset := 0; offset < len(sample.Data); {
-		if len(sample.Data)-offset < lengthSize {
-			return nil, fmt.Errorf("truncated NAL length")
-		}
-		length := uint32(0)
-		for _, value := range sample.Data[offset : offset+lengthSize] {
-			length = length<<8 | uint32(value)
-		}
-		offset += lengthSize
-		if length == 0 || uint64(length) > uint64(len(sample.Data)-offset) {
-			return nil, fmt.Errorf("invalid NAL length")
-		}
-		nal := sample.Data[offset : offset+int(length)]
-		offset += int(length)
+	for _, nal := range nals {
 		nalHeader, err := ParseNALHeader(nal)
 		if err != nil {
 			return nil, err

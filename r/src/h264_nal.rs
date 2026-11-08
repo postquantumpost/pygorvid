@@ -24,6 +24,30 @@ pub fn parse_nal_header(nal: &[u8]) -> io::Result<NalHeader> {
 
 pub use crate::codec_sample::split_length_prefixed_nals;
 
+/// Splits H.264 samples, recovering an Annex B end marker appended to the final VCL NAL.
+pub fn split_h264_sample_nals(data: &[u8], length_size: usize) -> io::Result<Vec<&[u8]>> {
+    let mut nals = split_length_prefixed_nals(data, length_size)?;
+    if let Some(&nal) = nals.last() {
+        if matches!(nal[0] & 0x1f, 1 | 5)
+            && nal.len() >= 4
+            && matches!(nal[nal.len() - 1], 0x0a | 0x0b)
+            && nal[nal.len() - 4..nal.len() - 1] == [0, 0, 1]
+        {
+            let mut end = nal.len() - 4;
+            if end > 0 && nal[end - 1] == 0 {
+                end -= 1;
+            }
+            if end > 1 {
+                // The start code is framing, not EBSP; preserve the empty end-marker NAL.
+                nals.pop();
+                nals.push(&nal[..end]);
+                nals.push(&nal[nal.len() - 1..]);
+            }
+        }
+    }
+    Ok(nals)
+}
+
 pub fn ebsp_to_rbsp(ebsp: &[u8]) -> io::Result<Vec<u8>> {
     let mut rbsp = Vec::with_capacity(ebsp.len());
     let mut zero_count = 0;

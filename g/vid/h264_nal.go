@@ -28,6 +28,41 @@ func ParseNALHeader(nal []byte) (NALHeader, error) {
 	}, nil
 }
 
+// SplitH264SampleNALs recovers an Annex B end marker appended to the final VCL NAL.
+func SplitH264SampleNALs(data []byte, lengthSize uint8) ([][]byte, error) {
+	if err := validateLengthPrefixedNALs(data, lengthSize); err != nil {
+		return nil, err
+	}
+	var nals [][]byte
+	for offset := 0; offset < len(data); {
+		size := 0
+		for _, value := range data[offset : offset+int(lengthSize)] {
+			size = size*256 + int(value)
+		}
+		offset += int(lengthSize)
+		nals = append(nals, data[offset:offset+size])
+		offset += size
+	}
+	if len(nals) != 0 {
+		nal := nals[len(nals)-1]
+		unitType := nal[0] & 0x1f
+		if (unitType == 1 || unitType == 5) && len(nal) >= 4 &&
+			(nal[len(nal)-1] == 0x0a || nal[len(nal)-1] == 0x0b) &&
+			nal[len(nal)-4] == 0 && nal[len(nal)-3] == 0 && nal[len(nal)-2] == 1 {
+			end := len(nal) - 4
+			if end > 0 && nal[end-1] == 0 {
+				end--
+			}
+			if end > 1 {
+				// The start code is framing, not EBSP; preserve the empty end-marker NAL.
+				nals[len(nals)-1] = nal[:end]
+				nals = append(nals, nal[len(nal)-1:])
+			}
+		}
+	}
+	return nals, nil
+}
+
 // EBSPToRBSP removes valid emulation-prevention bytes from a NAL payload.
 func EBSPToRBSP(ebsp []byte) ([]byte, error) {
 	rbsp := make([]byte, 0, len(ebsp))

@@ -20,6 +20,26 @@ def parse_nal_header(nal: bytes) -> NALHeader:
     return NALHeader(reference_idc=(nal[0] >> 5) & 0x03, unit_type=nal[0] & 0x1F)
 
 
+def split_h264_sample_nals(data: bytes, length_size: int) -> tuple[bytes, ...]:
+    """Recover an Annex B end marker appended to the sample's final VCL NAL."""
+    nals = split_length_prefixed_nals(data, length_size)
+    if nals:
+        nal = nals[-1]
+        if (
+            nal[0] & 0x1F in (1, 5)
+            and len(nal) >= 4
+            and nal[-1] in (0x0A, 0x0B)
+            and nal[-4:-1] == b"\x00\x00\x01"
+        ):
+            end = len(nal) - 4
+            if end > 0 and nal[end - 1] == 0:
+                end -= 1
+            if end > 1:
+                # The start code is framing, not EBSP; preserve the empty end-marker NAL.
+                return (*nals[:-1], nal[:end], nal[-1:])
+    return nals
+
+
 def ebsp_to_rbsp(ebsp: bytes) -> bytes:
     rbsp = bytearray()
     zero_count = 0
