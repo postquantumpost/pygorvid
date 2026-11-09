@@ -5,6 +5,8 @@ import sys
 from dataclasses import dataclass
 from typing import BinaryIO, Sequence
 
+import numpy as np
+
 from .jpegbitwriter import JPEGBitWriter
 from .jpegentropy import (
     JPEGEncoderInvalidHuffmanTableError,
@@ -195,28 +197,30 @@ class JPEGYCbCr444:
 
 def convert_rgb_to_ycbcr444(buffer: PixelBuffer) -> JPEGYCbCr444:
     _validate_jpeg_pixel_buffer(buffer)
-    pixel_count = buffer.width * buffer.height
-    y_plane = bytearray(pixel_count)
-    cb_plane = bytearray(pixel_count)
-    cr_plane = bytearray(pixel_count)
-    for row in range(buffer.height):
-        source_row = row * buffer.stride
-        destination_row = row * buffer.width
-        for column in range(buffer.width):
-            source = source_row + column * 3
-            destination = destination_row + column
-            y_value, cb_value, cr_value = jpeg_rgb_to_ycbcr(
-                buffer.data[source], buffer.data[source + 1], buffer.data[source + 2]
-            )
-            y_plane[destination] = y_value
-            cb_plane[destination] = cb_value
-            cr_plane[destination] = cr_value
+    rgb = np.frombuffer(buffer.data, dtype=np.uint8).reshape(buffer.height, buffer.stride)
+    rgb = rgb[:, : buffer.width * 3].reshape(buffer.height, buffer.width, 3).astype(np.int32)
+    red = rgb[:, :, 0]
+    green = rgb[:, :, 1]
+    blue = rgb[:, :, 2]
+    y_plane = np.clip(
+        (19595 * red + 38470 * green + 7471 * blue + 32768) >> 16, 0, 255
+    ).astype(np.uint8)
+    cb_plane = np.clip(
+        (-11059 * red - 21709 * green + 32768 * blue + (128 << 16) + 32768) >> 16,
+        0,
+        255,
+    ).astype(np.uint8)
+    cr_plane = np.clip(
+        (32768 * red - 27439 * green - 5329 * blue + (128 << 16) + 32768) >> 16,
+        0,
+        255,
+    ).astype(np.uint8)
     return JPEGYCbCr444(
         buffer.width,
         buffer.height,
-        bytes(y_plane),
-        bytes(cb_plane),
-        bytes(cr_plane),
+        y_plane.tobytes(),
+        cb_plane.tobytes(),
+        cr_plane.tobytes(),
     )
 
 

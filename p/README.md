@@ -2,6 +2,7 @@
 
 Native Python video file inspection, H.264 decoding, and PNG/JPEG encoding.
 Requires Python 3.9 or newer; no runtime FFmpeg or image library is required.
+NumPy is a runtime dependency for pixel-format conversions.
 
 Install with `python -m pip install pygorvid`, or install the wheel from the
 project's release images with `python -m pip install /path/to/pygorvid-1.0.0-py3-none-any.whl`.

@@ -1,7 +1,8 @@
 """YUV 4:2:0 to packed RGB conversion primitives."""
 
-import math
 from typing import Union
+
+import numpy as np
 
 from .pixelbuffer import PixelBuffer, PixelColorRange
 
@@ -52,20 +53,39 @@ class PixelConverter:
         ):
             raise PixelConversionError("input planes are too short for the requested dimensions")
 
+        y_values = np.frombuffer(y_data[: y_stride * height], dtype=np.uint8).reshape(
+            height, y_stride
+        )
+        y_values = y_values[:, :width].astype(np.float64)
+        u_values = np.frombuffer(
+            _upsample_chroma420(u_data, width, height, u_stride), dtype=np.uint8
+        ).reshape(height, width).astype(np.float64) - 128
+        v_values = np.frombuffer(
+            _upsample_chroma420(v_data, width, height, v_stride), dtype=np.uint8
+        ).reshape(height, width).astype(np.float64) - 128
+        blue_difference = u_values
+        red_difference = v_values
+
+        luma = y_values
+        if self.color_range is PixelColorRange.LIMITED:
+            luma = luma - 16
+            red_values = 1.164 * luma + 1.596 * red_difference
+            green_values = 1.164 * luma - 0.392 * blue_difference - 0.813 * red_difference
+            blue_values = 1.164 * luma + 2.017 * blue_difference
+        else:
+            red_values = luma + 1.402 * red_difference
+            green_values = luma - 0.344 * blue_difference - 0.714 * red_difference
+            blue_values = luma + 1.772 * blue_difference
+
+        rgb = np.stack(
+            (
+                _clamp_bytes(_round_half_away_from_zero(red_values)),
+                _clamp_bytes(_round_half_away_from_zero(green_values)),
+                _clamp_bytes(_round_half_away_from_zero(blue_values)),
+            ),
+            axis=-1,
+        )
         output_stride = width * 3
-        output = bytearray(output_stride * height)
-        u_upsampled = _upsample_chroma420(u_data, width, height, u_stride)
-        v_upsampled = _upsample_chroma420(v_data, width, height, v_stride)
-        for row in range(height):
-            for column in range(width):
-                output_offset = row * output_stride + column * 3
-                y_value = y_data[row * y_stride + column]
-                u_value = u_upsampled[row * width + column]
-                v_value = v_upsampled[row * width + column]
-                red, green, blue = _convert_yuv_sample(
-                    y_value, u_value, v_value, self.color_range
-                )
-                output[output_offset : output_offset + 3] = bytes((red, green, blue))
 
         return PixelBuffer(
             width,
@@ -73,7 +93,7 @@ class PixelConverter:
             output_stride,
             3,
             PixelColorRange.FULL,
-            output,
+            rgb.tobytes(),
         )
 
 
@@ -87,46 +107,18 @@ def _plane_bytes(plane: BytePlane) -> bytes:
 
 
 def _upsample_chroma420(chroma: bytes, width: int, height: int, stride: int) -> bytes:
-    upsampled = bytearray(width * height)
-    for row in range(height):
-        source_row = (row // 2) * stride
-        destination_row = row * width
-        for column in range(width):
-            upsampled[destination_row + column] = chroma[source_row + column // 2]
-    return bytes(upsampled)
+    chroma_height = (height + 1) // 2
+    chroma_width = (width + 1) // 2
+    plane = np.frombuffer(chroma[: chroma_height * stride], dtype=np.uint8).reshape(
+        chroma_height, stride
+    )
+    upsampled = np.repeat(np.repeat(plane[:, :chroma_width], 2, axis=0), 2, axis=1)
+    return upsampled[:height, :width].tobytes()
 
 
-def _convert_yuv_sample(
-    y_value: int, u_value: int, v_value: int, color_range: PixelColorRange
-) -> tuple[int, int, int]:
-    luma = y_value
-    blue_difference = u_value - 128
-    red_difference = v_value - 128
-    if color_range is PixelColorRange.LIMITED:
-        luma -= 16
-        red = _round_half_away_from_zero(
-            1.164 * luma + 1.596 * red_difference
-        )
-        green = _round_half_away_from_zero(
-            1.164 * luma - 0.392 * blue_difference - 0.813 * red_difference
-        )
-        blue = _round_half_away_from_zero(
-            1.164 * luma + 2.017 * blue_difference
-        )
-    else:
-        red = _round_half_away_from_zero(luma + 1.402 * red_difference)
-        green = _round_half_away_from_zero(
-            luma - 0.344 * blue_difference - 0.714 * red_difference
-        )
-        blue = _round_half_away_from_zero(luma + 1.772 * blue_difference)
-    return _clamp_byte(red), _clamp_byte(green), _clamp_byte(blue)
+def _round_half_away_from_zero(values: np.ndarray) -> np.ndarray:
+    return np.where(values >= 0, np.floor(values + 0.5), np.ceil(values - 0.5))
 
 
-def _round_half_away_from_zero(value: float) -> int:
-    if value >= 0:
-        return math.floor(value + 0.5)
-    return math.ceil(value - 0.5)
-
-
-def _clamp_byte(value: int) -> int:
-    return min(255, max(0, value))
+def _clamp_bytes(values: np.ndarray) -> np.ndarray:
+    return np.clip(values, 0, 255).astype(np.uint8)
