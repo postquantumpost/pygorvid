@@ -15,6 +15,115 @@ PNG encoding, and single-frame extraction. See
 [installation and release build instructions](docs/INSTALL.md)
 for Linux Mint setup, toolchain requirements, and use from other projects.
 
+### Performance
+
+The relative performance of the different languages depends on the operation.
+For extracting frame 0 to a jpg file from an mp4 file here are some sample
+times.
+
+C++
+real    0m0.562s
+user    0m0.432s
+sys     0m0.088s
+
+Rust
+real    0m0.495s
+user    0m0.497s
+sys     0m0.095s
+
+Go
+real    0m1.489s
+user    0m1.696s
+sys     0m0.246s
+
+Python
+real    1m10.973s
+user    1m45.973s
+sys     0m0.465s
+
+C++ and Rust perform about the same. It varies which is faster based on
+the operation.
+Go is consistently third in performance at about three times slower than
+C++ and Rust.
+Python is consitently fourth in performance at about 60 to 120 times
+slower than C++ and Rust. This makes Python not really usable.  It
+exists and does work, but it is very slow.
+
+$ lscpu
+Architecture:                x86_64
+  CPU op-mode(s):            32-bit, 64-bit
+  Address sizes:             39 bits physical, 48 bits virtual
+  Byte Order:                Little Endian
+CPU(s):                      12
+  On-line CPU(s) list:       0-11
+Vendor ID:                   GenuineIntel
+  Model name:                Intel(R) Core(TM) 5 120U
+    CPU family:              6
+    Model:                   186
+    Thread(s) per core:      2
+    Core(s) per socket:      10
+    Socket(s):               1
+    Stepping:                3
+    CPU(s) scaling MHz:      32%
+    CPU max MHz:             5000.0000
+    CPU min MHz:             400.0000
+    BogoMIPS:                4992.00
+    Flags:                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pg
+                             e mca cmov pat pse36 clflush dts acpi mmx fxsr sse 
+                             sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm cons
+                             tant_tsc art arch_perfmon pebs bts rep_good nopl xt
+                             opology nonstop_tsc cpuid aperfmperf tsc_known_freq
+                              pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm
+                             2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 
+                             x2apic movbe popcnt tsc_deadline_timer aes xsave av
+                             x f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault
+                              epb ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow 
+                             flexpriority ept vpid ept_ad fsgsbase tsc_adjust bm
+                             i1 avx2 smep bmi2 erms invpcid rdseed adx smap clfl
+                             ushopt clwb intel_pt sha_ni xsaveopt xsavec xgetbv1
+                              xsaves split_lock_detect user_shstk avx_vnni dther
+                             m ida arat pln pts hwp hwp_notify hwp_act_window hw
+                             p_epp hwp_pkg_req hfi vnmi umip pku ospke waitpkg g
+                             fni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md
+                             _clear serialize arch_lbr ibt flush_l1d arch_capabi
+                             lities
+Virtualization features:     
+  Virtualization:            VT-x
+Caches (sum of all):         
+  L1d:                       352 KiB (10 instances)
+  L1i:                       576 KiB (10 instances)
+  L2:                        6.5 MiB (4 instances)
+  L3:                        12 MiB (1 instance)
+NUMA:                        
+  NUMA node(s):              1
+  NUMA node0 CPU(s):         0-11
+Vulnerabilities:             
+  Gather data sampling:      Not affected
+  Ghostwrite:                Not affected
+  Indirect target selection: Not affected
+  Itlb multihit:             Not affected
+  L1tf:                      Not affected
+  Mds:                       Not affected
+  Meltdown:                  Not affected
+  Mmio stale data:           Not affected
+  Old microcode:             Not affected
+  Reg file data sampling:    Mitigation; Clear Register File
+  Retbleed:                  Not affected
+  Spec rstack overflow:      Not affected
+  Spec store bypass:         Mitigation; Speculative Store Bypass disabled via p
+                             rctl
+  Spectre v1:                Mitigation; usercopy/swapgs barriers and __user poi
+                             nter sanitization
+  Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditi
+                             onal; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S
+  Srbds:                     Not affected
+  Tsa:                       Not affected
+  Tsx async abort:           Not affected
+  Vmscape:                   Mitigation; IBPB before exit to userspace
+
+
+### Usage
+
 Version 1.0 does not expand the codec subset described below.
 
 `vidprobe` reports basic file information for one or more input files. `--input`

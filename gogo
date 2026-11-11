@@ -5,4 +5,6 @@ set -x
 #./pygorvid --readall --input samples/rannirune*.mp4
 #./pygorvid --readall --input samples/ew1.mp4
 #./pygorvid --extractframe 5 --output frame5.png --input samples/samp3.mp4
-./pygorvid --extractframe 5 --output frame5.jpg --input samples/samp3.mp4
+#./pygorvid --extractframe 5 --output frame5.jpg --input samples/samp3.mp4
+#./pygorvid --extractframe 0 --output frame0.png --input samples/samp3.mp4
+./pygorvid --extractframe 0 --output frame0.jpg --input samples/samp3.mp4
