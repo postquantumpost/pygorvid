@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #set -x
 # ./pygorvid --input samples/grace1.mp4 --extractframe 0 --output yyy.png
-for d in r g p
-#for d in r g
+#for d in r g p
+#for d in c r g
+for d in c
 do
     time "$d/pygorvid" --prefix "j${d}_" "$@"
 done

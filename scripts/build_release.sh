@@ -5,11 +5,12 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 version=$(<"$root/VERSION")
 language=${1:-all}
 python=${PYTHON:-python3}
+cxx=${CXX:-c++}
 dist="$root/dist"
 
 case "$language" in
-    all|python|go|rust) ;;
-    *) printf 'Usage: %s [all|python|go|rust]\n' "$0" >&2; exit 2 ;;
+    all|python|go|rust|cpp) ;;
+    *) printf 'Usage: %s [all|python|go|rust|cpp]\n' "$0" >&2; exit 2 ;;
 esac
 [[ $(uname -s) == Linux ]] || { printf 'Build Linux release images on Linux.\n' >&2; exit 1; }
 mkdir -p "$root/tmp" "$dist"
@@ -56,6 +57,39 @@ if [[ $language == all || $language == rust ]]; then
     cp "$root/docs/INSTALL.md" "$image/README.md"
     CARGO_TARGET_DIR="$work/rust-target" cargo build --locked --release --manifest-path "$image/sdk/Cargo.toml" --bin vidprobe
     cp "$work/rust-target/release/vidprobe" "$image/bin/vidprobe-rust"
+    tar -C "$work" -czf "$work/$name.tar.gz" "$name"
+    mv "$work/$name.tar.gz" "$dist/"
+fi
+
+if [[ $language == all || $language == cpp ]]; then
+    architecture=$(uname -m)
+    name="pygorvid-cpp-$version-linux-$architecture"
+    image="$work/$name"
+    mkdir -p "$image/bin" "$image/sdk/include" "$image/sdk/src" "$image/sdk/lib"
+    cp "$root/c/CMakeLists.txt" "$image/sdk/"
+    cp -R "$root/c/include/pygorvid" "$image/sdk/include/"
+    cp "$root/c/src/pygorvid.cpp" "$root/c/src/h264.cpp" "$root/c/src/h264_pcm.cpp" "$root/c/src/cavlc.cpp" "$root/c/src/png.cpp" "$root/c/src/vidprobe.cpp" "$image/sdk/src/"
+    cp "$root/LICENSE" "$root/VERSION" "$image/"
+    cp "$root/docs/INSTALL.md" "$image/README.md"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/pygorvid.cpp" \
+        -o "$work/pygorvid.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/h264.cpp" \
+        -o "$work/h264.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/h264_pcm.cpp" \
+        -o "$work/h264_pcm.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/cavlc.cpp" \
+        -o "$work/cavlc.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/png.cpp" \
+        -o "$work/png.o"
+    ar rcs "$image/sdk/lib/libpygorvid.a" "$work/pygorvid.o" "$work/h264.o" "$work/h264_pcm.o" "$work/cavlc.o" "$work/png.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" "$image/sdk/src/pygorvid.cpp" "$image/sdk/src/h264.cpp" "$image/sdk/src/h264_pcm.cpp" "$image/sdk/src/cavlc.cpp" \
+        "$image/sdk/src/png.cpp" "$image/sdk/src/vidprobe.cpp" -o "$image/bin/vidprobe-cpp"
     tar -C "$work" -czf "$work/$name.tar.gz" "$name"
     mv "$work/$name.tar.gz" "$dist/"
 fi

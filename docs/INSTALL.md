@@ -56,14 +56,56 @@ build; this is not an offline dependency bundle. Rust libraries are distributed
 as source because compiled Rust libraries do not have a stable cross-toolchain
 ABI. The prebuilt `bin/vidprobe-rust` does not need a Rust toolchain.
 
+## C++
+
+Extract `pygorvid-cpp-1.0.0-linux-ARCH.tar.gz`. The SDK includes
+`include/pygorvid/pygorvid.hpp`, C++ source, and `lib/libpygorvid.a`. Compile a
+consumer with C++17 and link the static library:
+
+```sh
+c++ -std=c++17 -I/path/to/extracted-image/sdk/include main.cpp \
+  /path/to/extracted-image/sdk/lib/libpygorvid.a -o my-app
+```
+
+The C++ SDK provides container detection, MP4 sample reading
+(`video_samples.hpp`), H.264 parameter-set and slice parsing, CAVLC residual
+decoding, and PNG encoding (`png.hpp`). `decode_idr_i_pcm_sample()` can
+reconstruct progressive 8-bit 4:2:0 IDR pictures when every macroblock is
+I_PCM. `decode_idr_i_sample()` also supports I16x16 macroblocks with luma and
+chroma DC/AC CAVLC residual reconstruction and I4x4 macroblocks with all nine
+prediction modes and luma plus 4:2:0 chroma DC/AC CAVLC residuals using default scaling lists. `decode_p_frame()`
+supports complete P pictures containing P_SKIP and P_L0_16x16 macroblocks,
+with one reference fixed to the supplied previous frame. It derives motion
+vector predictors from neighboring macroblocks and supports quarter-pel luma
+motion with bilinear fractional 4:2:0 chroma motion. These reconstruction paths
+also reconstruct CAVLC luma and chroma DC/AC residuals for P_L0_16x16
+macroblocks using default scaling lists. IDR deblocking is supported for
+decoded intra macroblocks; P-picture reconstruction requires deblocking to be
+disabled. I8x8 prediction, weighted/reordered references,
+adaptive reference marking, custom scaling lists, and CABAC are not supported.
+Sample DTS, PTS, and durations are in `VideoSampleReader::timescale()`.
+
+The `vidprobe-cpp` command extracts one PNG frame by MP4 sample index:
+
+```sh
+vidprobe-cpp --extractframe 0 --output frame.png input.mp4
+```
+
+It decodes earlier supported samples to establish the reference frame. Only
+IDR pictures followed by supported P pictures with P-picture deblocking
+disabled can currently be extracted; unsupported slices fail with an error.
+PNG conversion uses limited-range BT.601 coefficients. Metadata probing remains
+available for one or more files.
+
 ## Command Installation
 
-The Go and Rust commands have distinct filenames so both can be installed:
+Native commands have distinct filenames so multiple versions can be installed:
 
 ```sh
 mkdir -p ~/.local/bin
 install -m 755 /path/to/go-image/bin/vidprobe-go ~/.local/bin/
 install -m 755 /path/to/rust-image/bin/vidprobe-rust ~/.local/bin/
+install -m 755 /path/to/cpp-image/bin/vidprobe-cpp ~/.local/bin/
 ```
 
 Ensure `~/.local/bin` is on `PATH`. Python's `vidprobe` remains in its virtual
@@ -73,7 +115,7 @@ with status 2; Python's command also supports `--help` with a successful exit.
 ## Building Release Images
 
 From the repository root, with GNU Make, tar, Go 1.22+, a current stable Rust
-toolchain, and Python 3.9+ installed:
+toolchain, a C++17 compiler and `ar`, and Python 3.9+ installed:
 
 ```sh
 python3 -m venv tmp/release-tools
@@ -82,12 +124,15 @@ make release PYTHON="$PWD/tmp/release-tools/bin/python"
 make test-release PYTHON="$PWD/tmp/release-tools/bin/python"
 ```
 
-`make release-python`, `make release-go`, and `make release-rust` build only the
-chosen language and require only its toolchain (plus Python's `build` package
-for Python). Artifacts and SHA-256 checksums are written to `dist/`. Temporary
-build directories are created under the repository's `tmp/` and removed on exit.
-The smoke test installs both Python distributions and builds independent Go and
-Rust consumer projects using only the extracted images.
+`make release-python`, `make release-go`, `make release-rust`, and
+`make release-cpp` build only the chosen language and require only its toolchain
+(plus Python's `build` package for Python). `CXX` selects the C++ compiler.
+Artifacts and SHA-256 checksums are written to `dist/`. Temporary build
+directories are created under the repository's `tmp/` and removed on exit.
+The smoke test installs both Python distributions and builds independent Go,
+Rust, and C++ consumer projects using only the extracted images.
+To run C++ tests from a source checkout, configure with
+`-DPYGORVID_BUILD_TESTS=ON`.
 
 Build on the oldest supported Linux Mint release, or a compatible older Linux
 userspace, and on each desired CPU architecture. Rust's dynamically linked

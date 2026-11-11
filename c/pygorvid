@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -x
+#./tmp/cmake-debug/vidprobe "$@"
+
+cmake -S c -B tmp/cmake-release -DCMAKE_BUILD_TYPE=Release
+cmake --build tmp/cmake-release
+./tmp/cmake-release/vidprobe "$@"

@@ -1,13 +1,18 @@
 # pygorvid
-A video file support library for python, go, and rust, to reduce dependency on ffmpeg.
+A video file support library for Python, Go, Rust, and C++, to reduce dependency on ffmpeg.
+
+Much of this code was developed with AI tools including code generation.
 
 ## Version 1.0
 
-Version 1.0.0 provides independent Python, Go, and Rust install images. Run
+Version 1.0.0 provides independent Python, Go, Rust, and C++ install images. Run
 `make release` to build them into `dist/`, or use `make release-python`,
-`make release-go`, or `make release-rust` for one language. Python includes a
+`make release-go`, `make release-rust`, or `make release-cpp` for one language. Python includes a
 pip-installable wheel and source distribution; Go and Rust include library SDKs
-and prebuilt Linux commands. See [installation and release build instructions](docs/INSTALL.md)
+and prebuilt Linux commands. C++ includes a C++17 SDK and metadata probe
+command, compressed H.264 sample reading, progressive frame reconstruction,
+PNG encoding, and single-frame extraction. See
+[installation and release build instructions](docs/INSTALL.md)
 for Linux Mint setup, toolchain requirements, and use from other projects.
 
 Version 1.0 does not expand the codec subset described below.
@@ -49,7 +54,7 @@ headers. It reports compressed byte counts and NAL tails; it does not reconstruc
 pixels or validate reference pictures. Frame 943 in this file maps to sample 944
 and requires only 14,981 compressed bytes, not the preceding 943 frames.
 
-All three H.264 decoders recover a narrowly recognized malformed MP4 encoding:
+All four H.264 decoders recover a narrowly recognized malformed MP4 encoding:
 a three- or four-byte Annex B start code followed by an empty end-of-sequence
 (`0a`) or end-of-stream (`0b`) NAL appended inside the sample's final VCL NAL
 (type 1 or 5). The H.264 sample splitter separates this marker before strict
@@ -62,7 +67,7 @@ SPS, PPS and failing 1,092-byte final NAL from that sample (one hex record per
 line). `weighted-eos-32x32.mp4` is derived from `weighted-32x32.mp4` by appending
 the same five-byte marker to its final slice and adjusting the NAL length,
 sample size and `mdat` size. It must decode to the original reference YUV in
-all three languages with one and four threads.
+all four languages with one and four threads.
 
 `--threads N` sets the number of decoder threads (default: half the available
 processors). Output is identical for every thread count. The Python decoder uses
@@ -93,7 +98,7 @@ neighboring coefficient-count contexts, and reconstruction for I/P/B pictures.
 The implementations live in codec-specific `h264_cavlc*` files and reuse the
 existing H.264 prediction, inverse transforms, and filtering. A compact eight-frame
 32x32 I/P/B fixture in `testdata/h264/cavlc-32x32.mp4` is compared against raw
-reference YUV output in all three languages, including multithreaded decoding.
+reference YUV output in all four languages, including multithreaded decoding.
 
 The MP4 box readers recognize HEVC `hvc1`/`hev1` sample entries and parse `hvcC`
 configuration records, including profile, level, bit depths, NAL length size,
@@ -103,14 +108,38 @@ be decoded by `--readall` or frame extraction.
 
 ### Codec Source Isolation
 
-All three implementations use the same source organization:
+The Rust, Go, and Python codec implementations use the same source organization.
+The C++ port currently contains MP4 compressed-sample reading, shared bit
+reading, H.264 parameter-set and slice parsing, CABAC and CAVLC syntax and
+residual decoding, frame reconstruction, and PNG encoding. It supports a
+restricted progressive 8-bit 4:2:0 subset of IDR, P, and B pictures, including
+I_PCM, I16x16, I4x4, skipped, and inter-partition macroblocks. Inter prediction
+supports multiple active short-term references and parsed short-term
+reference-list modifications; luma motion compensation supports quarter-pel
+positions and chroma supports fractional 4:2:0 positions. Default scaling
+lists and deblocking are implemented for the supported syntax paths. This is
+not a general-purpose H.264 decoder: field/MBAFF pictures, long-term reference
+management, weighted B prediction, custom scaling lists, I8x8 prediction, and
+other unimplemented syntax remain unsupported.
 
-| Responsibility | Rust | Go | Python |
-| --- | --- | --- | --- |
-| H.264 decoder/support | `r/src/h264_*.rs` | `g/vid/h264_*.go` | `p/src/pygorvid/h264_*.py` |
-| HEVC decoder/support | `r/src/hevc_*.rs` | `g/vid/hevc_*.go` | `p/src/pygorvid/hevc_*.py` |
-| Shared selection/errors | `r/src/codec.rs` | `g/vid/codec.go` | `p/src/pygorvid/codec.py` |
-| Shared raw frames/framing | `codec_frame.rs`, `codec_sample.rs` | `codec_frame.go`, `codec_sample.go` | `codec_frame.py`, `codec_sample.py` |
+The C++ CLI extracts one sample by decoding preceding supported pictures:
+
+```sh
+vidprobe-cpp --extractframe 0 --output frame.png input.mp4
+```
+
+`--extractframe` uses the MP4 sample index. Extraction requires one input,
+both options, and an IDR followed only by pictures in the supported subset.
+The PNG writer converts 8-bit 4:2:0 samples to RGB using limited-range BT.601
+coefficients.
+Unsupported streams fail explicitly:
+
+| Responsibility | Rust | Go | Python | C++ |
+| --- | --- | --- | --- | --- |
+| H.264 decoder/support | `r/src/h264_*.rs` | `g/vid/h264_*.go` | `p/src/pygorvid/h264_*.py` | MP4 samples, restricted progressive IDR/P/B reconstruction with CABAC/CAVLC, short-term multiple references, and fractional motion |
+| HEVC decoder/support | `r/src/hevc_*.rs` | `g/vid/hevc_*.go` | `p/src/pygorvid/hevc_*.py` | Not yet ported |
+| Shared selection/errors | `r/src/codec.rs` | `g/vid/codec.go` | `p/src/pygorvid/codec.py` | Not yet ported |
+| Raw frames/framing | `codec_frame.rs`, `codec_sample.rs` | `codec_frame.go`, `codec_sample.go` | `codec_frame.py`, `codec_sample.py` | Not yet ported |
 
 MP4 box walking, sample offsets/timing, raw pixel storage, and image output are
 codec-neutral. Codec-specific configuration parsing belongs in `h264_mp4` or

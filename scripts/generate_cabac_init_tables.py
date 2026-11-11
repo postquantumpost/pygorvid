@@ -3,7 +3,7 @@
 
 Row-oriented Tables 9-12 to 9-17 are transcribed below; column-oriented Tables
 9-18 to 9-24 are parsed from `pdftotext -layout` output of the standard in docs/.
-Emits Go, Python, or Rust source on stdout. Development-time only.
+Emits Go, Python, Rust, or C++ source on stdout. Development-time only.
 """
 
 import argparse
@@ -133,6 +133,30 @@ def emit(tables: list[list[tuple[int, int]]], language: str) -> str:
             "# (m, n) by [I/SI, cabac_init_idc 0-2][ctxIdx].",
             "CONTEXT_INIT_TABLE = (", *body, ")", "",
         ])
+    if language == "cpp":
+        body = []
+        for table in tables:
+            body.append("    {")
+            for start in range(0, COUNT, 8):
+                pairs = ", ".join(
+                    f"{{{m}, {n}}}" for m, n in table[start:start + 8]
+                )
+                body.append(f"        {pairs},")
+            body.append("    },")
+        return "\n".join([
+            f"// {header}",
+            "#pragma once",
+            "",
+            "#include <cstdint>",
+            "",
+            "namespace pygorvid::detail {",
+            "inline constexpr std::int8_t cabac_context_init_table",
+            f"    [4][{COUNT}][2] = {{",
+            *body,
+            "};",
+            "} // namespace pygorvid::detail",
+            "",
+        ])
     body = rows("(", ")", "    ")
     return "\n".join([
         f"//! {header}", "",
@@ -144,7 +168,7 @@ def emit(tables: list[list[tuple[int, int]]], language: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("language", choices=("go", "python", "rust"))
+    parser.add_argument("language", choices=("go", "python", "rust", "cpp"))
     args = parser.parse_args()
     sys.stdout.write(emit(build_tables(), args.language))
     return 0

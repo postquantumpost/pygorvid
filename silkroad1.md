@@ -11,7 +11,7 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 4. [x] Save `silkroad1-feature-matrix.md`, documenting observed active-corpus features, explicit first-release exclusions, and syntax not yet assessed.
 5. [x] Create 48-packet stream-copy fixtures for both active AVC configuration groups (1080p/Level 4.2 and 2160p/Level 5.2); verify preserved configuration and I/P/B slices, and retain all eligible source samples for corpus tests.
 6. [x] Record Y/U/V reference hashes for the first I/P/B frames of both compact fixtures. Generate tiny RGB PNG/JPEG vectors; independently validate PNG chunk CRCs and exact decoded RGB pixels, and JPEG baseline markers, dimensions, scan stuffing, and EOI. FFmpeg is used only as a development decoder/encoder; it is never part of the shipped extraction path.
-7. [x] Specify common input, frame, pixel-buffer, object-ownership, error, and output-safety contracts for all three languages in `silkroad1-contract.md`.
+7. [x] Specify common input, frame, pixel-buffer, object-ownership, error, and output-safety contracts for all four languages in `silkroad1-contract.md`.
 
 **Phase 2: MP4 sample demuxing**
 8. [x] Define the cross-language `VideoSampleReader` contract: input ownership, AVC configuration, length-prefixed samples, DTS/PTS/duration ticks, sync status, EOF, and error semantics in `silkroad1-contract.md`.
@@ -52,7 +52,7 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 33. [x] Add B-picture support and test decode order versus presentation order.
 34. [x] Add a `decode_frame(index)` operation that decodes dependencies through the requested presentation frame and returns planar YUV plus dimensions.
 35. [x] Reject unsupported profiles, bit depths, chroma layouts, interlace modes, or coding tools with a stable error, rather than returning a misleading frame.
-36. Port each verified decoder increment to all three languages before broadening the supported feature union.
+36. Port each verified decoder increment to all four languages before broadening the supported feature union.
     36.1. [x] Port the validated SPS/decoder guardrails and their unsupported-feature regressions to Python and Rust with the same error semantics as the Go reference.
     36.2. [ ] Port each accepted decoder increment in the same order it was validated in Go, keeping the Python and Rust implementations aligned with the reference behavior.
         36.2.1. [x] Port the decoder state and core contracts from the Go reference to Python and Rust, including sample-reader checks, reference buffering, and presentation-order bookkeeping.
@@ -98,7 +98,7 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
                                 36.2.5.2.2.2.2.12.2. [x] Correct slice-unavailable and I_PCM neighbor CBP masks in Python/Rust history providers per clause 9.3.3.1.1.4: luma context terms are zero for unavailable/I_PCM neighbors, chroma terms are zero for unavailable neighbors and one for I_PCM. Decode the first two real 1080p IDR macroblocks with top-left luma 29 and chroma DC prediction; complete-picture plane validation remains pending.
                                 36.2.5.2.2.2.2.12.3. [x] Correct Table 9-45 LPS transitions, route I_16x16 DC to ctxBlockCat 0, decode both chroma DC blocks before AC, include the flat chroma DC scaling weight, and correct 4x4 DDR/VR/HD/HU prediction. Python and Rust decode the complete 1080p IDR natively and match all unfiltered Y/U/V reference samples; checked-in row and complete-picture regressions invoke no runtime FFmpeg. Port the primitive corrections and vectors to Go.
                                 36.2.5.2.2.2.2.12.4. [x] Complete 2160p unfiltered IDR reference validation in Python and Rust. Correct Intra_8x8 DDR reference centering, VR/HD interpolation phases and negative-phase indices, and HU final-left-sample extension per clauses 8.3.2.2.6-10; port matching fixes/vectors to Go. Complete 1080p/2160p native IDR Y/U/V planes match independent unfiltered reference hashes, with cached reuse, packed dimensions/planes, and Python subprocess rejection verified. Filtered-picture validation remains in `.12.5`.
-                                36.2.5.2.2.2.2.12.5. [x] Apply owned coded-picture luma/chroma deblocking in Python and Rust before SPS cropping and IDR reference/cache storage. Derive edge strengths from intra/coefficient/prediction facts, average per-edge luma and component chroma QPs, honor 8x8 transforms and IDC 0/1/2 slice controls, and dispatch chroma strong/weak filters. Correct Table 8-16 beta indexing and Table 8-17 bS=3/indexA=17 in all three languages. Complete 1080p/2160p filtered IDR Y/U/V planes match the existing reference vectors; synthetic motion/coefficient, unequal-QP, offset/slice, ownership, and invalid-metadata regressions pass. P/B full-picture reference-plane validation remains pending in `.12.6`/`.12.7`.
+                                36.2.5.2.2.2.2.12.5. [x] Apply owned coded-picture luma/chroma deblocking in Python and Rust before SPS cropping and IDR reference/cache storage. Derive edge strengths from intra/coefficient/prediction facts, average per-edge luma and component chroma QPs, honor 8x8 transforms and IDC 0/1/2 slice controls, and dispatch chroma strong/weak filters. Correct Table 8-16 beta indexing and Table 8-17 bS=3/indexA=17 in all four languages. Complete 1080p/2160p filtered IDR Y/U/V planes match the existing reference vectors; synthetic motion/coefficient, unequal-QP, offset/slice, ownership, and invalid-metadata regressions pass. P/B full-picture reference-plane validation remains pending in `.12.6`/`.12.7`.
                                 36.2.5.2.2.2.2.12.6. [x] Decode complete P dependency pictures using decoded reference planes and normative reference marking/list updates; validate the selected P frame's filtered Y/U/V planes. Python and Rust full-resolution `high42-1080p.mp4` frame-3 hashes pass, as do the ordered 16x16/64x64 smoke checks across Rust, Go, and Python. Correct Python inter luma residual dispatch to `ctxBlockCat` 2; the generated 16x16 non-skip P frame matches Y/U/V exactly.
                                     36.2.5.2.2.2.2.12.6.1. [x] Validate Python's full-resolution `high42-1080p.mp4` P frame 3 against filtered Y/U/V reference hashes; the ordered 16x16/64x64 smoke checks also pass in Rust, Go, and Python.
                                     36.2.5.2.2.2.2.12.6.2. [x] Complete Rust full-picture P dependency decoding and validate its filtered Y/U/V reference hashes.
@@ -108,7 +108,7 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
                                 36.2.5.2.2.2.2.12.8. [x] Run final I/P/B reference-plane, ownership, repeated-index/cache, and runtime-FFmpeg-absent checks in Python and Rust for both compact fixtures before marking step 36.2.5.2.2.2.2.12 complete.
                                 36.2.5.2.2.2.2.12.9. [x] Correct the Rust 2160p P-picture regression when a shared checkpoint already includes later B pictures: cached P requests preserve restored reference state rather than rewind it to [0, 4]. Retain exact fresh-decode reference assertions and verify repeated cached requests preserve state. Ordered Rust/Go/Python 16x16 and 64x64 smoke checks, Rust checkpoint-backed 2160p B-then-P checks, and Python checkpoint-backed 2160p P/B checks pass.
                                 36.2.5.2.2.2.2.12.10. [x] Require Python's runtime-subprocess rejection regression to successfully decode each selected I/P/B frame at 1920x1080 rather than swallow unrelated DecoderError failures. All three cases pass with subprocess entry points blocked and PATH empty; injected decoder failures propagate in every case. Ordered Rust/Go/Python smoke checks, six Rust filtered-plane checks, and nine Python plane/subprocess checks pass using existing checkpoints.
-        36.2.6. [x] Re-run the relevant Go/Python/Rust decoder regressions for each increment before marking the broader port complete. Ordered 16x16/64x64 smoke checks and the full Go codec package pass; 734 Python and 286 Rust primitive/parser/decoder checks pass in bounded batches, including uncached 1080p/2160p IDR assembly and checkpoint-backed I/P/B reference-plane/cache checks without runtime FFmpeg. Correct synthetic field-header fixtures in all three languages to preserve progressive-only SPS guardrails, and align the Rust invalid-reference-frame assertion with InvalidInput. No run exceeds 240 seconds.
+        36.2.6. [x] Re-run the relevant Go/Python/Rust decoder regressions for each increment before marking the broader port complete. Ordered 16x16/64x64 smoke checks and the full Go codec package pass; 734 Python and 286 Rust primitive/parser/decoder checks pass in bounded batches, including uncached 1080p/2160p IDR assembly and checkpoint-backed I/P/B reference-plane/cache checks without runtime FFmpeg. Correct synthetic field-header fixtures in all four languages to preserve progressive-only SPS guardrails, and align the Rust invalid-reference-frame assertion with InvalidInput. No run exceeds 240 seconds.
 
 **Phase 5: Pixel conversion and native PNG encoder**
 37. Define a common frame-buffer contract and convert 8-bit 4:2:0 YUV to RGB with documented range and rounding behavior.
@@ -135,20 +135,20 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 
 **Phase 8: Conformance and release gates**
 54. Add per-language tests for demux-only, each decoder feature, presentation-order selection, unsupported-feature errors, and both encoders.
-55. Run all eligible videos through all three implementations and compare selected decoded frames to the reference set; report oversized exclusions separately.
+55. Run all eligible videos through all four implementations and compare selected decoded frames to the reference set; report oversized exclusions separately.
 56. Compare Go/Python/Rust RGB output for the same frame to detect cross-port drift.
 57. Test boundary indices (first frame, last frame, out-of-range), prefixed paths, `.png`/`.jpg`, spaces in paths, and unwritable destinations.
 58. Run every full language test suite, formatter, diagnostics, and a clean-environment check with FFmpeg absent from `PATH`.
 59. Record supported H.264 features, known limitations, performance, and test corpus in README documentation.
 
 **Complexity review: split before implementation**
-- Steps 9-12 are broad as written: they span multiple box types and three implementations. Split into one task per box parser, then chunk-to-sample mapping, access-unit extraction, and one-language-at-a-time ports.
+- Steps 9-12 are broad as written: they span multiple box types and four implementations. Split into one task per box parser, then chunk-to-sample mapping, access-unit extraction, and one-language-at-a-time ports.
 - Steps 13-16 combine separate demux concerns. Split constant versus variable sample sizes, 32-bit versus 64-bit offsets, timestamp/reordering tables, malformed-input behavior, and corpus verification into separate tests.
 - Steps 17-18 should be separate primitives: bounded bit reads, alignment, Exp-Golomb, RBSP prevention-byte removal, and NAL headers, each with its own vectors.
 - Step 19 is too broad for one parser change. Split SPS parsing into profile/chroma/bit-depth, dimensions/cropping, frame-number/POC, and reference-frame fields, gated by the corpus feature matrix.
 - Steps 20-21 should be split by syntax stage: PPS core fields, optional PPS tools, slice-header common fields, per-slice-type fields, and access-unit/picture-boundary detection.
 - Step 23 is a major decoder subsystem, not one goal. First decide from the corpus whether CAVLC, CABAC, or both are needed; then split arithmetic/bit decoding, context initialization/update, bin syntax, residual coefficients, and conformance vectors into independently tested tasks.
-- Steps 25 and 36 mix architecture with three language ports. Finalize a language-neutral contract first; implement each decoder increment in one chosen reference port, then port that increment separately to Python and Rust with matching vectors.
+- Steps 25 and 36 mix architecture with four language ports. Finalize a language-neutral contract first; implement each decoder increment in one chosen reference port, then port that increment separately to Python and Rust with matching vectors.
 - Steps 26-30 each hide multiple algorithms. Split transforms from scaling; split intra prediction by block size/mode family; split inter prediction into motion parsing, reference selection, interpolation, and weighting; split DPB from POC ordering; split deblocking from chroma reconstruction.
 - Steps 31-35 should be acceptance milestones only after their internal algorithms are split. For each I/P/B milestone, specify a tiny input, expected planes, reference state, and an unsupported-feature test.
 - Step 37 combines API design and color conversion. Freeze the frame-buffer contract first, then implement range handling, chroma upsampling, matrix conversion, and rounding as separate tests.
@@ -217,20 +217,20 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 23.5 Map decoded bins to one syntax element at a time; then reconstruct residual coefficient blocks.
 - 23.6 Compare each path against standards-derived vectors and fail explicitly on unsupported syntax.
 - 23.6.1 [x] Reject an overlong coefficient escape prefix explicitly and preserve decoder/context state across Go, Python, and Rust.
-- 23.6.2 [x] Verify coefficient escape prefix/suffix mapping against state-seeded vectors for suffix values 0 and 1 in all three languages.
-- 23.6.3 [x] Verify regular-bin MPS/LPS selection immediately below and above the normative `rangeMPS` threshold in all three languages.
-- 23.6.4 [x] Verify terminate-bin continuation/termination immediately below and at the `range - 2` threshold in all three languages.
-- 23.6.5 [x] Verify bypass-bin threshold behavior at offsets 254 and 255 for range 510 in all three languages.
-- 23.6.6 [x] Verify the full 64-state LPS transition vector, state-zero MPS flip, and MPS saturation edges in all three languages.
+- 23.6.2 [x] Verify coefficient escape prefix/suffix mapping against state-seeded vectors for suffix values 0 and 1 in all four languages.
+- 23.6.3 [x] Verify regular-bin MPS/LPS selection immediately below and above the normative `rangeMPS` threshold in all four languages.
+- 23.6.4 [x] Verify terminate-bin continuation/termination immediately below and at the `range - 2` threshold in all four languages.
+- 23.6.5 [x] Verify bypass-bin threshold behavior at offsets 254 and 255 for range 510 in all four languages.
+- 23.6.6 [x] Verify the full 64-state LPS transition vector, state-zero MPS flip, and MPS saturation edges in all four languages.
 - 23.6.7 [x] Verify selected `rangeLPS` values across all four range classes and representative context states, including renormalization and context updates.
-- 23.6.8 [x] Verify context initialization at the `preCtxState` 63/64 split and with a negative product requiring arithmetic right shift in all three languages.
-- 23.6.9 [x] Verify context initialization at the maximum legal `SliceQPY` with positive and negative products in all three languages.
-- 23.6.10 [x] Verify CABAC arithmetic initialization accepts offsets 0 and 509 and consumes exactly nine initialization bits in all three languages.
-- 23.6.11 [x] Verify context-init accepts legal `m`, `n`, and `SliceQPY` endpoints and rejects values immediately outside each range in all three languages.
-- 23.6.12 [x] Verify regular and repeated terminate bins are rejected after termination without mutating decoder or context state in all three languages.
+- 23.6.8 [x] Verify context initialization at the `preCtxState` 63/64 split and with a negative product requiring arithmetic right shift in all four languages.
+- 23.6.9 [x] Verify context initialization at the maximum legal `SliceQPY` with positive and negative products in all four languages.
+- 23.6.10 [x] Verify CABAC arithmetic initialization accepts offsets 0 and 509 and consumes exactly nine initialization bits in all four languages.
+- 23.6.11 [x] Verify context-init accepts legal `m`, `n`, and `SliceQPY` endpoints and rejects values immediately outside each range in all four languages.
+- 23.6.12 [x] Verify regular and repeated terminate bins are rejected after termination without mutating decoder or context state in all four languages.
 - 23.6.13 [x] Verify signed coefficient decoding accepts maximum positive/negative 32-bit magnitudes and rejects overflow before consuming a sign bin.
-- 23.6.14 [x] Verify MPS context transitions for every state from 0 through 63 in all three languages.
-- 23.6.15 [x] Verify all 256 `rangeLPS` table entries across four range classes and 64 context states in all three languages.
+- 23.6.14 [x] Verify MPS context transitions for every state from 0 through 63 in all four languages.
+- 23.6.15 [x] Verify all 256 `rangeLPS` table entries across four range classes and 64 context states in all four languages.
 
 **Decoder reconstruction (steps 25-36)**
 - 25.1 [x] Define the frame, error, decoder-state, and `decode_frame(index)` contracts without implementing codecs.
@@ -447,7 +447,7 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - 30.2.40 [x] Port chroma intra mode dispatch and required-reference validation to Rust.
 - 31.1.1 [x] Expose the RBSP-relative, byte-aligned CABAC slice-data offset in Go, Python, and Rust; validate CABAC initialization from compact IDR fixtures.
 - 31.1.2 [x] Initialize I-slice `mb_type` contexts 3-10 from Table 9-12 and decode the first macroblock as `Intra_NxN` (`mb_type` 0) in compact IDR fixtures across Go, Python, and Rust.
-- 31.1.3 [x] Initialize I-slice contexts 68-69 and 399-401 from Tables 9-17 and 9-16, decode the first macroblock's transform flag when present, and verify its first luma prediction mode is DC (2) across compact IDR fixtures in all three languages.
+- 31.1.3 [x] Initialize I-slice contexts 68-69 and 399-401 from Tables 9-17 and 9-16, decode the first macroblock's transform flag when present, and verify its first luma prediction mode is DC (2) across compact IDR fixtures in all four languages.
 - 31.1.4 [x] Decode all 16 first-macroblock Intra_4x4 mode flags/remainders in normative block scan order, derive left/top predicted modes, and verify DC mode for the compact IDR fixtures in Go, Python, and Rust.
 - 31.1.5 [x] Initialize I-slice chroma prediction contexts 64-67 from Table 9-17 and decode the first macroblock's `intra_chroma_pred_mode` as DC (0) after its luma modes in Go, Python, and Rust.
 - 31.1.6 [x] Initialize I-slice luma/chroma coded-block-pattern contexts 73-84 from Table 9-18 and decode the compact IDR first macroblock's luma/chroma patterns as 13/2 in Go, Python, and Rust.
@@ -563,6 +563,6 @@ Silkroad incrementally replaces FFmpeg-based frame extraction with native code i
 - “No libraries” means no third-party codec, image, compression, FFI, or subprocess dependency in the shipped extraction path; implement MP4 demuxing, H.264 decoding, PNG, and JPEG in project-owned code for each language.
 - Initial codec scope is the verified active corpus (10 H.264 High Profile, 8-bit `yuv420p` files at or below 15,000,000 bytes), not arbitrary H.264. Twelve larger files are recorded as excluded and left untouched. A representative active sample contains I/P/B slices and reports two B frames of reordering, so support must include reference management and output reordering.
 - Frame indexes remain zero-based and refer to the first video track in presentation order, matching the current CLI contract.
-- Extend the supported codec subset only after the full active corpus passes all three implementations.
+- Extend the supported codec subset only after the full active corpus passes all four implementations.
 - Decoder, PNG encoder, and JPEG encoder are separate native objects, so parsing, decoding, conversion, and output each have testable ownership boundaries.
 - Standards and official errata are the primary source of implementation requirements. Consult FFmpeg source only as a backup when a concrete standards ambiguity remains, and record the reason and exact file. This repository is MIT-licensed; FFmpeg is primarily LGPL-2.1-or-later, with optional GPL and other per-file licenses. Code reuse is excluded unless separately approved after file-level license/notice review; patent questions are separate.
