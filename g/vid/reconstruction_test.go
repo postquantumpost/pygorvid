@@ -1560,6 +1560,8 @@ func TestInverseScaleChromaDC2x2MatchesQPCVectors(t *testing.T) {
 		{name: "low QP signed rounding", transformed: [4]int64{32, -32, 1, -1}, qpc: 0, want: [4]int64{160, -160, 5, -5}},
 		{name: "QP quotient zero", transformed: [4]int64{1, 2, -1, -2}, qpc: 5, want: [4]int64{9, 18, -9, -18}},
 		{name: "QP quotient one", transformed: [4]int64{1, 2, -1, -2}, qpc: 6, want: [4]int64{10, 20, -10, -20}},
+		{name: "smoke Cb DC", transformed: [4]int64{0, 6, -12, -10}, qpc: 20, want: [4]int64{0, 312, -624, -520}},
+		{name: "smoke Cr DC", transformed: [4]int64{-1, -1, 11, 11}, qpc: 20, want: [4]int64{-52, -52, 572, 572}},
 		{name: "maximum chroma QP", transformed: [4]int64{1, 2, -1, -2}, qpc: 39, want: [4]int64{448, 896, -448, -896}},
 		{name: "legal scaled output endpoints", transformed: [4]int64{-6553, 6553}, qpc: 0, want: [4]int64{-32765, 32765}},
 	}

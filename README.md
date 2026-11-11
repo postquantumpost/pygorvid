@@ -93,6 +93,14 @@ The shared `testdata/jpeg-parity-18x10.hex` regression contains width, height,
 hex Y/U/V planes, and expected JPEG bytes. It covers positive and negative
 quantization ties, color clipping, DC prediction, and partial edge blocks.
 
+All four decoder smoke regressions compare the three 16x16 I/P/P frames
+against raw YUV hashes obtained independently with FFmpeg. The 64x64
+regressions cover all three frames in Go, Python, and Rust, and the IDR
+frame in C++; its P pictures require unsupported P-slice Intra16x16 chroma
+residuals. C++ chroma DC reconstruction includes the flat scaling-list
+weight of 16 required by H.264 equations 8-313 and 8-326, for both intra
+and inter residuals.
+
 Weighted prediction is supported for this subset: explicit P/B slice weight
 tables and implicit B-slice POC-derived weights apply to luma and both chroma
 planes, including skip/direct partitions, before residual reconstruction.

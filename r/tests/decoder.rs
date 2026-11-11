@@ -70,7 +70,7 @@ fn a_decoder_smoke_16x16() {
     assert_decoder_smoke_fixture(
         "decoder-smoke-16x16.mp4",
         16,
-        [0xcabf755e2a6b7d56, 0x29631735ff370504],
+        [0xcabf755e2a6b7d56, 0x29631735ff370504, 0x9f4bba419bc2e2cd],
     );
 }
 
@@ -79,11 +79,11 @@ fn b_decoder_smoke_64x64() {
     assert_decoder_smoke_fixture(
         "decoder-smoke-64x64.mp4",
         64,
-        [0xdd69fba2006d59e0, 0x93ecf9bed15545a5],
+        [0xdd69fba2006d59e0, 0x93ecf9bed15545a5, 0x71ce324e67d3acf2],
     );
 }
 
-fn assert_decoder_smoke_fixture(name: &str, dimension: usize, expected_hashes: [u64; 2]) {
+fn assert_decoder_smoke_fixture(name: &str, dimension: usize, expected_hashes: [u64; 3]) {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../samples")
         .join(name);

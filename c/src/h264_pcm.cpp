@@ -826,7 +826,7 @@ std::array<std::int64_t, 4> reconstruct_intra16x16_chroma_dc(
         c0 + c1 - c2 - c3,
         c0 - c1 - c2 + c3,
     }};
-    const auto multiplier = scale[static_cast<std::size_t>(qpc % 6)];
+    const auto multiplier = scale[static_cast<std::size_t>(qpc % 6)] * 16;
     std::array<std::int64_t, 4> scaled{};
     for (std::size_t index = 0; index < scaled.size(); ++index) {
         const auto value = transformed[index] * multiplier *

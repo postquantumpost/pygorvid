@@ -30,13 +30,15 @@ def _test_time_limit_seconds():
 
 def test_a_decoder_smoke_16x16():
     _assert_decoder_smoke_fixture(
-        "decoder-smoke-16x16.mp4", 16, (0xCABF755E2A6B7D56, 0x29631735FF370504)
+        "decoder-smoke-16x16.mp4", 16,
+        (0xCABF755E2A6B7D56, 0x29631735FF370504, 0x9F4BBA419BC2E2CD),
     )
 
 
 def test_b_decoder_smoke_64x64():
     _assert_decoder_smoke_fixture(
-        "decoder-smoke-64x64.mp4", 64, (0xDD69FBA2006D59E0, 0x93ECF9BED15545A5)
+        "decoder-smoke-64x64.mp4", 64,
+        (0xDD69FBA2006D59E0, 0x93ECF9BED15545A5, 0x71CE324E67D3ACF2),
     )
 
 @pytest.mark.parametrize("name", ("weighted-32x32.mp4", "weighted-eos-32x32.mp4"))

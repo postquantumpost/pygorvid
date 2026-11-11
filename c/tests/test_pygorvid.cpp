@@ -1647,7 +1647,7 @@ void test_h264_i4x4_residual_reconstruction() {
         {make_i4x4_slice(16, zero_luma_bits,
                          {"00011111", "01"}, nullptr, 16)},
         sps, pps);
-    assert(chroma_dc_frame.chroma_u[0] == 129);
+    assert(chroma_dc_frame.chroma_u[0] == 139);
     assert(chroma_dc_frame.chroma_v == baseline.chroma_v);
 }
 
@@ -1837,9 +1837,9 @@ void test_h264_i16x16_residual_reconstruction() {
         for (std::uint32_t column = 12; column < 16; ++column) {
             const auto index = static_cast<std::size_t>(row) * 16 + column;
             assert(chroma_dc_frame.chroma_u[index] ==
-                   frame.chroma_u[index] + 1);
+                   frame.chroma_u[index] + 11);
             assert(chroma_dc_frame.chroma_v[index] ==
-                   frame.chroma_v[index] + 1);
+                   frame.chroma_v[index] + 11);
         }
     }
     chroma_dc_bits[2] = {{"000111101", "01"}};
@@ -1849,13 +1849,13 @@ void test_h264_i16x16_residual_reconstruction() {
     const auto chroma_dc_frequency_frame =
         pygorvid::decode_idr_i_frame({chroma_dc_frequency_slice}, sps, pps);
     assert(chroma_dc_frequency_frame.chroma_u[8 * 16 + 8] ==
-           frame.chroma_u[8 * 16 + 8] + 1);
+           frame.chroma_u[8 * 16 + 8] + 11);
     assert(chroma_dc_frequency_frame.chroma_u[8 * 16 + 12] ==
-           frame.chroma_u[8 * 16 + 12] - 1);
+           frame.chroma_u[8 * 16 + 12] - 11);
     assert(chroma_dc_frequency_frame.chroma_u[12 * 16 + 8] ==
-           frame.chroma_u[12 * 16 + 8] + 1);
+           frame.chroma_u[12 * 16 + 8] + 11);
     assert(chroma_dc_frequency_frame.chroma_u[12 * 16 + 12] ==
-           frame.chroma_u[12 * 16 + 12] - 1);
+           frame.chroma_u[12 * 16 + 12] - 11);
 
     std::array<std::array<std::string, 8>, 3> chroma_ac_bits;
     for (auto& macroblock_bits : chroma_ac_bits) {
@@ -2101,6 +2101,51 @@ std::vector<std::uint8_t> make_sample_test_mp4() {
     return file_data;
 }
 
+void test_decoder_smoke_frames() {
+    const std::array<std::vector<std::uint64_t>, 2> reference_hashes{{
+        {0xcabf755e2a6b7d56ULL, 0x29631735ff370504ULL, 0x9f4bba419bc2e2cdULL},
+        {0xdd69fba2006d59e0ULL},
+    }};
+    for (std::size_t fixture_index = 0; fixture_index < 2; ++fixture_index) {
+        const auto dimension = fixture_index == 0 ? 16U : 64U;
+        const auto name = "decoder-smoke-" + std::to_string(dimension) + "x" +
+                          std::to_string(dimension) + ".mp4";
+        pygorvid::VideoSampleReader reader;
+        const auto opened = reader.open(
+            (std::filesystem::path(PYGORVID_SOURCE_DIR) / "samples" / name).string());
+        assert(opened);
+        assert(reader.sample_count() == 3);
+        const auto& configuration = reader.configuration();
+        const auto sps = pygorvid::parse_sps(
+            configuration.sequence_parameter_sets.at(0));
+        const auto pps = pygorvid::parse_pps(
+            configuration.picture_parameter_sets.at(0));
+        pygorvid::Yuv420Frame previous;
+        for (std::size_t index = 0; index < reference_hashes[fixture_index].size(); ++index) {
+            std::vector<std::vector<std::uint8_t>> slices;
+            const auto nals = pygorvid::split_h264_sample_nals(
+                reader.sample_at(index).data, configuration.nal_length_size);
+            for (const auto& nal : nals) {
+                const auto type = pygorvid::parse_nal_header(nal).unit_type;
+                if (type == 1 || type == 5) {
+                    slices.push_back(nal);
+                }
+            }
+            auto frame = pygorvid::decode_h264_reference_frame(
+                slices, sps, pps, index == 0 ? nullptr : &previous);
+            assert(frame.width == dimension && frame.height == dimension);
+            std::uint64_t hash = 0xcbf29ce484222325ULL;
+            for (const auto* plane : {&frame.luma, &frame.chroma_u, &frame.chroma_v}) {
+                for (const auto sample : *plane) {
+                    hash = (hash ^ sample) * 0x100000001b3ULL;
+                }
+            }
+            assert(hash == reference_hashes[fixture_index][index]);
+            previous = std::move(frame);
+        }
+    }
+}
+
 void test_video_sample_reader() {
     const auto test_directory =
         std::filesystem::path("tmp/pygorvid-cpp-sample-tests");
@@ -2197,6 +2242,7 @@ int main() {
     test_h264_i4x4_residual_reconstruction();
     test_h264_i16x16_residual_reconstruction();
     test_cavlc_residual_blocks();
+    test_decoder_smoke_frames();
     test_video_sample_reader();
     {
         const std::vector<std::uint8_t> data{0b10110010, 0b01100000};

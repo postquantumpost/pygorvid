@@ -13,7 +13,7 @@ import (
 )
 
 func TestADecoderSmoke16x16(t *testing.T) {
-	assertDecoderSmokeFixture(t, "decoder-smoke-16x16.mp4", 16, [2]uint64{0xcabf755e2a6b7d56, 0x29631735ff370504})
+	assertDecoderSmokeFixture(t, "decoder-smoke-16x16.mp4", 16, [3]uint64{0xcabf755e2a6b7d56, 0x29631735ff370504, 0x9f4bba419bc2e2cd})
 }
 
 func TestWeightedIPBFramesMatchReference(t *testing.T) {
@@ -364,10 +364,10 @@ func TestNativeDecoderFilteredPReference(t *testing.T) {
 }
 
 func TestBDecoderSmoke64x64(t *testing.T) {
-	assertDecoderSmokeFixture(t, "decoder-smoke-64x64.mp4", 64, [2]uint64{0xdd69fba2006d59e0, 0x93ecf9bed15545a5})
+	assertDecoderSmokeFixture(t, "decoder-smoke-64x64.mp4", 64, [3]uint64{0xdd69fba2006d59e0, 0x93ecf9bed15545a5, 0x71ce324e67d3acf2})
 }
 
-func assertDecoderSmokeFixture(t *testing.T, name string, dimension int, hashes [2]uint64) {
+func assertDecoderSmokeFixture(t *testing.T, name string, dimension int, hashes [3]uint64) {
 	t.Helper()
 	path := filepath.Join("..", "..", "samples", name)
 	for _, threads := range []int{1, 4} {
