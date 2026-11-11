@@ -139,6 +139,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn jpeg_matches_shared_parity_vector() {
+        let fields: Vec<_> = include_str!("../../testdata/jpeg-parity-18x10.hex")
+            .split_whitespace()
+            .collect();
+        let decode_hex = |hex: &str| {
+            assert_eq!(hex.len() % 2, 0);
+            (0..hex.len())
+                .step_by(2)
+                .map(|offset| u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let width = fields[0].parse::<usize>().unwrap();
+        let height = fields[1].parse::<usize>().unwrap();
+        let frame = Yuv420Frame {
+            width,
+            height,
+            y_stride: width,
+            u_stride: width / 2,
+            v_stride: width / 2,
+            y: decode_hex(fields[2]),
+            u: decode_hex(fields[3]),
+            v: decode_hex(fields[4]),
+        };
+        assert_eq!(
+            encode_jpeg_frame(&frame).unwrap(),
+            decode_hex(&fields[5..].concat())
+        );
+    }
+
+    #[test]
     fn converts_limited_range_and_encodes_png() {
         let frame = Yuv420Frame {
             width: 2,

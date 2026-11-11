@@ -1,9 +1,11 @@
 #include "pygorvid/h264.hpp"
+#include "pygorvid/jpeg.hpp"
 #include "pygorvid/pygorvid.hpp"
 #include "pygorvid/png.hpp"
 #include "pygorvid/video_samples.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,7 +24,7 @@ struct Options {
 };
 
 void usage() {
-    std::cerr << "usage: vidprobe [--extractframe INDEX --output PNG] "
+    std::cerr << "usage: vidprobe [--extractframe INDEX --output IMAGE] "
                  "[--prefix TEXT] [--input FILE] FILE...\n";
 }
 
@@ -62,22 +64,26 @@ std::uint32_t slice_pps_id(const std::vector<std::uint8_t>& nal) {
     return reader.read_ue();
 }
 
-void save_png(const std::string& path, const pygorvid::Yuv420Frame& frame) {
-    const auto png = pygorvid::encode_png(frame);
-    if (png.size() >
+void save_image(const std::string& path, const pygorvid::Yuv420Frame& frame) {
+    auto extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    const auto image = extension == ".jpg" ? pygorvid::encode_jpeg(frame)
+                                           : pygorvid::encode_png(frame);
+    if (image.size() >
         static_cast<std::size_t>(
             std::numeric_limits<std::streamsize>::max())) {
-        throw std::runtime_error("PNG output exceeds the supported write size");
+        throw std::runtime_error("image output exceeds the supported write size");
     }
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
-        throw std::runtime_error("cannot open PNG output file");
+        throw std::runtime_error("cannot open image output file");
     }
-    output.write(reinterpret_cast<const char*>(png.data()),
-                 static_cast<std::streamsize>(png.size()));
+    output.write(reinterpret_cast<const char*>(image.data()),
+                 static_cast<std::streamsize>(image.size()));
     output.close();
     if (!output) {
-        throw std::runtime_error("cannot write complete PNG output file");
+        throw std::runtime_error("cannot write complete image output file");
     }
 }
 
@@ -93,16 +99,16 @@ void extract_frame(const std::string& input_path, std::size_t frame_index,
         std::filesystem::absolute(output_path, path_error).lexically_normal();
     if (path_error || normalized_input == normalized_output) {
         throw std::invalid_argument(
-            "PNG output path must not overwrite the input video");
+            "image output path must not overwrite the input video");
     }
     const bool output_exists = std::filesystem::exists(output_path, path_error);
     if (path_error) {
-        throw std::runtime_error("cannot inspect PNG output path");
+        throw std::runtime_error("cannot inspect image output path");
     }
     if (output_exists &&
         std::filesystem::equivalent(input_path, output_path, path_error)) {
         throw std::invalid_argument(
-            "PNG output path must not overwrite the input video");
+            "image output path must not overwrite the input video");
     }
     if (path_error) {
         throw std::runtime_error("cannot compare input and output paths");
@@ -632,7 +638,7 @@ void extract_frame(const std::string& input_path, std::size_t frame_index,
     if (!decoded_frame) {
         throw std::runtime_error("no supported H.264 picture was decoded");
     }
-    save_png(output_path, *decoded_frame);
+    save_image(output_path, *decoded_frame);
 }
 
 Options parse_options(const std::vector<std::string>& args) {

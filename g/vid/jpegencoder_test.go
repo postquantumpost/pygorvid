@@ -3,9 +3,14 @@ package vid
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"image/jpeg"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -198,9 +203,89 @@ func TestJPEGForwardDCTConstantAndImpulseVectors(t *testing.T) {
 	want := [4]float64{0.125, 0.1733799806652684, 0.1733799806652684, 0.24048494156391084}
 	indices := [4]int{0, 1, 8, 9}
 	for index, coefficientIndex := range indices {
-		if math.Abs(transformed[coefficientIndex]-want[index]) > 1e-12 {
+		if math.Abs(transformed[coefficientIndex]-want[index]) > 2e-7 {
 			t.Fatalf("impulse coefficient %d = %.15g; want %.15g", coefficientIndex, transformed[coefficientIndex], want[index])
 		}
+	}
+}
+
+func TestJPEGForwardDCTQuantizationTies(t *testing.T) {
+	positions := [...]int{0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34}
+	for _, sign := range []int{1, -1} {
+		for _, count := range []int{1, 19} {
+			var samples [64]uint8
+			var quantization [64]uint8
+			for index := range samples {
+				samples[index] = 128
+				quantization[index] = 9
+			}
+			for _, position := range positions[:count] {
+				samples[position] = uint8(128 + sign*36)
+			}
+			coefficients := jpegForwardDCT(samples)
+			if coefficients[32] != float64(sign*count)*4.5 {
+				t.Fatalf("coefficient = %g; want %g", coefficients[32], float64(sign*count)*4.5)
+			}
+			quantized, err := jpegQuantizeBlock(coefficients, quantization)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := int16(sign * ((count + 1) / 2))
+			if quantized[32] != want {
+				t.Fatalf("quantized tie = %d; want %d", quantized[32], want)
+			}
+		}
+	}
+}
+
+func TestJPEGSharedParityVector(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "jpeg-parity-18x10.hex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(fixture))
+	if len(fields) < 6 {
+		t.Fatal("incomplete JPEG parity fixture")
+	}
+	width, err := strconv.Atoi(fields[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	height, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeHex := func(text string) []byte {
+		t.Helper()
+		data, err := hex.DecodeString(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	converter, err := NewPixelConverter(ColorRangeLimited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rgb, err := converter.ConvertYUV420ToRGB(width, height,
+		decodeHex(fields[2]), decodeHex(fields[3]), decodeHex(fields[4]),
+		width, width/2, width/2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := NewJPEGEncoder().Encode(rgb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, decodeHex(strings.Join(fields[5:], ""))) {
+		t.Fatal("JPEG differs from the shared cross-language vector")
+	}
+	decoded, err := jpeg.Decode(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Bounds().Dx() != width || decoded.Bounds().Dy() != height {
+		t.Fatalf("decoded bounds = %v; want %dx%d", decoded.Bounds(), width, height)
 	}
 }
 

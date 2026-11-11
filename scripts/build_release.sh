@@ -68,7 +68,7 @@ if [[ $language == all || $language == cpp ]]; then
     mkdir -p "$image/bin" "$image/sdk/include" "$image/sdk/src" "$image/sdk/lib"
     cp "$root/c/CMakeLists.txt" "$image/sdk/"
     cp -R "$root/c/include/pygorvid" "$image/sdk/include/"
-    cp "$root/c/src/pygorvid.cpp" "$root/c/src/h264.cpp" "$root/c/src/h264_pcm.cpp" "$root/c/src/cavlc.cpp" "$root/c/src/png.cpp" "$root/c/src/vidprobe.cpp" "$image/sdk/src/"
+    cp "$root/c/src/pygorvid.cpp" "$root/c/src/h264.cpp" "$root/c/src/h264_pcm.cpp" "$root/c/src/cabac.cpp" "$root/c/src/cavlc.cpp" "$root/c/src/jpeg.cpp" "$root/c/src/png.cpp" "$root/c/src/vidprobe.cpp" "$root/c/src/cabac_context_init.hpp" "$image/sdk/src/"
     cp "$root/LICENSE" "$root/VERSION" "$image/"
     cp "$root/docs/INSTALL.md" "$image/README.md"
     "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
@@ -81,15 +81,21 @@ if [[ $language == all || $language == cpp ]]; then
         -I"$image/sdk/include" -c "$image/sdk/src/h264_pcm.cpp" \
         -o "$work/h264_pcm.o"
     "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/cabac.cpp" \
+        -o "$work/cabac.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
         -I"$image/sdk/include" -c "$image/sdk/src/cavlc.cpp" \
         -o "$work/cavlc.o"
     "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        -I"$image/sdk/include" -c "$image/sdk/src/jpeg.cpp" \
+        -o "$work/jpeg.o"
+    "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
         -I"$image/sdk/include" -c "$image/sdk/src/png.cpp" \
         -o "$work/png.o"
-    ar rcs "$image/sdk/lib/libpygorvid.a" "$work/pygorvid.o" "$work/h264.o" "$work/h264_pcm.o" "$work/cavlc.o" "$work/png.o"
+    ar rcs "$image/sdk/lib/libpygorvid.a" "$work/pygorvid.o" "$work/h264.o" "$work/h264_pcm.o" "$work/cabac.o" "$work/cavlc.o" "$work/jpeg.o" "$work/png.o"
     "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \
-        -I"$image/sdk/include" "$image/sdk/src/pygorvid.cpp" "$image/sdk/src/h264.cpp" "$image/sdk/src/h264_pcm.cpp" "$image/sdk/src/cavlc.cpp" \
-        "$image/sdk/src/png.cpp" "$image/sdk/src/vidprobe.cpp" -o "$image/bin/vidprobe-cpp"
+        -I"$image/sdk/include" "$image/sdk/src/vidprobe.cpp" \
+        "$image/sdk/lib/libpygorvid.a" -o "$image/bin/vidprobe-cpp"
     tar -C "$work" -czf "$work/$name.tar.gz" "$name"
     mv "$work/$name.tar.gz" "$dist/"
 fi

@@ -81,6 +81,18 @@ library is required. Extraction supports the implemented progressive, 8-bit
 4:2:0 H.264 subset with CABAC or CAVLC entropy coding; unsupported streams
 fail explicitly.
 
+All four implementations use the same default JPEG profile: quality 75,
+JFIF 1.01, baseline 8-bit YCbCr 4:4:4, matching quantization and Huffman
+tables, and edge-replicated 8x8 blocks. RGB-to-YCbCr conversion uses the same
+integer coefficients. The DCT uses a shared Q20 integer cosine basis and
+64-bit accumulation, with a final scale of `8 * 2^40` and quantization ties
+rounded away from zero. This avoids platform math-library differences at
+half-integer coefficients. Identical decoded RGB pixels produce identical
+JPEG bytes; older versions may produce different, but valid, JPEG encodings.
+The shared `testdata/jpeg-parity-18x10.hex` regression contains width, height,
+hex Y/U/V planes, and expected JPEG bytes. It covers positive and negative
+quantization ties, color clipping, DC prediction, and partial edge blocks.
+
 Weighted prediction is supported for this subset: explicit P/B slice weight
 tables and implicit B-slice POC-derived weights apply to luma and both chroma
 planes, including skip/direct partitions, before residual reconstruction.

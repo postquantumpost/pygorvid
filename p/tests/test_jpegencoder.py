@@ -1,5 +1,6 @@
 import io
 import math
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,7 @@ from pygorvid.jpegencoder import (
     _jpeg_sos_payload,
 )
 from pygorvid.jpegencoder import _append_jpeg_marker, convert_rgb_to_ycbcr444, jpeg_rgb_to_ycbcr
+from pygorvid.colorconv import PixelConverter
 from pygorvid.jpegtransform import (
     JPEGEncoderCoefficientOutOfRangeError,
     JPEGEncoderInvalidQuantizationTableError,
@@ -153,7 +155,34 @@ def test_jpeg_forward_dct_matches_constant_and_impulse_vectors():
     impulse = forward_dct_8x8(impulse_samples)
     expected = (0.125, 0.1733799806652684, 0.1733799806652684, 0.24048494156391084)
     for index, value in zip((0, 1, 8, 9), expected):
-        assert abs(impulse[index] - value) <= 1e-12
+        assert abs(impulse[index] - value) <= 2e-7
+
+
+@pytest.mark.parametrize("sign", (1, -1))
+@pytest.mark.parametrize("count", (1, 19))
+def test_jpeg_dct_quantization_ties(sign, count):
+    positions = (0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)
+    samples = [128] * 64
+    for position in positions[:count]:
+        samples[position] += sign * 36
+    coefficients = forward_dct_8x8(samples)
+    assert coefficients[32] == sign * count * 4.5
+    assert quantize_block(coefficients, [9] * 64)[32] == sign * ((count + 1) // 2)
+
+
+def test_jpeg_shared_parity_vector():
+    fixture = Path(__file__).resolve().parents[2] / "testdata" / "jpeg-parity-18x10.hex"
+    width_text, height_text, y_hex, u_hex, v_hex, *jpeg_hex = fixture.read_text().split()
+    width, height = int(width_text), int(height_text)
+    rgb = PixelConverter(PixelColorRange.LIMITED).convert_yuv420_to_rgb(
+        width, height, bytes.fromhex(y_hex), bytes.fromhex(u_hex), bytes.fromhex(v_hex),
+        width, width // 2, width // 2,
+    )
+    encoded = JPEGEncoder().encode(rgb)
+    assert encoded == bytes.fromhex("".join(jpeg_hex))
+    decoded = Image.open(io.BytesIO(encoded))
+    decoded.load()
+    assert decoded.size == (width, height)
 
 
 def test_jpeg_quantize_block_rounds_signed_values_away_from_zero():

@@ -42,6 +42,9 @@ for executable in "$go_image/bin/vidprobe-go" "$rust_image/bin/vidprobe-rust" "$
     [[ $status == 2 ]]
     grep -qi usage "$work/usage.txt"
 done
+"$cpp_image/bin/vidprobe-cpp" --input "$root/samples/decoder-smoke-16x16.mp4" \
+    --extractframe 0 --output "$work/frame.jpg"
+[[ $(od -An -tx1 -N2 "$work/frame.jpg" | tr -d ' \n') == ffd8 ]]
 
 mkdir "$work/go-consumer"
 cd "$work/go-consumer"

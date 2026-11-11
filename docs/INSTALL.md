@@ -69,7 +69,7 @@ c++ -std=c++17 -I/path/to/extracted-image/sdk/include main.cpp \
 
 The C++ SDK provides container detection, MP4 sample reading
 (`video_samples.hpp`), H.264 parameter-set and slice parsing, CAVLC residual
-decoding, and PNG encoding (`png.hpp`). `decode_idr_i_pcm_sample()` can
+decoding, and PNG (`png.hpp`) and JPEG (`jpeg.hpp`) encoding. `decode_idr_i_pcm_sample()` can
 reconstruct progressive 8-bit 4:2:0 IDR pictures when every macroblock is
 I_PCM. `decode_idr_i_sample()` also supports I16x16 macroblocks with luma and
 chroma DC/AC CAVLC residual reconstruction and I4x4 macroblocks with all nine
@@ -85,10 +85,12 @@ disabled. I8x8 prediction, weighted/reordered references,
 adaptive reference marking, custom scaling lists, and CABAC are not supported.
 Sample DTS, PTS, and durations are in `VideoSampleReader::timescale()`.
 
-The `vidprobe-cpp` command extracts one PNG frame by MP4 sample index:
+The `vidprobe-cpp` command extracts one frame by MP4 sample index. An output
+ending in `.jpg` (case-insensitive) selects JPEG; other names produce PNG:
 
 ```sh
 vidprobe-cpp --extractframe 0 --output frame.png input.mp4
+vidprobe-cpp --extractframe 0 --output frame.jpg input.mp4
 ```
 
 It decodes earlier supported samples to establish the reference frame. Only

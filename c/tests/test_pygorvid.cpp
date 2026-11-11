@@ -2,6 +2,7 @@
 #include "pygorvid/h264.hpp"
 #include "pygorvid/cabac.hpp"
 #include "pygorvid/cavlc.hpp"
+#include "pygorvid/jpeg.hpp"
 #include "pygorvid/png.hpp"
 #include "pygorvid/video_samples.hpp"
 
@@ -1052,6 +1053,60 @@ void test_png_encoding() {
         invalid_planes_rejected = true;
     }
     assert(invalid_planes_rejected);
+}
+
+void test_jpeg_encoding() {
+    std::ifstream fixture(std::filesystem::path(PYGORVID_SOURCE_DIR) /
+                          "testdata/jpeg-parity-18x10.hex");
+    assert(fixture);
+    pygorvid::Yuv420Frame parity_frame;
+    std::string luma_hex, u_hex, v_hex, jpeg_hex, part;
+    fixture >> parity_frame.width >> parity_frame.height >> luma_hex >> u_hex >> v_hex;
+    assert(fixture);
+    while (fixture >> part) {
+        jpeg_hex += part;
+    }
+    const auto decode_hex = [](const std::string& hex) {
+        assert(hex.size() % 2 == 0);
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t offset = 0; offset < hex.size(); offset += 2) {
+            bytes.push_back(static_cast<std::uint8_t>(
+                std::stoul(hex.substr(offset, 2), nullptr, 16)));
+        }
+        return bytes;
+    };
+    parity_frame.luma = decode_hex(luma_hex);
+    parity_frame.chroma_u = decode_hex(u_hex);
+    parity_frame.chroma_v = decode_hex(v_hex);
+    assert(pygorvid::encode_jpeg(parity_frame) == decode_hex(jpeg_hex));
+
+    pygorvid::Yuv420Frame frame;
+    frame.width = 10;
+    frame.height = 2;
+    frame.luma.assign(20, 100);
+    frame.chroma_u.assign(5, 80);
+    frame.chroma_v.assign(5, 180);
+    const auto jpeg = pygorvid::encode_jpeg(frame);
+    assert(jpeg.size() > 4);
+    assert(jpeg[0] == 0xff && jpeg[1] == 0xd8);
+    assert(jpeg[jpeg.size() - 2] == 0xff && jpeg.back() == 0xd9);
+
+    frame.chroma_v.clear();
+    bool rejected = false;
+    try {
+        (void)pygorvid::encode_jpeg(frame);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    assert(rejected);
+    frame.width = 65536;
+    rejected = false;
+    try {
+        (void)pygorvid::encode_jpeg(frame);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    assert(rejected);
 }
 
 std::vector<std::uint8_t> bits_from_string(const std::string& bits) {
@@ -2136,6 +2191,7 @@ int main() {
     test_h264_idr_slice_header();
     test_h264_p_skip_picture();
     test_png_encoding();
+    test_jpeg_encoding();
     test_h264_i_pcm_frame_reconstruction();
     test_h264_i4x4_prediction_modes();
     test_h264_i4x4_residual_reconstruction();

@@ -46,34 +46,32 @@ _BASE_CHROMA_QUANTIZATION = (
 )
 
 
-def _build_dct_basis() -> tuple[tuple[float, ...], ...]:
-    basis = []
-    for frequency in range(8):
-        normalization = 0.5 / math.sqrt(2) if frequency == 0 else 0.5
-        basis.append(
-            tuple(
-                normalization * math.cos((2 * position + 1) * frequency * math.pi / 16)
-                for position in range(8)
-            )
-        )
-    return tuple(basis)
-
-
-_DCT_BASIS = _build_dct_basis()
+# Q20 basis: 1 for DC, sqrt(2)*cos((2*x+1)*u*pi/16) otherwise.
+# Integer accumulation keeps quantization ties independent of the math library.
+_DCT_BASIS = (
+    (1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576),
+    (1454417, 1232995, 823861, 289301, -289301, -823861, -1232995, -1454417),
+    (1370031, 567485, -567485, -1370031, -1370031, -567485, 567485, 1370031),
+    (1232995, -289301, -1454417, -823861, 823861, 1454417, 289301, -1232995),
+    (1048576, -1048576, -1048576, 1048576, 1048576, -1048576, -1048576, 1048576),
+    (823861, -1454417, 289301, 1232995, -1232995, -289301, 1454417, -823861),
+    (567485, -1370031, 1370031, -567485, -567485, 1370031, -1370031, 567485),
+    (289301, -823861, 1232995, -1454417, 1454417, -1232995, 823861, -289301),
+)
 
 
 def forward_dct_8x8(samples: Sequence[int]) -> tuple[float, ...]:
-    """Apply a level-shifted orthonormal 8x8 forward DCT in row-major order."""
+    """Apply a level-shifted Q20 approximation of the orthonormal 8x8 DCT."""
     if len(samples) != 64 or any(
         not isinstance(sample, int) or isinstance(sample, bool) or not 0 <= sample <= 255
         for sample in samples
     ):
         raise ValueError("JPEG FDCT requires exactly 64 8-bit samples")
 
-    horizontal = [0.0] * 64
+    horizontal = [0] * 64
     for row in range(8):
         for horizontal_frequency in range(8):
-            total = 0.0
+            total = 0
             for column in range(8):
                 sample = samples[row * 8 + column] - 128
                 total += sample * _DCT_BASIS[horizontal_frequency][column]
@@ -82,10 +80,10 @@ def forward_dct_8x8(samples: Sequence[int]) -> tuple[float, ...]:
     coefficients = [0.0] * 64
     for vertical_frequency in range(8):
         for horizontal_frequency in range(8):
-            total = 0.0
+            total = 0
             for row in range(8):
                 total += horizontal[row * 8 + horizontal_frequency] * _DCT_BASIS[vertical_frequency][row]
-            coefficients[vertical_frequency * 8 + horizontal_frequency] = total
+            coefficients[vertical_frequency * 8 + horizontal_frequency] = total / (8 * (1 << 40))
     return tuple(coefficients)
 
 

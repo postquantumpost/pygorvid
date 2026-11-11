@@ -8,7 +8,18 @@ import (
 var ErrJPEGEncoderInvalidQuantizationTable = errors.New("JPEG quantization table contains a zero entry")
 var ErrJPEGEncoderCoefficientOutOfRange = errors.New("JPEG quantized coefficient is out of range")
 
-var jpegDCTBasis = buildJPEGDCTBasis()
+// Q20 basis: 1 for DC, sqrt(2)*cos((2*x+1)*u*pi/16) otherwise.
+// Integer accumulation keeps quantization ties independent of the math library.
+var jpegDCTBasis = [8][8]int64{
+	{1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576},
+	{1454417, 1232995, 823861, 289301, -289301, -823861, -1232995, -1454417},
+	{1370031, 567485, -567485, -1370031, -1370031, -567485, 567485, 1370031},
+	{1232995, -289301, -1454417, -823861, 823861, 1454417, 289301, -1232995},
+	{1048576, -1048576, -1048576, 1048576, 1048576, -1048576, -1048576, 1048576},
+	{823861, -1454417, 289301, 1232995, -1232995, -289301, 1454417, -823861},
+	{567485, -1370031, 1370031, -567485, -567485, 1370031, -1370031, 567485},
+	{289301, -823861, 1232995, -1454417, 1454417, -1232995, 823861, -289301},
+}
 
 var jpegZigZagIndices = [64]uint8{
 	0, 1, 8, 16, 9, 2, 3, 10,
@@ -43,27 +54,13 @@ var jpegBaseChromaQuantization = [64]uint8{
 	99, 99, 99, 99, 99, 99, 99, 99,
 }
 
-func buildJPEGDCTBasis() [8][8]float64 {
-	var basis [8][8]float64
-	for frequency := range basis {
-		normalization := 0.5
-		if frequency == 0 {
-			normalization /= math.Sqrt2
-		}
-		for position := range basis[frequency] {
-			basis[frequency][position] = normalization * math.Cos(float64((2*position+1)*frequency)*math.Pi/16)
-		}
-	}
-	return basis
-}
-
 func jpegForwardDCT(samples [64]uint8) [64]float64 {
-	var horizontal [64]float64
+	var horizontal [64]int64
 	for row := 0; row < 8; row++ {
 		for horizontalFrequency := 0; horizontalFrequency < 8; horizontalFrequency++ {
-			var sum float64
+			var sum int64
 			for column := 0; column < 8; column++ {
-				sample := float64(int(samples[row*8+column]) - 128)
+				sample := int64(samples[row*8+column]) - 128
 				sum += sample * jpegDCTBasis[horizontalFrequency][column]
 			}
 			horizontal[row*8+horizontalFrequency] = sum
@@ -73,11 +70,11 @@ func jpegForwardDCT(samples [64]uint8) [64]float64 {
 	var coefficients [64]float64
 	for verticalFrequency := 0; verticalFrequency < 8; verticalFrequency++ {
 		for horizontalFrequency := 0; horizontalFrequency < 8; horizontalFrequency++ {
-			var sum float64
+			var sum int64
 			for row := 0; row < 8; row++ {
 				sum += horizontal[row*8+horizontalFrequency] * jpegDCTBasis[verticalFrequency][row]
 			}
-			coefficients[verticalFrequency*8+horizontalFrequency] = sum
+			coefficients[verticalFrequency*8+horizontalFrequency] = float64(sum) / (8 * (1 << 40))
 		}
 	}
 	return coefficients

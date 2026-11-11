@@ -20,6 +20,35 @@ const CHROMA_QUANTIZATION: [u8; 64] = [
     99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
 ];
 
+// Q20 basis: 1 for DC, sqrt(2)*cos((2*x+1)*u*pi/16) otherwise.
+// Integer accumulation keeps quantization ties independent of the math library.
+const DCT_BASIS: [[i64; 8]; 8] = [
+    [
+        1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576,
+    ],
+    [
+        1454417, 1232995, 823861, 289301, -289301, -823861, -1232995, -1454417,
+    ],
+    [
+        1370031, 567485, -567485, -1370031, -1370031, -567485, 567485, 1370031,
+    ],
+    [
+        1232995, -289301, -1454417, -823861, 823861, 1454417, 289301, -1232995,
+    ],
+    [
+        1048576, -1048576, -1048576, 1048576, 1048576, -1048576, -1048576, 1048576,
+    ],
+    [
+        823861, -1454417, 289301, 1232995, -1232995, -289301, 1454417, -823861,
+    ],
+    [
+        567485, -1370031, 1370031, -567485, -567485, 1370031, -1370031, 567485,
+    ],
+    [
+        289301, -823861, 1232995, -1454417, 1454417, -1232995, 823861, -289301,
+    ],
+];
+
 pub(crate) fn encode(rgb: &RgbImage) -> io::Result<Vec<u8>> {
     let width = u16::try_from(rgb.width).map_err(|_| invalid("JPEG width exceeds 65535"))?;
     let height = u16::try_from(rgb.height).map_err(|_| invalid("JPEG height exceeds 65535"))?;
@@ -75,18 +104,6 @@ pub(crate) fn encode(rgb: &RgbImage) -> io::Result<Vec<u8>> {
         planes[2][index] = ((32768 * red - 27439 * green - 5329 * blue + (128 << 16) + 32768) >> 16)
             .clamp(0, 255) as u8;
     }
-    let mut basis = [[0.0; 8]; 8];
-    for (frequency, row) in basis.iter_mut().enumerate() {
-        let normalization = if frequency == 0 {
-            0.5 / 2.0_f64.sqrt()
-        } else {
-            0.5
-        };
-        for (position, value) in row.iter_mut().enumerate() {
-            *value = normalization
-                * (((2 * position + 1) * frequency) as f64 * std::f64::consts::PI / 16.0).cos();
-        }
-    }
     let mut writer = BitWriter::default();
     let mut previous_dc = [0; 3];
     for block_row in 0..rgb.height.div_ceil(8) {
@@ -102,7 +119,7 @@ pub(crate) fn encode(rgb: &RgbImage) -> io::Result<Vec<u8>> {
                     }
                 }
                 let table = &quantization[usize::from(component != 0)];
-                let coefficients = transform(&samples, &basis, table);
+                let coefficients = transform(&samples, table);
                 write_block(&mut writer, &coefficients, previous_dc[component])?;
                 previous_dc[component] = coefficients[0];
             }
@@ -123,26 +140,27 @@ fn marker(output: &mut Vec<u8>, code: u8, payload: &[u8]) {
     output.extend_from_slice(payload);
 }
 
-fn transform(samples: &[u8; 64], basis: &[[f64; 8]; 8], quantization: &[u8; 64]) -> [i32; 64] {
-    let mut horizontal = [0.0; 64];
+fn transform(samples: &[u8; 64], quantization: &[u8; 64]) -> [i32; 64] {
+    let mut horizontal = [0_i64; 64];
     for row in 0..8 {
         for frequency in 0..8 {
             for column in 0..8 {
                 horizontal[row * 8 + frequency] +=
-                    (f64::from(samples[row * 8 + column]) - 128.0) * basis[frequency][column];
+                    (i64::from(samples[row * 8 + column]) - 128) * DCT_BASIS[frequency][column];
             }
         }
     }
     let mut raster = [0; 64];
     for vertical_frequency in 0..8 {
         for horizontal_frequency in 0..8 {
-            let mut coefficient = 0.0;
+            let mut coefficient = 0_i64;
             for row in 0..8 {
                 coefficient +=
-                    horizontal[row * 8 + horizontal_frequency] * basis[vertical_frequency][row];
+                    horizontal[row * 8 + horizontal_frequency] * DCT_BASIS[vertical_frequency][row];
             }
             let index = vertical_frequency * 8 + horizontal_frequency;
-            raster[index] = (coefficient / f64::from(quantization[index])).round() as i32;
+            let scaled = coefficient as f64 / (8_u64 * (1_u64 << 40)) as f64;
+            raster[index] = (scaled / f64::from(quantization[index])).round() as i32;
         }
     }
     ZIGZAG.map(|index| raster[index])
@@ -234,6 +252,23 @@ impl BitWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounds_signed_transform_ties_away_from_zero() {
+        let positions = [
+            0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+        ];
+        for sign in [1, -1] {
+            for count in [1, 19] {
+                let mut samples = [128; 64];
+                for position in &positions[..count] {
+                    samples[*position] = (128 + sign * 36) as u8;
+                }
+                let quantized = transform(&samples, &[9; 64]);
+                assert_eq!(quantized[10], sign * ((count as i32 + 1) / 2));
+            }
+        }
+    }
 
     #[test]
     fn encodes_odd_sized_jfif_and_stuffs_entropy_bytes() {
