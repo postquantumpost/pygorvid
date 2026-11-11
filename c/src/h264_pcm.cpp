@@ -202,11 +202,18 @@ void deblock_p_inter_frame(
     Yuv420Frame& frame, std::uint32_t macroblock_width,
     std::uint32_t macroblock_height, const std::vector<std::int32_t>& qpy,
     const std::vector<MacroblockMotionVectors>& motion_vectors,
+    const std::vector<MacroblockMotionVectors>& motion_vectors_l1,
+    const std::vector<std::array<std::array<std::int32_t, 16>, 2>>&
+        reference_indices,
+    const std::vector<std::array<std::uint8_t, 16>>& prediction_flags,
+    const std::vector<std::uint8_t>& macroblock_intra16,
     const std::vector<std::uint8_t>& luma_total_coefficients,
     const std::vector<std::size_t>& slice_ids,
     const std::vector<std::uint8_t>& disable_idc,
     const std::vector<std::int64_t>& alpha_offsets,
-    const std::vector<std::int64_t>& beta_offsets, const PpsInfo& pps) {
+    const std::vector<std::int64_t>& beta_offsets, const PpsInfo& pps,
+    const std::vector<const Yuv420Frame*>& reference_frames_l0,
+    const std::vector<const Yuv420Frame*>& reference_frames_l1) {
     const auto macroblock_count =
         checked_plane_size(macroblock_width, macroblock_height);
     const auto luma_block_width =
@@ -215,6 +222,10 @@ void deblock_p_inter_frame(
         frame.height != macroblock_height * 16 ||
         qpy.size() != macroblock_count ||
         motion_vectors.size() != macroblock_count ||
+        motion_vectors_l1.size() != macroblock_count ||
+        reference_indices.size() != macroblock_count ||
+        prediction_flags.size() != macroblock_count ||
+        macroblock_intra16.size() != macroblock_count ||
         slice_ids.size() != macroblock_count ||
         disable_idc.size() != macroblock_count ||
         alpha_offsets.size() != macroblock_count ||
@@ -230,6 +241,67 @@ void deblock_p_inter_frame(
         constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
         return (first <= maximum - 4 && second > first + 3) ||
                (second <= maximum - 4 && first > second + 3);
+    };
+    struct Prediction {
+        const Yuv420Frame* reference = nullptr;
+        MotionVector motion{};
+    };
+    const auto block_predictions =
+        [&](std::size_t address, std::size_t block_index) {
+        std::array<Prediction, 2> result{};
+        std::size_t count = 0;
+        for (std::size_t list_index = 0; list_index < 2; ++list_index) {
+            if ((prediction_flags[address][block_index] &
+                 (1U << list_index)) == 0) {
+                continue;
+            }
+            const auto reference_index =
+                reference_indices[address][list_index][block_index];
+            const auto& references =
+                list_index == 0 ? reference_frames_l0 : reference_frames_l1;
+            if (reference_index < 0 ||
+                static_cast<std::size_t>(reference_index) >=
+                    references.size() ||
+                references[static_cast<std::size_t>(reference_index)] ==
+                    nullptr) {
+                throw std::runtime_error(
+                    "deblocking prediction references an unavailable picture");
+            }
+            result[count++] = {
+                references[static_cast<std::size_t>(reference_index)],
+                list_index == 0
+                    ? motion_vectors[address][block_index]
+                    : motion_vectors_l1[address][block_index]};
+        }
+        return std::pair{result, count};
+    };
+    const auto predictions_differ =
+        [&](std::size_t p_address, std::size_t p_block,
+            std::size_t q_address, std::size_t q_block) {
+        const auto [p, p_count] = block_predictions(p_address, p_block);
+        const auto [q, q_count] = block_predictions(q_address, q_block);
+        if (p_count != q_count) {
+            return true;
+        }
+        const auto matches = [&](const Prediction& first,
+                                 const Prediction& second) {
+            return first.reference == second.reference &&
+                   !different_by_at_least_four(first.motion[0],
+                                               second.motion[0]) &&
+                   !different_by_at_least_four(first.motion[1],
+                                               second.motion[1]);
+        };
+        if (p_count == 0) {
+            return false;
+        }
+        if (p_count == 1) {
+            return !matches(p[0], q[0]);
+        }
+        const bool same_order =
+            matches(p[0], q[0]) && matches(p[1], q[1]);
+        const bool swapped_order =
+            matches(p[0], q[1]) && matches(p[1], q[0]);
+        return !same_order && !swapped_order;
     };
     const auto chroma_width = frame.width / 2;
     for (std::size_t macroblock_address = 0;
@@ -295,19 +367,18 @@ void deblock_p_inter_frame(
                             static_cast<std::size_t>(q_block_y) *
                                 luma_block_width +
                             q_block_x] != 0;
-                    const auto& neighbor_motion =
-                        motion_vectors[neighbor_address][p_block];
-                    const auto& current_motion =
-                        motion_vectors[macroblock_address][q_block];
-                    const auto motion_differs =
-                        different_by_at_least_four(
-                            neighbor_motion[0], current_motion[0]) ||
-                        different_by_at_least_four(
-                            neighbor_motion[1], current_motion[1]);
-                    strengths[segment] =
-                        p_has_coefficients || q_has_coefficients
-                            ? 2
-                            : motion_differs ? 1 : 0;
+                    if (macroblock_intra16[neighbor_address] ||
+                        macroblock_intra16[macroblock_address]) {
+                        strengths[segment] = edge == 0 ? 4 : 3;
+                    } else if (p_has_coefficients || q_has_coefficients) {
+                        strengths[segment] = 2;
+                    } else {
+                        strengths[segment] = predictions_differ(
+                            neighbor_address, p_block, macroblock_address,
+                            q_block)
+                            ? 1
+                            : 0;
+                    }
                     const auto x = macroblock_x * 16 +
                         (vertical ? edge : segment * 4);
                     const auto y = macroblock_y * 16 +
@@ -1101,10 +1172,11 @@ std::array<std::uint8_t, 16> predict_intra4x4(
         for (std::uint32_t row = 0; row < 4; ++row) {
             for (std::uint32_t column = 0; column < 4; ++column) {
                 const auto index = row + (column >> 1);
+                const auto horizontal_phase = column + 2 * row;
                 std::uint8_t value = 0;
-                if (row + column * 2 > 5) {
+                if (horizontal_phase > 5) {
                     value = left[3];
-                } else if ((row + column * 2) % 2 == 0) {
+                } else if (horizontal_phase % 2 == 0) {
                     value = average2(left[index], left[std::min(index + 1, 3U)]);
                 } else {
                     value = filtered3(
@@ -3504,6 +3576,7 @@ Yuv420Frame decode_p_frame_with_lists(
         [&](std::int64_t block_x, std::int64_t block_y,
             std::size_t current_macroblock,
             std::size_t current_slice_id,
+            const std::array<std::uint8_t, 16>& current_list_motion_valid,
             bool list1 = false) -> std::optional<MotionVector> {
         if (block_x < 0 || block_y < 0 ||
             block_x >= static_cast<std::int64_t>(macroblock_width) * 4 ||
@@ -3517,7 +3590,7 @@ Yuv420Frame decode_p_frame_with_lists(
             static_cast<std::size_t>(block_y % 4) * 4 +
             static_cast<std::size_t>(block_x % 4);
         if (address == current_macroblock) {
-            if (!motion_vector_valid[address][block_index]) {
+            if (!current_list_motion_valid[block_index]) {
                 return std::nullopt;
             }
         } else if (!decoded_macroblocks[address] ||
@@ -3613,22 +3686,374 @@ Yuv420Frame decode_p_frame_with_lists(
     };
     const auto derive_partition_motion_predictor =
         [&](std::size_t macroblock_address, std::size_t current_slice_id,
-            std::uint32_t macroblock_type, std::uint32_t partition_index,
             std::int32_t part_x, std::int32_t part_y,
-            std::int32_t part_width, bool list1 = false) {
-        const auto candidates = neighboring_motion_vectors(
-            macroblock_address, current_slice_id, part_x, part_y,
-            part_width, list1);
+            std::int32_t part_width, std::int32_t part_height,
+            std::size_t list_index,
+            std::int32_t current_reference_index,
+            const std::array<std::array<std::int32_t, 16>, 2>&
+                current_reference_indices,
+            const std::array<std::uint8_t, 16>& current_prediction_flags,
+            const std::array<std::uint8_t, 16>&
+                current_list_motion_valid,
+            const MacroblockMotionVectors& current_motion,
+            const MacroblockMotionVectors& current_motion_l1) {
+        struct MotionVectorCandidate {
+            std::int32_t reference_index;
+            MotionVector motion_vector;
+        };
+        const auto candidate_at =
+            [&](std::int64_t block_x,
+                std::int64_t block_y)
+            -> std::optional<MotionVectorCandidate> {
+            if (block_x < 0 || block_y < 0 ||
+                block_x >= static_cast<std::int64_t>(macroblock_width) * 4 ||
+                block_y >= static_cast<std::int64_t>(macroblock_height) * 4) {
+                return std::nullopt;
+            }
+            const auto address = static_cast<std::size_t>(block_y / 4) *
+                                     macroblock_width +
+                                 static_cast<std::size_t>(block_x / 4);
+            const auto block_index =
+                static_cast<std::size_t>(block_y % 4) * 4 +
+                static_cast<std::size_t>(block_x % 4);
+            const bool current = address == macroblock_address;
+            if (current) {
+                if (!current_list_motion_valid[block_index]) {
+                    return std::nullopt;
+                }
+            } else if (!decoded_macroblocks[address] ||
+                       macroblock_slice_ids[address] != current_slice_id) {
+                return std::nullopt;
+            }
+            const auto flags = current
+                ? current_prediction_flags[block_index]
+                : macroblock_prediction_flags[address][block_index];
+            if ((flags & (1U << list_index)) == 0) {
+                return std::nullopt;
+            }
+            return MotionVectorCandidate{
+                current
+                    ? current_reference_indices[list_index][block_index]
+                    : macroblock_reference_indices[address][list_index]
+                                                        [block_index],
+                list_index == 0
+                    ? (current ? current_motion[block_index]
+                               : macroblock_motion_vectors[address][block_index])
+                    : (current ? current_motion_l1[block_index]
+                               : macroblock_motion_vectors_l1[address]
+                                                               [block_index])};
+        };
+        const auto block_x =
+            static_cast<std::int64_t>(macroblock_address % macroblock_width) *
+                4 +
+            part_x;
+        const auto block_y =
+            static_cast<std::int64_t>(macroblock_address / macroblock_width) *
+                4 +
+            part_y;
+        auto candidate_a = candidate_at(block_x - 1, block_y);
+        auto candidate_b = candidate_at(block_x, block_y - 1);
+        auto candidate_c = candidate_at(block_x + part_width, block_y - 1);
+        if (!candidate_c) {
+            candidate_c = candidate_at(block_x - 1, block_y - 1);
+        }
+        const std::array<std::optional<MotionVectorCandidate>, 3> candidates{
+            candidate_a, candidate_b, candidate_c};
+        const auto matches_current_reference =
+            [&](const std::optional<MotionVectorCandidate>& candidate) {
+            return current_reference_index >= 0 && candidate &&
+                   candidate->reference_index == current_reference_index;
+        };
         std::optional<std::size_t> preferred;
-        if (macroblock_type == 1) {
-            preferred = partition_index == 0 ? 1 : 0;
-        } else if (macroblock_type == 2) {
-            preferred = partition_index == 0 ? 0 : 2;
+        if (part_width == 4 && part_height == 2) {
+            preferred = part_y == 0 ? 1 : 0;
+        } else if (part_width == 2 && part_height == 4) {
+            preferred = part_x == 0 ? 0 : 2;
         }
-        if (preferred && candidates[*preferred]) {
-            return *candidates[*preferred];
+        if (preferred && matches_current_reference(candidates[*preferred])) {
+            return candidates[*preferred]->motion_vector;
         }
-        return median_motion_vector(candidates);
+        if (!candidate_b && !candidate_c) {
+            return candidate_a ? candidate_a->motion_vector : MotionVector{};
+        }
+        std::size_t matching_count = 0;
+        MotionVector matching{};
+        for (const auto& candidate : candidates) {
+            if (matches_current_reference(candidate)) {
+                ++matching_count;
+                matching = candidate->motion_vector;
+            }
+        }
+        if (matching_count == 1) {
+            return matching;
+        }
+        MotionVector predictor{};
+        for (std::size_t component = 0; component < predictor.size();
+             ++component) {
+            std::array<std::int64_t, 3> values{};
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                if (candidates[index] &&
+                    candidates[index]->reference_index >= 0) {
+                    values[index] =
+                        candidates[index]->motion_vector[component];
+                }
+            }
+            std::sort(values.begin(), values.end());
+            predictor[component] = values[1];
+        }
+        return predictor;
+    };
+    struct DirectMotionCandidate {
+        std::int32_t reference_index;
+        MotionVector motion_vector;
+    };
+    const auto neighbor_direct_motion_candidate =
+        [&](std::int64_t block_x, std::int64_t block_y,
+            std::size_t current_macroblock, std::size_t current_slice_id,
+            std::size_t list_index,
+            const std::array<std::array<std::int32_t, 16>, 2>&
+                current_reference_indices,
+            const std::array<std::uint8_t, 16>& current_prediction_flags,
+            const MacroblockMotionVectors& current_motion,
+            const MacroblockMotionVectors& current_motion_l1)
+        -> std::optional<DirectMotionCandidate> {
+        if (block_x < 0 || block_y < 0 ||
+            block_x >= static_cast<std::int64_t>(macroblock_width) * 4 ||
+            block_y >= static_cast<std::int64_t>(macroblock_height) * 4) {
+            return std::nullopt;
+        }
+        const auto address = static_cast<std::size_t>(block_y / 4) *
+                                 macroblock_width +
+                             static_cast<std::size_t>(block_x / 4);
+        const auto block_index =
+            static_cast<std::size_t>(block_y % 4) * 4 +
+            static_cast<std::size_t>(block_x % 4);
+        if (address == current_macroblock) {
+            if (!motion_vector_valid[address][block_index]) {
+                return std::nullopt;
+            }
+            if ((current_prediction_flags[block_index] &
+                 (1U << list_index)) == 0) {
+                return DirectMotionCandidate{-1, {}};
+            }
+            return DirectMotionCandidate{
+                current_reference_indices[list_index][block_index],
+                list_index == 0 ? current_motion[block_index]
+                                : current_motion_l1[block_index]};
+        }
+        if (!decoded_macroblocks[address] ||
+            macroblock_slice_ids[address] != current_slice_id) {
+            return std::nullopt;
+        }
+        if ((macroblock_prediction_flags[address][block_index] &
+             (1U << list_index)) == 0) {
+            return DirectMotionCandidate{-1, {}};
+        }
+        return DirectMotionCandidate{
+            macroblock_reference_indices[address][list_index][block_index],
+            list_index == 0
+                ? macroblock_motion_vectors[address][block_index]
+                : macroblock_motion_vectors_l1[address][block_index]};
+    };
+    const auto derive_spatial_direct =
+        [&](std::size_t macroblock_address, std::size_t current_slice_id,
+            std::int32_t partition_x, std::int32_t partition_y,
+            std::int32_t partition_width, std::int32_t partition_height,
+            std::array<std::array<std::int32_t, 16>, 2>&
+                output_reference_indices,
+            std::array<std::uint8_t, 16>& output_prediction_flags,
+            MacroblockMotionVectors& output_motion,
+            MacroblockMotionVectors& output_motion_l1) {
+        const std::int32_t inference_step =
+            partition_width == 4 && partition_height == 4
+                ? 4
+                : sps.direct_8x8_inference ? 2 : 1;
+        const auto minimum_nonnegative = [](std::int32_t left,
+                                            std::int32_t right) {
+            if (left >= 0 && right >= 0) {
+                return std::min(left, right);
+            }
+            return std::max(left, right);
+        };
+        for (std::int32_t group_y = partition_y;
+             group_y < partition_y + partition_height;
+             group_y += inference_step) {
+            for (std::int32_t group_x = partition_x;
+                 group_x < partition_x + partition_width;
+                 group_x += inference_step) {
+                const auto block_x =
+                    static_cast<std::int64_t>(macroblock_address %
+                                              macroblock_width) *
+                        4 +
+                    group_x;
+                const auto block_y =
+                    static_cast<std::int64_t>(macroblock_address /
+                                              macroblock_width) *
+                        4 +
+                    group_y;
+                std::array<std::array<std::optional<DirectMotionCandidate>, 4>,
+                           2>
+                    candidates{};
+                for (std::size_t list_index = 0; list_index < 2;
+                     ++list_index) {
+                    candidates[list_index][0] =
+                        neighbor_direct_motion_candidate(
+                            block_x - 1, block_y, macroblock_address,
+                            current_slice_id, list_index,
+                            output_reference_indices,
+                            output_prediction_flags, output_motion,
+                            output_motion_l1);
+                    candidates[list_index][1] =
+                        neighbor_direct_motion_candidate(
+                            block_x, block_y - 1, macroblock_address,
+                            current_slice_id, list_index,
+                            output_reference_indices,
+                            output_prediction_flags, output_motion,
+                            output_motion_l1);
+                    candidates[list_index][2] =
+                        neighbor_direct_motion_candidate(
+                            block_x + inference_step, block_y - 1,
+                            macroblock_address, current_slice_id, list_index,
+                            output_reference_indices,
+                            output_prediction_flags, output_motion,
+                            output_motion_l1);
+                    if (!candidates[list_index][2]) {
+                        candidates[list_index][2] =
+                            neighbor_direct_motion_candidate(
+                                block_x - 1, block_y - 1,
+                                macroblock_address, current_slice_id,
+                                list_index, output_reference_indices,
+                                output_prediction_flags, output_motion,
+                                output_motion_l1);
+                    }
+                    candidates[list_index][3] =
+                        neighbor_direct_motion_candidate(
+                            block_x - 1, block_y - 1, macroblock_address,
+                            current_slice_id, list_index,
+                            output_reference_indices,
+                            output_prediction_flags, output_motion,
+                            output_motion_l1);
+                }
+                std::array<std::int32_t, 2> reference_index{};
+                for (std::size_t list_index = 0; list_index < 2;
+                     ++list_index) {
+                    const auto reference_at = [&](std::size_t index) {
+                        return candidates[list_index][index]
+                                   ? candidates[list_index][index]
+                                         ->reference_index
+                                   : -1;
+                    };
+                    reference_index[list_index] = minimum_nonnegative(
+                        reference_at(0),
+                        minimum_nonnegative(reference_at(1),
+                                            reference_at(2)));
+                }
+                const bool direct_zero =
+                    reference_index[0] == -1 && reference_index[1] == -1;
+                if (direct_zero) {
+                    reference_index = {0, 0};
+                }
+                bool colocated_zero = false;
+                if (!reference_frames_l1.empty() &&
+                    !reference_frames_l1.front()->long_term_reference &&
+                    macroblock_address <
+                        reference_frames_l1.front()
+                            ->colocated_motion_field.size()) {
+                    const auto colocated_block =
+                        static_cast<std::size_t>(group_y) * 4 +
+                        static_cast<std::size_t>(group_x);
+                    const auto& colocated =
+                        reference_frames_l1.front()
+                            ->colocated_motion_field[macroblock_address]
+                                                    [colocated_block];
+                    colocated_zero =
+                        colocated.reference_index == 0 &&
+                        colocated.motion_vector[0] >= -1 &&
+                        colocated.motion_vector[0] <= 1 &&
+                        colocated.motion_vector[1] >= -1 &&
+                        colocated.motion_vector[1] <= 1;
+                }
+                std::array<MotionVector, 2> group_motion{};
+                for (std::size_t list_index = 0; list_index < 2;
+                     ++list_index) {
+                    if (reference_index[list_index] < 0) {
+                        continue;
+                    }
+                    const auto& list = list_index == 0
+                                           ? reference_frames_l0
+                                           : reference_frames_l1;
+                    if (static_cast<std::size_t>(
+                            reference_index[list_index]) >= list.size()) {
+                        throw std::runtime_error(
+                            "B_Direct spatial reference index is unavailable");
+                    }
+                    if (direct_zero ||
+                        (reference_index[list_index] == 0 &&
+                         colocated_zero)) {
+                        continue;
+                    }
+                    auto match_count = 0;
+                    MotionVector matching_motion{};
+                    std::array<MotionVector, 3> median_candidates{};
+                    for (std::size_t candidate_index = 0;
+                         candidate_index < 3; ++candidate_index) {
+                        if (!candidates[list_index][candidate_index] ||
+                            candidates[list_index][candidate_index]
+                                    ->reference_index < 0) {
+                            continue;
+                        }
+                        median_candidates[candidate_index] =
+                            candidates[list_index][candidate_index]
+                                ->motion_vector;
+                        if (candidates[list_index][candidate_index]
+                                ->reference_index ==
+                            reference_index[list_index]) {
+                            ++match_count;
+                            matching_motion =
+                                candidates[list_index][candidate_index]
+                                    ->motion_vector;
+                        }
+                    }
+                    if (match_count == 1) {
+                        group_motion[list_index] = matching_motion;
+                    } else {
+                        for (std::size_t component = 0; component < 2;
+                             ++component) {
+                            std::array<std::int64_t, 3> values{
+                                median_candidates[0][component],
+                                median_candidates[1][component],
+                                median_candidates[2][component]};
+                            std::sort(values.begin(), values.end());
+                            group_motion[list_index][component] = values[1];
+                        }
+                    }
+                }
+                const auto prediction_mask =
+                    static_cast<std::uint8_t>(
+                        (reference_index[0] >= 0 ? 1 : 0) |
+                        (reference_index[1] >= 0 ? 2 : 0));
+                for (std::int32_t block_offset_y = 0;
+                     block_offset_y < inference_step; ++block_offset_y) {
+                    for (std::int32_t block_offset_x = 0;
+                         block_offset_x < inference_step; ++block_offset_x) {
+                        const auto block_index = static_cast<std::size_t>(
+                            (group_y + block_offset_y) * 4 +
+                            group_x + block_offset_x);
+                        output_prediction_flags[block_index] =
+                            prediction_mask;
+                        for (std::size_t list_index = 0; list_index < 2;
+                             ++list_index) {
+                            output_reference_indices[list_index][block_index] =
+                                reference_index[list_index];
+                        }
+                        output_motion[block_index] = group_motion[0];
+                        output_motion_l1[block_index] = group_motion[1];
+                        motion_vector_valid[macroblock_address][block_index] =
+                            1;
+                    }
+                }
+            }
+        }
     };
     const auto reconstruct_macroblock =
         [&](std::size_t macroblock_address,
@@ -3817,11 +4242,17 @@ Yuv420Frame decode_p_frame_with_lists(
                 auto macroblock_motion = MacroblockMotionVectors{};
                 auto macroblock_motion_l1 = MacroblockMotionVectors{};
                 std::array<std::uint8_t, 16> prediction_flags{};
+                std::array<std::array<std::int32_t, 16>, 2>
+                    reference_indices{};
                 if (b_slice) {
-                    prediction_flags.fill(3);
+                    derive_spatial_direct(
+                        address, slice_id, 0, 0, 4, 4, reference_indices,
+                        prediction_flags, macroblock_motion,
+                        macroblock_motion_l1);
                     reconstruct_macroblock(address, macroblock_motion,
                                            &macroblock_motion_l1,
-                                           &prediction_flags);
+                                           &prediction_flags,
+                                           &reference_indices);
                     macroblock_b_direct[address] = 1;
                 } else {
                     macroblock_motion.fill(skip_motion);
@@ -3833,6 +4264,7 @@ Yuv420Frame decode_p_frame_with_lists(
                 macroblock_motion_vectors[address] = macroblock_motion;
                 macroblock_motion_vectors_l1[address] =
                     macroblock_motion_l1;
+                macroblock_reference_indices[address] = reference_indices;
                 macroblock_prediction_flags[address] = prediction_flags;
                 motion_vector_valid[address].fill(1);
                 macroblock_slice_ids[address] = slice_id;
@@ -3880,7 +4312,7 @@ Yuv420Frame decode_p_frame_with_lists(
                           top_skipped, cabac_contexts)
                     : cabac_decoder->decode_p_skip_flag(
                           0, left_available, left_skipped, top_available,
-                          top_skipped, cabac_contexts);
+                          top_skipped,                           cabac_contexts);
                 if (skipped) {
                     decode_skip_macroblock(macroblock_address);
                     if (b_slice) {
@@ -4494,71 +4926,105 @@ Yuv420Frame decode_p_frame_with_lists(
             motion_vector_valid[macroblock_address].fill(0);
             for (std::size_t partition_index = 0;
                  partition_index < partition_count; ++partition_index) {
+                if (!partition_direct[partition_index]) {
+                    continue;
+                }
                 const auto& partition = partitions[partition_index];
-                const auto partition_block_x =
-                    static_cast<std::int64_t>(macroblock_x) * 4 + partition.x;
-                const auto partition_block_y =
-                    static_cast<std::int64_t>(macroblock_y) * 4 + partition.y;
-                const auto magnitude = [](std::int64_t value) {
-                    return value < 0
-                        ? static_cast<std::uint64_t>(-(value + 1)) + 1
-                        : static_cast<std::uint64_t>(value);
-                };
-                const std::array<std::uint8_t, 2> list_used =
-                    b_slice
-                        ? partition_list_flags[partition_index]
-                        : std::array<std::uint8_t, 2>{{1, 0}};
-                std::array<MotionVector, 2> partition_motions{};
-                std::array<MotionVector, 2> motion_differences{};
+                derive_spatial_direct(
+                    macroblock_address, slice_id, partition.x, partition.y,
+                    partition.width, partition.height, reference_indices,
+                    prediction_flags, motion, motion_l1);
+            }
+            std::array<std::array<MotionVector, 2>, 16> partition_motions{};
+            std::array<std::array<MotionVector, 2>, 16> motion_differences{};
+            std::array<std::array<std::uint8_t, 16>, 2>
+                current_list_motion_valid{};
+            for (std::size_t block_index = 0; block_index < 16;
+                 ++block_index) {
+                if (!motion_vector_valid[macroblock_address][block_index]) {
+                    continue;
+                }
                 for (std::size_t list_index = 0; list_index < 2;
                      ++list_index) {
+                    current_list_motion_valid[list_index][block_index] =
+                        static_cast<std::uint8_t>(
+                            (prediction_flags[block_index] &
+                             (1U << list_index)) != 0);
+                }
+            }
+            const auto magnitude = [](std::int64_t value) {
+                return value < 0
+                    ? static_cast<std::uint64_t>(-(value + 1)) + 1
+                    : static_cast<std::uint64_t>(value);
+            };
+            for (std::size_t list_index = 0; list_index < 2;
+                 ++list_index) {
+                for (std::size_t partition_index = 0;
+                     partition_index < partition_count; ++partition_index) {
+                    if (partition_direct[partition_index]) {
+                        continue;
+                    }
+                    const auto& partition = partitions[partition_index];
+                    const std::array<std::uint8_t, 2> list_used =
+                        b_slice
+                            ? partition_list_flags[partition_index]
+                            : std::array<std::uint8_t, 2>{{1, 0}};
                     if (!list_used[list_index]) {
                         continue;
                     }
+                    const auto partition_block_x =
+                        static_cast<std::int64_t>(macroblock_x) * 4 +
+                        partition.x;
+                    const auto partition_block_y =
+                        static_cast<std::int64_t>(macroblock_y) * 4 +
+                        partition.y;
                     auto& partition_motion =
-                        partition_motions[list_index];
-                    if (!partition_direct[partition_index]) {
-                        partition_motion =
-                            derive_partition_motion_predictor(
-                                macroblock_address, slice_id,
-                                b_slice ? 0 : macroblock_type,
-                                static_cast<std::uint32_t>(partition_index),
-                                partition.x, partition.y, partition.width,
-                                list_index == 1);
-                    }
+                        partition_motions[partition_index][list_index];
+                    auto& motion_difference =
+                        motion_differences[partition_index][list_index];
+                    const auto predictor =
+                        derive_partition_motion_predictor(
+                            macroblock_address, slice_id, partition.x,
+                            partition.y, partition.width, partition.height,
+                            list_index,
+                            reference_indices[list_index]
+                                             [static_cast<std::size_t>(
+                                                 partition.y * 4 +
+                                                 partition.x)],
+                            reference_indices, prediction_flags,
+                            current_list_motion_valid[list_index], motion,
+                            motion_l1);
+                    partition_motion = predictor;
                     const auto left_mvd =
                         neighbor_motion_vector_difference(
                             partition_block_x - 1, partition_block_y,
                             macroblock_address, slice_id,
+                            current_list_motion_valid[list_index],
                             list_index == 1);
                     const auto top_mvd =
                         neighbor_motion_vector_difference(
                             partition_block_x, partition_block_y - 1,
                             macroblock_address, slice_id,
+                            current_list_motion_valid[list_index],
                             list_index == 1);
-                    auto& motion_difference = motion_differences[list_index];
                     for (std::size_t component = 0;
                          component < partition_motion.size(); ++component) {
                         std::int64_t difference = 0;
-                        if (!partition_direct[partition_index]) {
-                            if (cabac_decoder) {
-                                const auto neighbor_magnitude =
-                                    (left_mvd
-                                         ? magnitude((*left_mvd)[component])
-                                         : 0) +
-                                    (top_mvd
-                                         ? magnitude((*top_mvd)[component])
-                                         : 0);
-                                difference =
-                                    cabac_decoder
-                                        ->decode_motion_vector_difference(
-                                            static_cast<std::uint8_t>(
-                                                component),
-                                            neighbor_magnitude,
-                                            cabac_contexts);
-                            } else {
-                                difference = reader.read_se();
-                            }
+                        if (cabac_decoder) {
+                            const auto neighbor_magnitude =
+                                (left_mvd
+                                     ? magnitude((*left_mvd)[component])
+                                     : 0) +
+                                (top_mvd
+                                     ? magnitude((*top_mvd)[component])
+                                     : 0);
+                            difference =
+                                cabac_decoder
+                                    ->decode_motion_vector_difference(
+                                        static_cast<std::uint8_t>(component),
+                                        neighbor_magnitude, cabac_contexts);
+                        } else {
+                            difference = reader.read_se();
                         }
                         motion_difference[component] = difference;
                         if ((difference > 0 &&
@@ -4574,27 +5040,45 @@ Yuv420Frame decode_p_frame_with_lists(
                         }
                         partition_motion[component] += difference;
                     }
+                    for (std::int32_t block_y = partition.y;
+                         block_y < partition.y + partition.height; ++block_y) {
+                        for (std::int32_t block_x = partition.x;
+                             block_x < partition.x + partition.width;
+                             ++block_x) {
+                            const auto block_index =
+                                static_cast<std::size_t>(block_y * 4 +
+                                                         block_x);
+                            if (list_index == 0) {
+                                motion[block_index] = partition_motion;
+                                macroblock_motion_vector_differences
+                                    [macroblock_address][block_index] =
+                                        motion_difference;
+                                prediction_flags[block_index] |= 1;
+                            } else {
+                                motion_l1[block_index] = partition_motion;
+                                macroblock_motion_vector_differences_l1
+                                    [macroblock_address][block_index] =
+                                        motion_difference;
+                                prediction_flags[block_index] |= 2;
+                            }
+                            current_list_motion_valid[list_index][block_index] =
+                                1;
+                        }
+                    }
                 }
+            }
+            for (std::size_t partition_index = 0;
+                 partition_index < partition_count; ++partition_index) {
+                if (partition_direct[partition_index]) {
+                    continue;
+                }
+                const auto& partition = partitions[partition_index];
                 for (std::int32_t block_y = partition.y;
                      block_y < partition.y + partition.height; ++block_y) {
                     for (std::int32_t block_x = partition.x;
                          block_x < partition.x + partition.width; ++block_x) {
                         const auto block_index =
                             static_cast<std::size_t>(block_y * 4 + block_x);
-                        if (list_used[0]) {
-                            motion[block_index] = partition_motions[0];
-                            macroblock_motion_vector_differences
-                                [macroblock_address][block_index] =
-                                    motion_differences[0];
-                            prediction_flags[block_index] |= 1;
-                        }
-                        if (list_used[1]) {
-                            motion_l1[block_index] = partition_motions[1];
-                            macroblock_motion_vector_differences_l1
-                                [macroblock_address][block_index] =
-                                    motion_differences[1];
-                            prediction_flags[block_index] |= 2;
-                        }
                         motion_vector_valid[macroblock_address][block_index] =
                             1;
                     }
@@ -5192,11 +5676,30 @@ Yuv420Frame decode_p_frame_with_lists(
             std::to_string(missing_address) + " of " +
             std::to_string(macroblock_count) + ")");
     }
+    frame.colocated_motion_field.resize(macroblock_count);
+    for (std::size_t address = 0; address < macroblock_count; ++address) {
+        for (std::size_t block_index = 0; block_index < 16; ++block_index) {
+            const auto flags =
+                macroblock_prediction_flags[address][block_index];
+            if ((flags & 1) != 0) {
+                frame.colocated_motion_field[address][block_index] = {
+                    macroblock_reference_indices[address][0][block_index],
+                    macroblock_motion_vectors[address][block_index]};
+            } else if ((flags & 2) != 0) {
+                frame.colocated_motion_field[address][block_index] = {
+                    macroblock_reference_indices[address][1][block_index],
+                    macroblock_motion_vectors_l1[address][block_index]};
+            }
+        }
+    }
     deblock_p_inter_frame(
         frame, macroblock_width, macroblock_height, macroblock_qpy,
-        macroblock_motion_vectors, luma_total_coefficients,
+        macroblock_motion_vectors, macroblock_motion_vectors_l1,
+        macroblock_reference_indices, macroblock_prediction_flags,
+        macroblock_intra16, luma_total_coefficients,
         macroblock_slice_ids, macroblock_disable_idc,
-        macroblock_alpha_offsets, macroblock_beta_offsets, pps);
+        macroblock_alpha_offsets, macroblock_beta_offsets, pps,
+        reference_frames_l0, reference_frames_l1);
     return frame;
 }
 

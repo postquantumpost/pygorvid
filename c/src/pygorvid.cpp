@@ -1081,6 +1081,26 @@ std::size_t VideoSampleReader::sample_count() const noexcept {
     return samples_.size();
 }
 
+std::size_t VideoSampleReader::presentation_sample_index(
+    std::size_t index) const {
+    if (index >= samples_.size()) {
+        throw std::out_of_range("presentation frame index is out of range");
+    }
+    std::vector<std::size_t> display_order(samples_.size());
+    for (std::size_t sample_index = 0; sample_index < samples_.size();
+         ++sample_index) {
+        display_order[sample_index] = sample_index;
+    }
+    std::sort(display_order.begin(), display_order.end(),
+              [this](std::size_t left, std::size_t right) {
+                  if (samples_[left].pts_ticks != samples_[right].pts_ticks) {
+                      return samples_[left].pts_ticks < samples_[right].pts_ticks;
+                  }
+                  return left < right;
+              });
+    return display_order[index];
+}
+
 std::uint32_t VideoSampleReader::timescale() const noexcept {
     return timescale_;
 }

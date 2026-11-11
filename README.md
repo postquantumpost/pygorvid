@@ -114,22 +114,25 @@ reading, H.264 parameter-set and slice parsing, CABAC and CAVLC syntax and
 residual decoding, frame reconstruction, and PNG encoding. It supports a
 restricted progressive 8-bit 4:2:0 subset of IDR, P, and B pictures, including
 I_PCM, I16x16, I4x4, skipped, and inter-partition macroblocks. Inter prediction
-supports multiple active short-term references and parsed short-term
-reference-list modifications; luma motion compensation supports quarter-pel
-positions and chroma supports fractional 4:2:0 positions. Default scaling
-lists and deblocking are implemented for the supported syntax paths. This is
-not a general-purpose H.264 decoder: field/MBAFF pictures, long-term reference
-management, weighted B prediction, custom scaling lists, I8x8 prediction, and
-other unimplemented syntax remain unsupported.
+supports multiple active references, parsed reference-list modifications, and
+a subset of adaptive reference marking; luma motion compensation supports
+quarter-pel positions and chroma supports fractional 4:2:0 positions. Default
+scaling lists and deblocking are implemented for the supported syntax paths.
+This is not a general-purpose H.264 decoder: field/MBAFF pictures, full
+long-term reference management, weighted B prediction, custom scaling lists,
+I8x8 prediction, and other unimplemented syntax remain unsupported.
 
-The C++ CLI extracts one sample by decoding preceding supported pictures:
+The C++ CLI extracts a presentation frame by mapping its PTS-ordered index to
+the corresponding decode-order sample and decoding preceding supported
+pictures:
 
 ```sh
 vidprobe-cpp --extractframe 0 --output frame.png input.mp4
 ```
 
-`--extractframe` uses the MP4 sample index. Extraction requires one input,
-both options, and an IDR followed only by pictures in the supported subset.
+`--extractframe` uses a zero-based presentation-frame index. Extraction
+requires one input, both options, and an IDR followed only by pictures in the
+supported subset.
 The PNG writer converts 8-bit 4:2:0 samples to RGB using limited-range BT.601
 coefficients.
 Unsupported streams fail explicitly:

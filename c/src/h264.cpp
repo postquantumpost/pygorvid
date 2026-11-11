@@ -714,7 +714,48 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
     if (header.reference_idc != 0 &&
         read_flag(reader, "P slice",
                   "adaptive_ref_pic_marking_mode_flag")) {
-        invalid("P-picture decoding does not support adaptive reference marking");
+        result.adaptive_ref_pic_marking_mode = true;
+        bool terminated = false;
+        for (std::size_t operation_index = 0; operation_index < 32;
+             ++operation_index) {
+            const auto operation =
+                read_ue(reader, "P slice",
+                        "memory_management_control_operation");
+            if (operation == 0) {
+                terminated = true;
+                break;
+            }
+            std::size_t operand_count = 0;
+            switch (operation) {
+            case 1:
+            case 2:
+            case 4:
+            case 6:
+                operand_count = 1;
+                break;
+            case 3:
+                operand_count = 2;
+                break;
+            case 5:
+                break;
+            default:
+                invalid("memory_management_control_operation is invalid");
+            }
+            MemoryManagementOperation parsed_operation;
+            parsed_operation.operation = operation;
+            parsed_operation.operands.reserve(operand_count);
+            for (std::size_t operand_index = 0;
+                 operand_index < operand_count; ++operand_index) {
+                parsed_operation.operands.push_back(read_ue(
+                    reader, "P slice",
+                    "memory_management_operation_operand"));
+            }
+            result.memory_management_operations.push_back(
+                std::move(parsed_operation));
+        }
+        if (!terminated) {
+            invalid("decoded-reference marking exceeds 32 operations");
+        }
     }
     if (pps.entropy_coding_mode) {
         const auto cabac_init_idc =

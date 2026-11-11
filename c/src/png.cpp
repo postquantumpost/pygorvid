@@ -1,6 +1,7 @@
 #include "pygorvid/png.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
@@ -40,8 +41,9 @@ void append_chunk(std::vector<std::uint8_t>& png, const char* type,
     append_u32_be(png, crc32(png, type_begin, png.size()));
 }
 
-std::uint8_t clamp_byte(std::int32_t value) {
-    return static_cast<std::uint8_t>(std::clamp(value, 0, 255));
+std::uint8_t round_and_clamp_byte(double value) {
+    return static_cast<std::uint8_t>(
+        std::clamp(std::round(value), 0.0, 255.0));
 }
 
 std::vector<std::uint8_t> zlib_store(const std::vector<std::uint8_t>& raw) {
@@ -120,15 +122,19 @@ std::vector<std::uint8_t> encode_png(const Yuv420Frame& frame) {
             const auto luma = frame.luma[row * width + column];
             const auto chroma_index =
                 (row / 2) * (width / 2) + column / 2;
-            const auto cb =
-                static_cast<std::int32_t>(frame.chroma_u[chroma_index]) - 128;
-            const auto cr =
-                static_cast<std::int32_t>(frame.chroma_v[chroma_index]) - 128;
-            const auto c = std::max(static_cast<std::int32_t>(luma) - 16, 0);
-            raw.push_back(clamp_byte((298 * c + 409 * cr + 128) >> 8));
-            raw.push_back(
-                clamp_byte((298 * c - 100 * cb - 208 * cr + 128) >> 8));
-            raw.push_back(clamp_byte((298 * c + 516 * cb + 128) >> 8));
+            const auto luma_difference =
+                static_cast<double>(luma) - 16.0;
+            const auto blue_difference =
+                static_cast<double>(frame.chroma_u[chroma_index]) - 128.0;
+            const auto red_difference =
+                static_cast<double>(frame.chroma_v[chroma_index]) - 128.0;
+            raw.push_back(round_and_clamp_byte(
+                1.164 * luma_difference + 1.596 * red_difference));
+            raw.push_back(round_and_clamp_byte(
+                1.164 * luma_difference - 0.392 * blue_difference -
+                0.813 * red_difference));
+            raw.push_back(round_and_clamp_byte(
+                1.164 * luma_difference + 2.017 * blue_difference));
         }
     }
 

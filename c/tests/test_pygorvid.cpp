@@ -999,6 +999,16 @@ void test_png_encoding() {
            png[raw_begin + 10] == 76);
     assert(png[raw_begin + 11] == 150 && png[raw_begin + 12] == 150 &&
            png[raw_begin + 13] == 150);
+    pygorvid::Yuv420Frame color_frame;
+    color_frame.width = 2;
+    color_frame.height = 2;
+    color_frame.luma = {16, 16, 16, 16};
+    color_frame.chroma_u = {0};
+    color_frame.chroma_v = {2};
+    const auto color_png = pygorvid::encode_png(color_frame);
+    assert(color_png[raw_begin + 1] == 0);
+    assert(color_png[raw_begin + 2] == 153);
+    assert(color_png[raw_begin + 3] == 0);
     assert(std::string(png.end() - 8, png.end() - 4) == "IEND");
     const auto read_be32 = [&png](std::size_t offset) {
         return (static_cast<std::uint32_t>(png[offset]) << 24) |
@@ -1423,6 +1433,21 @@ void test_h264_i4x4_prediction_modes() {
         }
         assert(frame.luma[static_cast<std::size_t>(sample_y) * frame.width +
                           sample_x] == expected);
+        if (mode == 8) {
+            const auto horizontal_up_row_0_column_1 =
+                static_cast<std::uint8_t>(
+                    (left(0) + 2U * left(1) + left(2) + 2) >> 2);
+            const auto horizontal_up_row_1_column_0 =
+                static_cast<std::uint8_t>((left(1) + left(2) + 1) >> 1);
+            assert(frame.luma[static_cast<std::size_t>(sample_y) *
+                                  frame.width +
+                              sample_x + 1] ==
+                   horizontal_up_row_0_column_1);
+            assert(frame.luma[static_cast<std::size_t>(sample_y + 1) *
+                                  frame.width +
+                              sample_x] ==
+                   horizontal_up_row_1_column_0);
+        }
     }
 }
 
@@ -1973,7 +1998,7 @@ std::vector<std::uint8_t> make_sample_test_mp4() {
     append_u32(ctts_payload, 1);
     append_u32(ctts_payload, 10);
     append_u32(ctts_payload, 1);
-    append_u32(ctts_payload, 0xfffffff6U);
+    append_u32(ctts_payload, 0xffffffd8U);
 
     std::vector<std::uint8_t> stss_payload(4, 0);
     append_u32(stss_payload, 2);
@@ -2039,6 +2064,9 @@ void test_video_sample_reader() {
     assert(reader.error_info().empty());
     assert(reader.is_open());
     assert(reader.sample_count() == 3);
+    assert(reader.presentation_sample_index(0) == 0);
+    assert(reader.presentation_sample_index(1) == 2);
+    assert(reader.presentation_sample_index(2) == 1);
     assert(reader.timescale() == 1000);
     const auto& configuration = reader.configuration();
     assert(configuration.profile_idc == 66);
@@ -2066,7 +2094,7 @@ void test_video_sample_reader() {
 
     const auto third = reader.sample_at(2);
     assert(third.dts_ticks == 80);
-    assert(third.pts_ticks == 70);
+    assert(third.pts_ticks == 40);
     assert(third.is_sync);
 
     pygorvid::CompressedVideoSample sequential;
@@ -2085,6 +2113,13 @@ void test_video_sample_reader() {
         out_of_range_rejected = true;
     }
     assert(out_of_range_rejected);
+    bool presentation_index_out_of_range_rejected = false;
+    try {
+        (void)reader.presentation_sample_index(3);
+    } catch (const std::out_of_range&) {
+        presentation_index_out_of_range_rejected = true;
+    }
+    assert(presentation_index_out_of_range_rejected);
     reader.close();
     assert(!reader.is_open());
 

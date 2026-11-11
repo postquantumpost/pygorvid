@@ -38,6 +38,7 @@ public:
     bool is_open() const noexcept;
     const std::string& error_info() const noexcept;
     std::size_t sample_count() const noexcept;
+    std::size_t presentation_sample_index(std::size_t index) const;
     std::uint32_t timescale() const noexcept;
     const H264SampleConfiguration& configuration() const noexcept;
     CompressedVideoSample sample_at(std::size_t index);

@@ -95,6 +95,11 @@ struct ReferenceListModification {
     std::uint32_t long_term_pic_num = 0;
 };
 
+struct MemoryManagementOperation {
+    std::uint32_t operation = 0;
+    std::vector<std::uint32_t> operands;
+};
+
 struct PSliceHeader {
     std::uint32_t first_macroblock_in_slice = 0;
     std::uint8_t slice_type = 0;
@@ -110,6 +115,8 @@ struct PSliceHeader {
     std::uint32_t num_ref_idx_l1_active_minus1 = 0;
     std::vector<ReferenceListModification> ref_pic_list_modifications_l0;
     std::vector<ReferenceListModification> ref_pic_list_modifications_l1;
+    bool adaptive_ref_pic_marking_mode = false;
+    std::vector<MemoryManagementOperation> memory_management_operations;
     std::uint8_t cabac_init_idc = 0;
     std::int64_t slice_qp_delta = 0;
     std::uint8_t disable_deblocking_filter_idc = 0;
@@ -118,12 +125,19 @@ struct PSliceHeader {
     std::size_t slice_data_bit_offset = 0;
 };
 
+struct ColocatedMotionFact {
+    std::int32_t reference_index = -1;
+    std::array<std::int64_t, 2> motion_vector{};
+};
+
 struct Yuv420Frame {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    bool long_term_reference = false;
     std::vector<std::uint8_t> luma;
     std::vector<std::uint8_t> chroma_u;
     std::vector<std::uint8_t> chroma_v;
+    std::vector<std::array<ColocatedMotionFact, 16>> colocated_motion_field;
 };
 
 NalHeader parse_nal_header(const std::vector<std::uint8_t>& nal);
