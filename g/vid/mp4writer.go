@@ -3,6 +3,7 @@ package vid
 import (
 	"encoding/binary"
 	"fmt"
+	"strconv"
 	"unicode/utf8"
 )
 
@@ -12,11 +13,10 @@ type Mp4Metadata struct {
 	Make, Model, Firmware, Location, Altitude, Heading, Encoder string
 }
 
-func mp4MetadataBox(metadata *Mp4Metadata) ([]byte, error) {
-	if metadata == nil {
-		return nil, nil
-	}
-	entries := []struct{ key, value string }{
+type mp4MetadataEntry struct{ key, value string }
+
+func (metadata *Mp4Metadata) entries() []mp4MetadataEntry {
+	return []mp4MetadataEntry{
 		{"title", metadata.Title}, {"artist", metadata.Artist},
 		{"album_artist", metadata.AlbumArtist}, {"genre", metadata.Genre},
 		{"track", metadata.Track}, {"disc", metadata.Disc}, {"date", metadata.Date},
@@ -26,6 +26,88 @@ func mp4MetadataBox(metadata *Mp4Metadata) ([]byte, error) {
 		{"location", metadata.Location}, {"altitude", metadata.Altitude},
 		{"heading", metadata.Heading}, {"encoder", metadata.Encoder},
 	}
+}
+
+func mp4CompatibilityMetadataBox(metadata *Mp4Metadata) ([]byte, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+	entries := metadata.entries()
+	textTags := []struct{ tag, value string }{
+		{"\xa9nam", metadata.Title}, {"\xa9ART", metadata.Artist},
+		{"aART", metadata.AlbumArtist}, {"\xa9gen", metadata.Genre},
+		{"\xa9day", metadata.Date}, {"\xa9wrt", metadata.Composer},
+		{"\xa9com", metadata.Composer}, {"\xa9cmt", metadata.Comment},
+		{"desc", metadata.Description}, {"cprt", metadata.Copyright},
+		{"\xa9cpy", metadata.Copyright}, {"\xa9too", metadata.Encoder},
+	}
+	length := uint64(61)
+	count := 0
+	for _, entry := range entries {
+		if entry.value != "" {
+			length += 64 + uint64(len(entry.key)) + uint64(len(entry.value))
+			count++
+		}
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	for _, tag := range textTags {
+		if tag.value != "" {
+			length += 24 + uint64(len(tag.value))
+		}
+	}
+	// Reserve both numeric items even when a string has no binary representation.
+	length += 32 + 30
+	if length > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("MP4 compatibility metadata exceeds the 32-bit box size limit")
+	}
+	var items []byte
+	for _, tag := range textTags {
+		if tag.value != "" {
+			items = append(items, mp4Box(tag.tag, mp4FullBox("data", 1, mp4U32(0), []byte(tag.value)))...)
+		}
+	}
+	for _, entry := range []struct {
+		tag, value string
+		trailing   bool
+	}{
+		{"trkn", metadata.Track, true}, {"disk", metadata.Disc, false},
+	} {
+		digits := len(entry.value) > 0 && len(entry.value) <= 5
+		for _, ch := range entry.value {
+			digits = digits && ch >= '0' && ch <= '9'
+		}
+		if !digits {
+			continue
+		}
+		number, err := strconv.ParseUint(entry.value, 10, 16)
+		if err != nil {
+			continue
+		} // Raw string retained in mdta and free-form tags.
+		data := mp4U16(0, uint16(number), 0)
+		if entry.trailing {
+			data = append(data, 0, 0)
+		}
+		items = append(items, mp4Box(entry.tag, mp4FullBox("data", 0, mp4U32(0), data))...)
+	}
+	for _, entry := range entries {
+		if entry.value != "" {
+			items = append(items, mp4Box("----",
+				mp4FullBox("mean", 0, []byte("com.apple.iTunes")),
+				mp4FullBox("name", 0, []byte(entry.key)),
+				mp4FullBox("data", 1, mp4U32(0), []byte(entry.value)))...)
+		}
+	}
+	handler := mp4FullBox("hdlr", 0, mp4U32(0), []byte("mdirappl"), make([]byte, 8), []byte{0})
+	return mp4Box("udta", mp4FullBox("meta", 0, handler, mp4Box("ilst", items))), nil
+}
+
+func mp4MetadataBox(metadata *Mp4Metadata) ([]byte, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+	entries := metadata.entries()
 	// Account for meta, hdlr, keys and ilst headers before allocating strings.
 	length := uint64(69)
 	count := uint32(0)
@@ -138,6 +220,10 @@ func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata
 	if err != nil {
 		return nil, err
 	}
+	compatibilityBox, err := mp4CompatibilityMetadataBox(metadata)
+	if err != nil {
+		return nil, err
+	}
 	var video []byte
 	sampleSizes := []uint32{0, 25}
 	for index := uint16(0); index < 25; index++ {
@@ -161,8 +247,8 @@ func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata
 	mvhd := mp4FullBox("mvhd", 0, mp4U32(0, 0, 1000, 1000, 0x10000), mp4U16(0x100, 0),
 		make([]byte, 8), mp4Matrix(), make([]byte, 24), mp4U32(3))
 	result := append(ftyp, mp4Box("mdat", video, audio)...)
-	if uint64(8+len(mvhd)+len(videoTrack)+len(audioTrack))+uint64(len(metadataBox)) > uint64(^uint32(0)) {
+	if uint64(8+len(mvhd)+len(videoTrack)+len(audioTrack))+uint64(len(metadataBox))+uint64(len(compatibilityBox)) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("MP4 movie metadata exceeds the 32-bit box size limit")
 	}
-	return append(result, mp4Box("moov", mvhd, videoTrack, audioTrack, metadataBox)...), nil
+	return append(result, mp4Box("moov", mvhd, videoTrack, audioTrack, metadataBox, compatibilityBox)...), nil
 }

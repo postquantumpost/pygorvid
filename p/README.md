@@ -48,6 +48,16 @@ numbers, dates or GPS text. Fields are `title`, `artist`, `album_artist`,
 and `encoder`. The utility's `--generate` supplies test values for all fields,
 including `2016-12-31 23:59:60 UTC` and `11.3733° N 142.5917° E`.
 
+The writer retains those keyed tags and adds conventional iTunes-style
+metadata at `moov/udta/meta/ilst` for VLC and Windows' common media
+properties. Every non-empty field is also duplicated as a UTF-8 free-form
+item in the `com.apple.iTunes` namespace. Numeric track/disc strings from
+0 through 65535 (one to five ASCII digits) additionally get binary
+`trkn`/`disk` items. VLC displays conventional tags in its standard metadata
+view and free-form tags in Extra Metadata. Windows only exposes fields
+supported by its property handler; arbitrary camera/GPS text may not appear.
+Existing files must be regenerated to include these compatibility copies.
+
 Generation takes no input and cannot be combined with extraction, output,
 or read-all options. `--prefix j_` writes `j_grey.mp4` instead of `grey.mp4`,
 without changing the output directory or extension. The CLI replaces the destination only after a

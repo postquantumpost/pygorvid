@@ -134,6 +134,13 @@ Python/C++ use an optional second argument to `encode`; Go uses
 `encode_with_metadata(&encoder, Option<&Mp4Metadata>)`. Values are UTF-8
 strings in movie-level `mdta` keyed metadata; even date, track/disc and GPS
 fields are preserved as text rather than converted to binary values.
+The original `mdta` tags are retained alongside an `mdir` item list at
+`moov/udta/meta/ilst`. This list includes conventional VLC/Windows media
+tags, binary `trkn`/`disk` copies when numeric strings fit 16-bit values,
+and `com.apple.iTunes` free-form UTF-8 copies of every field.
+VLC's Extra Metadata view can expose the free-form fields. Windows Details
+only shows its supported subset; arbitrary camera/GPS text has no universal
+Explorer mapping. Regenerate old files to add the compatibility metadata.
 See the source repository README for field names, test values and API examples.
 
 ## Building Release Images

@@ -1,6 +1,8 @@
 """Check generated media and CLI behavior for one or more built commands."""
 
 import argparse
+import ctypes
+import ctypes.util
 import json
 import os
 from pathlib import Path
@@ -60,6 +62,98 @@ def read_metadata(payload: bytes) -> dict[str, str]:
     return values
 
 
+def read_compatibility_metadata(payload: bytes):
+    movie = dict(boxes(payload))[b"moov"]
+    user_data = dict(boxes(movie))[b"udta"]
+    meta = dict(boxes(user_data))[b"meta"]
+    assert meta[:4] == bytes(4)
+    children = dict(boxes(meta[4:]))
+    assert children[b"hdlr"][8:16] == b"mdirappl"
+    assert b"keys" not in children
+    text = {}
+    numbers = {}
+    free_form = {}
+    for tag, item in boxes(children[b"ilst"]):
+        contents = dict(boxes(item))
+        data = contents[b"data"]
+        if tag in (b"trkn", b"disk"):
+            assert data[:8] == bytes(8)
+            assert data[8:10] == bytes(2) and data[12:14] == bytes(2)
+            assert len(data) == (16 if tag == b"trkn" else 14)
+            numbers[tag] = int.from_bytes(data[10:12], "big")
+        else:
+            assert data[:8] == b"\0\0\0\1\0\0\0\0"
+            if tag == b"----":
+                assert contents[b"mean"] == bytes(4) + b"com.apple.iTunes"
+                assert contents[b"name"][:4] == bytes(4)
+                key = contents[b"name"][4:].decode("utf-8")
+                assert key not in free_form
+                free_form[key] = data[8:].decode("utf-8")
+            else:
+                assert tag not in text
+                text[tag] = data[8:].decode("utf-8")
+    return text, numbers, free_form
+
+
+def without_mdta(payload: bytes) -> bytes:
+    def pack_box(tag: bytes, data: bytes) -> bytes:
+        return (len(data) + 8).to_bytes(4, "big") + tag + data
+
+    output = bytearray()
+    for tag, data in boxes(payload):
+        if tag == b"moov":
+            data = b"".join(pack_box(child, contents) for child, contents in boxes(data)
+                            if child != b"meta")
+        output.extend(pack_box(tag, data))
+    return bytes(output)
+
+
+def check_vlc(output: Path, compatibility_only: bool = False) -> None:
+    library = ctypes.util.find_library("vlc")
+    if not library:
+        raise RuntimeError("--check-vlc requires an installed libvlc")
+    vlc = ctypes.CDLL(library)
+    vlc.libvlc_new.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+    vlc.libvlc_new.restype = ctypes.c_void_p
+    vlc.libvlc_media_new_path.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    vlc.libvlc_media_new_path.restype = ctypes.c_void_p
+    vlc.libvlc_media_parse.argtypes = [ctypes.c_void_p]
+    vlc.libvlc_media_get_meta.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    vlc.libvlc_media_get_meta.restype = ctypes.c_void_p
+    vlc.libvlc_free.argtypes = [ctypes.c_void_p]
+    vlc.libvlc_media_release.argtypes = [ctypes.c_void_p]
+    vlc.libvlc_release.argtypes = [ctypes.c_void_p]
+    arguments = (ctypes.c_char_p * 3)(b"--ignore-config", b"--no-video", b"--no-audio")
+    instance = vlc.libvlc_new(3, arguments)
+    if not instance:
+        raise RuntimeError("cannot create VLC instance")
+    try:
+        media = vlc.libvlc_media_new_path(instance, os.fsencode(output))
+        if not media:
+            raise RuntimeError("cannot create VLC media")
+        try:
+            vlc.libvlc_media_parse(media)
+            # Public libvlc_meta_t enumeration; parse via VLC's native MP4 demuxer.
+            expected = {0: "Title", 1: "Artist", 2: "Genre", 3: "Copyright",
+                        5: "1", 8: "2016-12-31 23:59:60 UTC", 6: "Description",
+                        14: "pygorvid", 23: "Album Artist", 24: "1"}
+            if compatibility_only:
+                expected[8] = "2016"  # VLC's legacy tag reader exposes the year.
+                expected[6] = "Comments"  # Its description slot maps to the comment.
+            for field, value in expected.items():
+                pointer = vlc.libvlc_media_get_meta(media, field)
+                try:
+                    actual = ctypes.string_at(pointer).decode("utf-8") if pointer else None
+                    assert actual == value, (output, "VLC", field, actual, value)
+                finally:
+                    if pointer:
+                        vlc.libvlc_free(pointer)
+        finally:
+            vlc.libvlc_media_release(media)
+    finally:
+        vlc.libvlc_release(instance)
+
+
 def run(command: list[str], expected_status: int = 0) -> bytes:
     result = subprocess.run(command, capture_output=True, timeout=10)
     assert result.returncode == expected_status, (
@@ -73,6 +167,7 @@ def run(command: list[str], expected_status: int = 0) -> bytes:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("commands", nargs="+", help="paths to built vidprobe commands or p/pygorvid")
+    parser.add_argument("--check-vlc", action="store_true", help="also check tags using installed libvlc")
     options = parser.parse_args()
     ffprobe = shutil.which("ffprobe")
     ffmpeg = shutil.which("ffmpeg")
@@ -90,6 +185,29 @@ def main() -> None:
             run([executable, "--generate", str(output)])
             payload = output.read_bytes()
             assert read_metadata(payload) == EXPECTED_METADATA
+            text, numbers, free_form = read_compatibility_metadata(payload)
+            assert free_form == EXPECTED_METADATA
+            assert numbers == {b"trkn": 1, b"disk": 1}
+            assert text == {
+                b"\xa9nam": "Title", b"\xa9ART": "Artist", b"aART": "Album Artist",
+                b"\xa9gen": "Genre", b"\xa9day": "2016-12-31 23:59:60 UTC",
+                b"\xa9wrt": "Composer", b"\xa9com": "Composer", b"\xa9cmt": "Comments",
+                b"desc": "Description", b"cprt": "Copyright", b"\xa9cpy": "Copyright",
+                b"\xa9too": "pygorvid",
+            }
+            if options.check_vlc:
+                check_vlc(output)
+            compatibility_only = directory / f"compatibility-only-{index}.mp4"
+            compatibility_only.write_bytes(without_mdta(payload))
+            compatibility_tags = json.loads(run([
+                ffprobe, "-v", "error", "-show_entries", "format_tags", "-of", "json",
+                str(compatibility_only),
+            ]))["format"]["tags"]
+            for key, value in EXPECTED_METADATA.items():
+                assert compatibility_tags.get(key) == value, (executable, key, compatibility_tags)
+            if options.check_vlc:
+                check_vlc(compatibility_only, compatibility_only=True)
+            compatibility_only.unlink()
             if reference is None:
                 reference = payload
             assert payload == reference, f"output differs across languages: {executable}"
@@ -154,7 +272,8 @@ def main() -> None:
             assert blocked.is_dir()
             run([executable, "--generate", str(directory / "missing" / "video.mp4")], 1)
             assert output.read_bytes() == payload
-            print(f"{executable}: UTF-8 metadata, media, silence, CLI errors and output parity passed")
+            suffix = ", VLC metadata" if options.check_vlc else ""
+            print(f"{executable}: UTF-8 and compatibility metadata, media, silence, CLI errors and output parity{suffix} passed")
         assert len(list(directory.iterdir())) == 2 * len(options.commands), "temporary files leaked"
 
 

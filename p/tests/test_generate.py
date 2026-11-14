@@ -4,6 +4,7 @@ import pytest
 
 from pygorvid import H264Decoder, H264Encoder, Mp4Metadata, Mp4Writer, VideoSampleReader
 from pygorvid.cli import _generation_metadata, main
+from pygorvid.mp4writer import _metadata_box
 
 
 def test_generate_native_grey_video(tmp_path, monkeypatch):
@@ -84,10 +85,30 @@ def test_optional_metadata_and_utf8():
     value = "Caf\u00e9 \u65e5\u672c \U0001f4f7\0tail"
     tagged = writer.encode(encoder, Mp4Metadata(title=value))
     assert value.encode("utf-8") in tagged
-    assert len(tagged) - len(plain) == 69 + 32 + len("title") + len(value.encode("utf-8"))
+    legacy_mdta = _metadata_box(Mp4Metadata(title=value))
+    assert len(legacy_mdta) == 69 + 32 + len("title") + len(value.encode("utf-8"))
+    assert legacy_mdta in tagged
+    assert b"mdirappl" in tagged
     assert b"mdta" not in plain
     assert b"ilst" in tagged
     with pytest.raises(ValueError, match="must be a string"):
         writer.encode(encoder, Mp4Metadata(track=1))
     with pytest.raises(UnicodeEncodeError):
         writer.encode(encoder, Mp4Metadata(title="\ud800"))
+
+
+@pytest.mark.parametrize("number", ("0", "1", "001", "65535", "65536", "-1", "1/2", "\u0661"))
+def test_compatibility_metadata_number_and_text_formats(number):
+    from pygorvid.mp4writer import _compatibility_metadata_box
+    from struct import unpack
+
+    metadata = Mp4Metadata(track=number, disc=number)
+    compatibility = _compatibility_metadata_box(metadata)
+    assert number.encode("utf-8") in compatibility
+    binary_number = number.isascii() and number.isdecimal() and int(number) <= 65535
+    assert (b"trkn" in compatibility) == binary_number
+    assert (b"disk" in compatibility) == binary_number
+    if binary_number:
+        track = compatibility.index(b"trkn") + 4
+        assert compatibility[track:track + 16] == b"\0\0\0\x18data" + bytes(8)
+        assert unpack(">4H", compatibility[track + 16:track + 24]) == (0, int(number), 0, 0)

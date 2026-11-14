@@ -186,9 +186,60 @@ Each `data` value has type 1 (UTF-8) and locale 0; lengths count encoded
 bytes, not characters. Text is preserved without parsing or normalization:
 numbers, dates (including leap seconds) and human-readable GPS coordinates
 remain strings. The keys above are string tag names, not binary track/disc
-tags or ISO 6709 location records. Players may display only a subset.
+tags or ISO 6709 location records.
 Invalid UTF-8 is rejected, and metadata that exceeds 32-bit box sizes fails
 explicitly. No external metadata tool is invoked.
+
+For VLC and Windows compatibility, the same file additionally contains
+`moov/udta/meta` with an `mdir` handler and an iTunes-style `ilst`.
+The original `moov/meta` keyed tags remain unchanged. The compatibility
+copies use these conventional item names:
+
+| Field | Compatibility item |
+| --- | --- |
+| Title | `©nam` |
+| Artist | `©ART` |
+| Album artist | `aART` |
+| Genre | `©gen` (UTF-8 text, not a numeric genre index) |
+| Release date/year | `©day` |
+| Composer | `©wrt` and `©com` |
+| Comments | `©cmt` |
+| Description | `desc` |
+| Copyright | `cprt` and `©cpy` |
+| Authoring software | `©too` |
+| Track number | `trkn` (binary number, total unspecified) |
+| Disc number | `disk` (binary number, total unspecified) |
+
+Each conventional text item contains a type-1 UTF-8 `data` atom with locale
+zero. The four-byte atom names starting with `©` use byte `0xa9`, not a
+UTF-8 encoding of that character. Binary track/disc items use type 0,
+big-endian 16-bit numbers, and reserved fields; they are emitted only for
+one to five ASCII digits representing 0 through 65535. Arbitrary string
+values still remain intact in the original keyed tags.
+
+All non-empty fields also have `----` free-form items with
+`mean=com.apple.iTunes`, `name` equal to the original field key, and UTF-8
+`data`. This exposes camera, firmware, GPS, altitude and heading text to
+readers supporting free-form tags and retains exact strings even for
+numeric fields. VLC can show these in its **Extra Metadata** tab; its
+standard metadata view uses the conventional items. Comments and description
+share a display field; the active tag reader determines which it displays.
+The exact release-date text is stored in both layouts; a legacy reader may
+display only the year (`2016`) rather than the full leap-second date.
+
+Windows' built-in MP4 property handler reads common conventional items, but
+the Details window has a limited, version-dependent set of fields. There
+is no universal Explorer mapping for arbitrary free-form camera/GPS text,
+and writing those tags cannot force the window to display them. No Windows
+property handler was available for validation on this Linux host; native VLC
+and independent MP4 parsing are tested. Re-generate existing files to add
+the compatibility block; previously generated files are not modified.
+
+Format and reader cross-checks:
+[QuickTime specification](https://developer.apple.com/library/archive/documentation/QuickTime/QTFF/),
+[ExifTool tag tables](https://exiftool.org/TagNames/QuickTime.html),
+[VLC MP4 metadata reader](https://github.com/videolan/vlc/blob/3.0.x/modules/demux/mp4/meta.c),
+[Windows media metadata properties](https://learn.microsoft.com/en-us/windows/win32/medfound/metadata-properties-for-media-files).
 
 Python and C++ allow an optional second argument to `encode`; Go and Rust
 retain their original metadata-free methods and add fallible metadata methods:
@@ -247,7 +298,9 @@ separate output file; their bytes match.
 After building the native commands, the cross-language regression checks
 all 18 UTF-8 metadata strings (independent box parsing and ffprobe), every
 decoded YUV pixel, every silent audio sample, argument/write
-errors and byte-for-byte parity. ffmpeg/ffprobe are used only as test oracles:
+errors and byte-for-byte parity. It also checks compatibility item layouts
+and tag readability with the `mdta` block removed from a temporary test file.
+ffmpeg/ffprobe are used only as test oracles:
 
 ```sh
 go build -C g -o ../tmp/generate-vidprobe-go ./cmd/vidprobe
@@ -257,6 +310,11 @@ cmake --build tmp/generate-cpp
 timeout 60s .venv/bin/python scripts/test_generate.py p/pygorvid \
   tmp/generate-vidprobe-go r/target/debug/vidprobe tmp/generate-cpp/vidprobe
 ```
+
+If libvlc is installed, add `--check-vlc` to the regression command to check
+VLC's native metadata parser for both the complete and compatibility-only
+files (including title, artist, genre, copyright, date, description,
+track/disc, album artist and authoring tool).
 
 `vidprobe` reports basic file information for one or more input files. `--input`
 adds a file that is processed before any positional input files. To extract a

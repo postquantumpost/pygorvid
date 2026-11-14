@@ -50,6 +50,46 @@ def _metadata_box(metadata: Optional[Mp4Metadata]) -> bytes:
     return _full_box(b"meta", handler, keys, items)
 
 
+def _compatibility_metadata_box(metadata: Optional[Mp4Metadata]) -> bytes:
+    if metadata is None:
+        return b""
+    entries = []
+    for field in fields(metadata):
+        value = getattr(metadata, field.name)
+        if value:
+            entries.append((field.name, value.encode("utf-8")))
+    if not entries:
+        return b""
+    text_tags = (
+        (b"\xa9nam", metadata.title), (b"\xa9ART", metadata.artist),
+        (b"aART", metadata.album_artist), (b"\xa9gen", metadata.genre),
+        (b"\xa9day", metadata.date), (b"\xa9wrt", metadata.composer),
+        (b"\xa9com", metadata.composer), (b"\xa9cmt", metadata.comment),
+        (b"desc", metadata.description), (b"cprt", metadata.copyright),
+        (b"\xa9cpy", metadata.copyright), (b"\xa9too", metadata.encoder),
+    )
+    items = [
+        _box(tag, _full_box(b"data", _u32(0), value.encode("utf-8"), flags=1))
+        for tag, value in text_tags if value
+    ]
+    for tag, value, trailing in ((b"trkn", metadata.track, True), (b"disk", metadata.disc, False)):
+        # Arbitrary string values still survive in mdta and free-form tags.
+        if value and len(value) <= 5 and all("0" <= char <= "9" for char in value):
+            number = int(value)
+            if number <= 65535:
+                data = _u16(0, number, 0) + (bytes(2) if trailing else b"")
+                items.append(_box(tag, _full_box(b"data", _u32(0), data)))
+    items.extend(
+        _box(
+            b"----", _full_box(b"mean", b"com.apple.iTunes"),
+            _full_box(b"name", key.encode("ascii")), _full_box(b"data", _u32(0), value, flags=1),
+        )
+        for key, value in entries
+    )
+    handler = _full_box(b"hdlr", _u32(0), b"mdirappl", bytes(8), b"\0")
+    return _box(b"udta", _full_box(b"meta", handler, _box(b"ilst", *items)))
+
+
 def _u32(*values: int) -> bytes:
     return struct.pack(">" + "I" * len(values), *values)
 
@@ -104,6 +144,7 @@ class Mp4Writer:
 
     def encode(self, encoder: H264Encoder, metadata: Optional[Mp4Metadata] = None) -> bytes:
         metadata_box = _metadata_box(metadata)
+        compatibility_box = _compatibility_metadata_box(metadata)
         samples = [encoder.encode_grey_frame(index) for index in range(25)]
         # IDR IDs can change the sample size, so retain individual sizes.
         video = b"".join(samples)
@@ -131,4 +172,6 @@ class Mp4Writer:
             b"mvhd", _u32(0, 0, 1000, 1000, 0x10000), _u16(0x100, 0),
             bytes(8), _matrix(), bytes(24), _u32(3),
         )
-        return ftyp + _box(b"mdat", video, audio) + _box(b"moov", mvhd, video_track, audio_track, metadata_box)
+        return ftyp + _box(b"mdat", video, audio) + _box(
+            b"moov", mvhd, video_track, audio_track, metadata_box, compatibility_box,
+        )

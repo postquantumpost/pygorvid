@@ -102,9 +102,9 @@ bool valid_utf8(const std::string& value) {
     return true;
 }
 
-Bytes metadata_box(const Mp4Metadata* metadata) {
-    if (!metadata) return {};
-    const std::array<std::pair<const char*, const std::string*>, 18> entries{{
+std::array<std::pair<const char*, const std::string*>, 18>
+metadata_entries(const Mp4Metadata* metadata) {
+    return {{
         {"title", &metadata->title}, {"artist", &metadata->artist},
         {"album_artist", &metadata->album_artist}, {"genre", &metadata->genre},
         {"track", &metadata->track}, {"disc", &metadata->disc}, {"date", &metadata->date},
@@ -114,6 +114,11 @@ Bytes metadata_box(const Mp4Metadata* metadata) {
         {"location", &metadata->location}, {"altitude", &metadata->altitude},
         {"heading", &metadata->heading}, {"encoder", &metadata->encoder},
     }};
+}
+
+Bytes metadata_box(const Mp4Metadata* metadata) {
+    if (!metadata) return {};
+    const auto entries = metadata_entries(metadata);
     std::uint64_t length = 69;
     std::uint32_t count = 0;
     for (const auto& entry : entries) {
@@ -145,6 +150,70 @@ Bytes metadata_box(const Mp4Metadata* metadata) {
     const auto handler = full_box("hdlr", 0, join({u32s({0}), text("mdta"), Bytes(12), Bytes(1)}));
     return full_box("meta", 0, join({handler, full_box("keys", 0, join({u32s({count}), keys})),
                                    box("ilst", {items})}));
+}
+
+Bytes compatibility_metadata_box(const Mp4Metadata* metadata) {
+    if (!metadata) return {};
+    const auto entries = metadata_entries(metadata);
+    const std::array<std::pair<const char*, const std::string*>, 12> text_tags{{
+        {"\xa9nam", &metadata->title}, {"\xa9" "ART", &metadata->artist},
+        {"aART", &metadata->album_artist}, {"\xa9gen", &metadata->genre},
+        {"\xa9" "day", &metadata->date}, {"\xa9wrt", &metadata->composer},
+        {"\xa9" "com", &metadata->composer}, {"\xa9" "cmt", &metadata->comment},
+        {"desc", &metadata->description}, {"cprt", &metadata->copyright},
+        {"\xa9" "cpy", &metadata->copyright}, {"\xa9too", &metadata->encoder},
+    }};
+    std::uint64_t length = 61 + 32 + 30;
+    std::size_t count = 0;
+    for (const auto& entry : entries) {
+        if (!entry.second->empty()) {
+            length += 64 + std::string(entry.first).size() + entry.second->size();
+            ++count;
+        }
+    }
+    if (!count) return {};
+    for (const auto& entry : text_tags) {
+        if (!entry.second->empty()) length += 24 + entry.second->size();
+    }
+    if (length > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("MP4 compatibility metadata exceeds the 32-bit box size limit");
+    }
+    Bytes items;
+    const auto append_item = [&items](const Bytes& item) {
+        items.insert(items.end(), item.begin(), item.end());
+    };
+    for (const auto& entry : text_tags) {
+        if (!entry.second->empty()) {
+            append_item(box(entry.first, {full_box("data", 1, join({u32s({0}), text(*entry.second)}))}));
+        }
+    }
+    for (const auto& entry : {std::make_pair("trkn", &metadata->track),
+                              std::make_pair("disk", &metadata->disc)}) {
+        const auto& value = *entry.second;
+        if (value.empty() || value.size() > 5) continue;
+        std::uint32_t number = 0;
+        bool digits = true;
+        for (const auto ch : value) {
+            if (ch < '0' || ch > '9') { digits = false; break; }
+            number = number * 10 + static_cast<unsigned>(ch - '0');
+        }
+        // Arbitrary text remains in mdta and free-form tags.
+        if (!digits || number > 65535) continue;
+        auto data = u16s({0, static_cast<std::uint16_t>(number), 0});
+        if (entry.first == std::string("trkn")) data.insert(data.end(), 2, 0);
+        append_item(box(entry.first, {full_box("data", 0, join({u32s({0}), data}))}));
+    }
+    for (const auto& entry : entries) {
+        if (!entry.second->empty()) {
+            append_item(box("----", {
+                full_box("mean", 0, text("com.apple.iTunes")),
+                full_box("name", 0, text(entry.first)),
+                full_box("data", 1, join({u32s({0}), text(*entry.second)})),
+            }));
+        }
+    }
+    const auto handler = full_box("hdlr", 0, join({u32s({0}), text("mdirappl"), Bytes(8), Bytes(1)}));
+    return box("udta", {full_box("meta", 0, join({handler, box("ilst", {items})}))});
 }
 
 Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
@@ -181,6 +250,7 @@ Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
 
 Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata) const {
     const auto metadata_bytes = metadata_box(metadata);
+    const auto compatibility_bytes = compatibility_metadata_box(metadata);
     Bytes video;
     auto sizes = u32s({0, 25});
     for (std::uint16_t index = 0; index < 25; ++index) {
@@ -213,7 +283,8 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
         u32s({0, 0, 1000, 1000, 0x10000}), u16s({0x100, 0}), Bytes(8), matrix(),
         Bytes(24), u32s({3}),
     }));
-    return join({ftyp, box("mdat", {video, audio}), box("moov", {mvhd, video_track, audio_track, metadata_bytes})});
+    return join({ftyp, box("mdat", {video, audio}),
+                 box("moov", {mvhd, video_track, audio_track, metadata_bytes, compatibility_bytes})});
 }
 
 } // namespace pygorvid

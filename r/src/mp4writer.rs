@@ -23,6 +23,31 @@ pub struct Mp4Metadata {
     pub encoder: String,
 }
 
+impl Mp4Metadata {
+    fn entries(&self) -> [(&str, &String); 18] {
+        [
+            ("title", &self.title),
+            ("artist", &self.artist),
+            ("album_artist", &self.album_artist),
+            ("genre", &self.genre),
+            ("track", &self.track),
+            ("disc", &self.disc),
+            ("date", &self.date),
+            ("composer", &self.composer),
+            ("comment", &self.comment),
+            ("description", &self.description),
+            ("copyright", &self.copyright),
+            ("make", &self.make),
+            ("model", &self.model),
+            ("firmware", &self.firmware),
+            ("location", &self.location),
+            ("altitude", &self.altitude),
+            ("heading", &self.heading),
+            ("encoder", &self.encoder),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,11 +76,32 @@ mod tests {
             .windows(value.len())
             .any(|bytes| bytes == value.as_bytes()));
         assert_eq!(
-            tagged.len() - plain.len(),
+            metadata_box(Some(&metadata)).unwrap().len(),
             69 + 32 + "title".len() + value.len()
         );
         assert!(!plain.windows(4).any(|bytes| bytes == b"mdta"));
         assert!(tagged.windows(4).any(|bytes| bytes == b"ilst"));
+        assert!(tagged.windows(8).any(|bytes| bytes == b"mdirappl"));
+        let mdta = metadata_box(Some(&metadata)).unwrap();
+        assert!(tagged.windows(mdta.len()).any(|bytes| bytes == mdta));
+    }
+
+    #[test]
+    fn compatibility_numbers_preserve_raw_text() {
+        for value in ["0", "1", "001", "65535", "65536", "-1", "1/2", "\u{661}"] {
+            let metadata = Mp4Metadata {
+                track: value.into(),
+                disc: value.into(),
+                ..Default::default()
+            };
+            let payload = compatibility_metadata_box(Some(&metadata)).unwrap();
+            assert!(payload
+                .windows(value.len())
+                .any(|bytes| bytes == value.as_bytes()));
+            let binary = ["0", "1", "001", "65535"].contains(&value);
+            assert_eq!(payload.windows(4).any(|bytes| bytes == b"trkn"), binary);
+            assert_eq!(payload.windows(4).any(|bytes| bytes == b"disk"), binary);
+        }
     }
 }
 
@@ -63,26 +109,7 @@ fn metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
     let Some(metadata) = metadata else {
         return Ok(Vec::new());
     };
-    let entries = [
-        ("title", &metadata.title),
-        ("artist", &metadata.artist),
-        ("album_artist", &metadata.album_artist),
-        ("genre", &metadata.genre),
-        ("track", &metadata.track),
-        ("disc", &metadata.disc),
-        ("date", &metadata.date),
-        ("composer", &metadata.composer),
-        ("comment", &metadata.comment),
-        ("description", &metadata.description),
-        ("copyright", &metadata.copyright),
-        ("make", &metadata.make),
-        ("model", &metadata.model),
-        ("firmware", &metadata.firmware),
-        ("location", &metadata.location),
-        ("altitude", &metadata.altitude),
-        ("heading", &metadata.heading),
-        ("encoder", &metadata.encoder),
-    ];
+    let entries = metadata.entries();
     let entries: Vec<_> = entries
         .into_iter()
         .filter(|(_, value)| !value.is_empty())
@@ -127,6 +154,98 @@ fn u32s(values: &[u32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_be_bytes())
         .collect()
+}
+
+fn compatibility_metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
+    let Some(metadata) = metadata else {
+        return Ok(Vec::new());
+    };
+    let entries = metadata.entries();
+    if entries.iter().all(|(_, value)| value.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let text_tags: [(&[u8; 4], &String); 12] = [
+        (b"\xa9nam", &metadata.title),
+        (b"\xa9ART", &metadata.artist),
+        (b"aART", &metadata.album_artist),
+        (b"\xa9gen", &metadata.genre),
+        (b"\xa9day", &metadata.date),
+        (b"\xa9wrt", &metadata.composer),
+        (b"\xa9com", &metadata.composer),
+        (b"\xa9cmt", &metadata.comment),
+        (b"desc", &metadata.description),
+        (b"cprt", &metadata.copyright),
+        (b"\xa9cpy", &metadata.copyright),
+        (b"\xa9too", &metadata.encoder),
+    ];
+    let length = 61u64
+        + 32
+        + 30
+        + entries
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(key, value)| 64 + key.len() as u64 + value.len() as u64)
+            .sum::<u64>()
+        + text_tags
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| 24 + value.len() as u64)
+            .sum::<u64>();
+    if length > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MP4 compatibility metadata exceeds the 32-bit box size limit",
+        ));
+    }
+    let mut items = Vec::new();
+    for (tag, value) in text_tags {
+        if !value.is_empty() {
+            items.extend(mp4_box(
+                tag,
+                &[&full_box(b"data", 1, &[&u32s(&[0]), value.as_bytes()])],
+            ));
+        }
+    }
+    for (tag, value, trailing) in [
+        (b"trkn", &metadata.track, true),
+        (b"disk", &metadata.disc, false),
+    ] {
+        if value.is_empty() || value.len() > 5 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        // Text-only values remain available through mdta and free-form tags.
+        if let Ok(number) = value.parse::<u16>() {
+            let mut data = u16s(&[0, number, 0]);
+            if trailing {
+                data.extend([0, 0]);
+            }
+            items.extend(mp4_box(
+                tag,
+                &[&full_box(b"data", 0, &[&u32s(&[0]), &data])],
+            ));
+        }
+    }
+    for (key, value) in entries {
+        if !value.is_empty() {
+            items.extend(mp4_box(
+                b"----",
+                &[
+                    &full_box(b"mean", 0, &[b"com.apple.iTunes"]),
+                    &full_box(b"name", 0, &[key.as_bytes()]),
+                    &full_box(b"data", 1, &[&u32s(&[0]), value.as_bytes()]),
+                ],
+            ));
+        }
+    }
+    let handler = full_box(b"hdlr", 0, &[&u32s(&[0]), b"mdirappl", &[0; 8], &[0]]);
+    Ok(mp4_box(
+        b"udta",
+        &[&full_box(
+            b"meta",
+            0,
+            &[&handler, &mp4_box(b"ilst", &[&items])],
+        )],
+    ))
 }
 
 fn u16s(values: &[u16]) -> Vec<u8> {
@@ -249,6 +368,7 @@ impl Mp4Writer {
         encoder: &H264Encoder,
         metadata: Option<&Mp4Metadata>,
     ) -> io::Result<Vec<u8>> {
+        let compatibility = compatibility_metadata_box(metadata)?;
         let metadata = metadata_box(metadata)?;
         let mut video = Vec::new();
         let mut sizes = vec![0, 25];
@@ -333,6 +453,7 @@ impl Mp4Writer {
             + video_track.len() as u64
             + audio_track.len() as u64
             + metadata.len() as u64
+            + compatibility.len() as u64
             > u64::from(u32::MAX)
         {
             return Err(io::Error::new(
@@ -342,7 +463,7 @@ impl Mp4Writer {
         }
         result.extend(mp4_box(
             b"moov",
-            &[&mvhd, &video_track, &audio_track, &metadata],
+            &[&mvhd, &video_track, &audio_track, &metadata, &compatibility],
         ));
         Ok(result)
     }

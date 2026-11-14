@@ -32,7 +32,21 @@ int main() {
     const auto tagged = writer.encode(encoder, &metadata);
     assert(std::search(tagged.begin(), tagged.end(), metadata.title.begin(), metadata.title.end(),
         [](std::uint8_t byte, char ch) { return byte == static_cast<std::uint8_t>(ch); }) != tagged.end());
-    assert(tagged.size() - payload.size() == 69 + 32 + 5 + metadata.title.size());
+    assert(tagged.size() > payload.size() + 69 + 32 + 5 + metadata.title.size());
+    const std::string handler = "mdirappl";
+    assert(std::search(tagged.begin(), tagged.end(), handler.begin(), handler.end()) != tagged.end());
+    for (const auto& number : {"0", "1", "001", "65535", "65536", "-1", "1/2", u8"\u0661"}) {
+        pygorvid::Mp4Metadata numeric;
+        numeric.track = number;
+        numeric.disc = number;
+        const auto encoded = writer.encode(encoder, &numeric);
+        const std::string track_tag = "trkn";
+        const std::string disc_tag = "disk";
+        const bool binary = numeric.track == "0" || numeric.track == "1" ||
+                            numeric.track == "001" || numeric.track == "65535";
+        assert((std::search(encoded.begin(), encoded.end(), track_tag.begin(), track_tag.end()) != encoded.end()) == binary);
+        assert((std::search(encoded.begin(), encoded.end(), disc_tag.begin(), disc_tag.end()) != encoded.end()) == binary);
+    }
     for (const auto& invalid : {std::string("\xff"), std::string("\xc0\x80"),
             std::string("\xed\xa0\x80"), std::string("\xf4\x90\x80\x80"), std::string("\xe2\x82")}) {
         metadata.title = invalid;
