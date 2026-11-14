@@ -1,4 +1,126 @@
 use crate::H264Encoder;
+use std::io;
+
+#[derive(Clone, Debug, Default)]
+pub struct Mp4Metadata {
+    pub title: String,
+    pub artist: String,
+    pub album_artist: String,
+    pub genre: String,
+    pub track: String,
+    pub disc: String,
+    pub date: String,
+    pub composer: String,
+    pub comment: String,
+    pub description: String,
+    pub copyright: String,
+    pub make: String,
+    pub model: String,
+    pub firmware: String,
+    pub location: String,
+    pub altitude: String,
+    pub heading: String,
+    pub encoder: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_metadata_preserves_utf8() {
+        let writer = Mp4Writer::new();
+        let encoder = H264Encoder::new();
+        let plain = writer.encode(&encoder);
+        assert_eq!(plain, writer.encode_with_metadata(&encoder, None).unwrap());
+        assert_eq!(
+            plain,
+            writer
+                .encode_with_metadata(&encoder, Some(&Mp4Metadata::default()))
+                .unwrap()
+        );
+        let value = "Caf\u{e9} \u{65e5}\u{672c} \u{1f4f7}\0tail";
+        let metadata = Mp4Metadata {
+            title: value.into(),
+            ..Mp4Metadata::default()
+        };
+        let tagged = writer
+            .encode_with_metadata(&encoder, Some(&metadata))
+            .unwrap();
+        assert!(tagged
+            .windows(value.len())
+            .any(|bytes| bytes == value.as_bytes()));
+        assert_eq!(
+            tagged.len() - plain.len(),
+            69 + 32 + "title".len() + value.len()
+        );
+        assert!(!plain.windows(4).any(|bytes| bytes == b"mdta"));
+        assert!(tagged.windows(4).any(|bytes| bytes == b"ilst"));
+    }
+}
+
+fn metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
+    let Some(metadata) = metadata else {
+        return Ok(Vec::new());
+    };
+    let entries = [
+        ("title", &metadata.title),
+        ("artist", &metadata.artist),
+        ("album_artist", &metadata.album_artist),
+        ("genre", &metadata.genre),
+        ("track", &metadata.track),
+        ("disc", &metadata.disc),
+        ("date", &metadata.date),
+        ("composer", &metadata.composer),
+        ("comment", &metadata.comment),
+        ("description", &metadata.description),
+        ("copyright", &metadata.copyright),
+        ("make", &metadata.make),
+        ("model", &metadata.model),
+        ("firmware", &metadata.firmware),
+        ("location", &metadata.location),
+        ("altitude", &metadata.altitude),
+        ("heading", &metadata.heading),
+        ("encoder", &metadata.encoder),
+    ];
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .collect();
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let length = 69u64
+        + entries
+            .iter()
+            .map(|(key, value)| 32 + key.len() as u64 + value.len() as u64)
+            .sum::<u64>();
+    if length > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MP4 metadata exceeds the 32-bit box size limit",
+        ));
+    }
+    let mut keys = Vec::new();
+    let mut items = Vec::new();
+    for (index, (key, value)) in entries.iter().enumerate() {
+        keys.extend(mp4_box(b"mdta", &[key.as_bytes()]));
+        items.extend(mp4_box(
+            &((index + 1) as u32).to_be_bytes(),
+            &[&full_box(b"data", 1, &[&u32s(&[0]), value.as_bytes()])],
+        ));
+    }
+    let handler = full_box(b"hdlr", 0, &[&u32s(&[0]), b"mdta", &[0; 12], &[0]]);
+    Ok(full_box(
+        b"meta",
+        0,
+        &[
+            &handler,
+            &full_box(b"keys", 0, &[&u32s(&[entries.len() as u32]), &keys]),
+            &mp4_box(b"ilst", &[&items]),
+        ],
+    ))
+}
 
 fn u32s(values: &[u32]) -> Vec<u8> {
     values
@@ -118,6 +240,16 @@ impl Mp4Writer {
     }
 
     pub fn encode(&self, encoder: &H264Encoder) -> Vec<u8> {
+        self.encode_with_metadata(encoder, None)
+            .expect("fixed metadata-free MP4 fits 32-bit boxes")
+    }
+
+    pub fn encode_with_metadata(
+        &self,
+        encoder: &H264Encoder,
+        metadata: Option<&Mp4Metadata>,
+    ) -> io::Result<Vec<u8>> {
+        let metadata = metadata_box(metadata)?;
         let mut video = Vec::new();
         let mut sizes = vec![0, 25];
         for index in 0..25 {
@@ -197,7 +329,21 @@ impl Mp4Writer {
         );
         let mut result = ftyp;
         result.extend(mp4_box(b"mdat", &[&video, &audio]));
-        result.extend(mp4_box(b"moov", &[&mvhd, &video_track, &audio_track]));
-        result
+        if 8 + mvhd.len() as u64
+            + video_track.len() as u64
+            + audio_track.len() as u64
+            + metadata.len() as u64
+            > u64::from(u32::MAX)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MP4 movie metadata exceeds the 32-bit box size limit",
+            ));
+        }
+        result.extend(mp4_box(
+            b"moov",
+            &[&mvhd, &video_track, &audio_track, &metadata],
+        ));
+        Ok(result)
     }
 }

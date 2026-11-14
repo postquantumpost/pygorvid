@@ -152,6 +152,83 @@ Generation does not invoke ffmpeg or require any external codecs.
 The CLI writes via a temporary directory beside the output and replaces the
 destination only after the complete file has been written.
 
+#### File metadata
+
+The writers accept an optional `Mp4Metadata` structure. All fields are
+strings; unspecified/empty fields are omitted. No metadata argument (or an
+entirely empty structure) produces the original metadata-free library output.
+Each `--generate` utility now passes the following test metadata:
+
+| Meaning | Structure field / stored key | Utility value |
+| --- | --- | --- |
+| Title | `title` | `Title` |
+| Artist | `artist` | `Artist` |
+| Album Artist | `album_artist` | `Album Artist` |
+| Genre | `genre` | `Genre` |
+| Track Number | `track` | `1` |
+| Disc Number | `disc` | `1` |
+| Release Date/Year | `date` | `2016-12-31 23:59:60 UTC` |
+| Composer | `composer` | `Composer` |
+| Comments | `comment` | `Comments` |
+| Description | `description` | `Description` |
+| Copyright | `copyright` | `Copyright` |
+| Camera make | `make` | `Camera make` |
+| Camera model | `model` | `Camera model` |
+| Firmware version | `firmware` | `firmware version` |
+| GPS coordinates | `location` | `11.3733° N 142.5917° E` |
+| Altitude | `altitude` | `-10925.0 meters` |
+| Heading | `heading` | `180.0` |
+| Software/Authoring Tool | `encoder` | `pygorvid` |
+
+These are movie-level keyed metadata, in `moov/meta` with an `mdta` handler,
+a `keys` table in the `mdta` namespace, and indexed `ilst/data` values.
+Each `data` value has type 1 (UTF-8) and locale 0; lengths count encoded
+bytes, not characters. Text is preserved without parsing or normalization:
+numbers, dates (including leap seconds) and human-readable GPS coordinates
+remain strings. The keys above are string tag names, not binary track/disc
+tags or ISO 6709 location records. Players may display only a subset.
+Invalid UTF-8 is rejected, and metadata that exceeds 32-bit box sizes fails
+explicitly. No external metadata tool is invoked.
+
+Python and C++ allow an optional second argument to `encode`; Go and Rust
+retain their original metadata-free methods and add fallible metadata methods:
+
+```python
+from pygorvid import H264Encoder, Mp4Metadata, Mp4Writer
+
+metadata = Mp4Metadata(title="My title", artist="My artist")
+payload = Mp4Writer().encode(H264Encoder(), metadata)
+```
+
+```go
+metadata := vid.Mp4Metadata{Title: "My title", Artist: "My artist"}
+payload, err := vid.NewMp4Writer().EncodeWithMetadata(vid.NewH264Encoder(), &metadata)
+// Handle err before writing payload. nil omits metadata.
+```
+
+```rust
+let metadata = pygorvid::Mp4Metadata {
+    title: "My title".into(),
+    artist: "My artist".into(),
+    ..Default::default()
+};
+let payload = pygorvid::Mp4Writer::new()
+    .encode_with_metadata(&pygorvid::H264Encoder::new(), Some(&metadata))?;
+// None omits metadata.
+```
+
+```cpp
+pygorvid::Mp4Metadata metadata;
+metadata.title = "My title";
+metadata.artist = "My artist";
+auto payload = pygorvid::Mp4Writer().encode(pygorvid::H264Encoder(), &metadata);
+// nullptr (the default) omits metadata; invalid UTF-8 throws std::invalid_argument.
+```
+
+Go uses exported field names (`Title`, `AlbumArtist`, `Date`, `Location`,
+`Encoder`, etc.); Python, Rust and C++ use the table's snake_case names.
+C++ strings must contain UTF-8 bytes.
+
 `--generate` requires an `.mp4` filename (case-insensitive) and cannot be
 combined with input files, `--input`, `--extractframe`, `--output`
 or `--readall`. `--prefix` prepends text to the generated filename, leaving
@@ -168,7 +245,8 @@ with per-language prefixes (`jc_`, `jr_`, `jg_`, `jp_`), so each writes a
 separate output file; their bytes match.
 
 After building the native commands, the cross-language regression checks
-metadata, every decoded YUV pixel, every silent audio sample, argument/write
+all 18 UTF-8 metadata strings (independent box parsing and ffprobe), every
+decoded YUV pixel, every silent audio sample, argument/write
 errors and byte-for-byte parity. ffmpeg/ffprobe are used only as test oracles:
 
 ```sh

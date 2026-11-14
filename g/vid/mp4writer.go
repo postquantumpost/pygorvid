@@ -1,6 +1,64 @@
 package vid
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+	"unicode/utf8"
+)
+
+type Mp4Metadata struct {
+	Title, Artist, AlbumArtist, Genre, Track, Disc, Date        string
+	Composer, Comment, Description, Copyright                   string
+	Make, Model, Firmware, Location, Altitude, Heading, Encoder string
+}
+
+func mp4MetadataBox(metadata *Mp4Metadata) ([]byte, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+	entries := []struct{ key, value string }{
+		{"title", metadata.Title}, {"artist", metadata.Artist},
+		{"album_artist", metadata.AlbumArtist}, {"genre", metadata.Genre},
+		{"track", metadata.Track}, {"disc", metadata.Disc}, {"date", metadata.Date},
+		{"composer", metadata.Composer}, {"comment", metadata.Comment},
+		{"description", metadata.Description}, {"copyright", metadata.Copyright},
+		{"make", metadata.Make}, {"model", metadata.Model}, {"firmware", metadata.Firmware},
+		{"location", metadata.Location}, {"altitude", metadata.Altitude},
+		{"heading", metadata.Heading}, {"encoder", metadata.Encoder},
+	}
+	// Account for meta, hdlr, keys and ilst headers before allocating strings.
+	length := uint64(69)
+	count := uint32(0)
+	for _, entry := range entries {
+		if !utf8.ValidString(entry.value) {
+			return nil, fmt.Errorf("MP4 metadata %s is not valid UTF-8", entry.key)
+		}
+		if entry.value != "" {
+			length += 8 + uint64(len(entry.key)) + 24 + uint64(len(entry.value))
+			count++
+		}
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	if length > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("MP4 metadata exceeds the 32-bit box size limit")
+	}
+	var keys, items []byte
+	index := uint32(0)
+	for _, entry := range entries {
+		if entry.value == "" {
+			continue
+		}
+		index++
+		keys = append(keys, mp4Box("mdta", []byte(entry.key))...)
+		items = append(items, mp4Box(string(mp4U32(index)),
+			mp4FullBox("data", 1, mp4U32(0), []byte(entry.value)))...)
+	}
+	handler := mp4FullBox("hdlr", 0, mp4U32(0), []byte("mdta"), make([]byte, 12), []byte{0})
+	return mp4FullBox("meta", 0, handler,
+		mp4FullBox("keys", 0, mp4U32(count), keys), mp4Box("ilst", items)), nil
+}
 
 func mp4U32(values ...uint32) []byte {
 	result := make([]byte, len(values)*4)
@@ -68,6 +126,18 @@ type Mp4Writer struct{}
 func NewMp4Writer() Mp4Writer { return Mp4Writer{} }
 
 func (w Mp4Writer) Encode(encoder H264Encoder) []byte {
+	payload, err := w.EncodeWithMetadata(encoder, nil)
+	if err != nil {
+		panic(err)
+	} // The fixed metadata-free file fits 32-bit boxes.
+	return payload
+}
+
+func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata) ([]byte, error) {
+	metadataBox, err := mp4MetadataBox(metadata)
+	if err != nil {
+		return nil, err
+	}
 	var video []byte
 	sampleSizes := []uint32{0, 25}
 	for index := uint16(0); index < 25; index++ {
@@ -91,5 +161,8 @@ func (w Mp4Writer) Encode(encoder H264Encoder) []byte {
 	mvhd := mp4FullBox("mvhd", 0, mp4U32(0, 0, 1000, 1000, 0x10000), mp4U16(0x100, 0),
 		make([]byte, 8), mp4Matrix(), make([]byte, 24), mp4U32(3))
 	result := append(ftyp, mp4Box("mdat", video, audio)...)
-	return append(result, mp4Box("moov", mvhd, videoTrack, audioTrack)...)
+	if uint64(8+len(mvhd)+len(videoTrack)+len(audioTrack))+uint64(len(metadataBox)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("MP4 movie metadata exceeds the 32-bit box size limit")
+	}
+	return append(result, mp4Box("moov", mvhd, videoTrack, audioTrack, metadataBox)...), nil
 }

@@ -3,8 +3,10 @@
 #include "pygorvid/mp4_writer.hpp"
 
 #include <cassert>
+#include <algorithm>
 #include <cstdint>
 #include <vector>
+#include <stdexcept>
 
 int main() {
     const pygorvid::H264Encoder encoder;
@@ -22,6 +24,26 @@ int main() {
     const auto payload = writer.encode(encoder);
     assert(payload.size() < 400000);
     assert(payload == writer.encode(encoder));
+    const pygorvid::Mp4Metadata empty;
+    assert(payload == writer.encode(encoder, &empty));
+    pygorvid::Mp4Metadata metadata;
+    metadata.title = u8"Caf\u00e9 \u65e5\u672c \U0001f4f7";
+    metadata.title += std::string("\0tail", 5);
+    const auto tagged = writer.encode(encoder, &metadata);
+    assert(std::search(tagged.begin(), tagged.end(), metadata.title.begin(), metadata.title.end(),
+        [](std::uint8_t byte, char ch) { return byte == static_cast<std::uint8_t>(ch); }) != tagged.end());
+    assert(tagged.size() - payload.size() == 69 + 32 + 5 + metadata.title.size());
+    for (const auto& invalid : {std::string("\xff"), std::string("\xc0\x80"),
+            std::string("\xed\xa0\x80"), std::string("\xf4\x90\x80\x80"), std::string("\xe2\x82")}) {
+        metadata.title = invalid;
+        bool rejected = false;
+        try {
+            (void)writer.encode(encoder, &metadata);
+        } catch (const std::invalid_argument& error) {
+            rejected = std::string(error.what()).find("title is not valid UTF-8") != std::string::npos;
+        }
+        assert(rejected);
+    }
     assert((std::vector<std::uint8_t>(payload.begin() + 4, payload.begin() + 8) ==
             std::vector<std::uint8_t>{'f', 't', 'y', 'p'}));
 }

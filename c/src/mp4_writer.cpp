@@ -1,6 +1,9 @@
 #include "pygorvid/mp4_writer.hpp"
 
 #include <initializer_list>
+#include <array>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace pygorvid {
@@ -34,6 +37,9 @@ Bytes text(const std::string& value) {
 Bytes box(const std::string& kind, std::initializer_list<Bytes> parts) {
     std::size_t length = 8;
     for (const auto& part : parts) {
+        if (part.size() > std::numeric_limits<std::uint32_t>::max() - length) {
+            throw std::length_error("MP4 box exceeds the 32-bit size limit");
+        }
         length += part.size();
     }
     Bytes result = u32s({static_cast<std::uint32_t>(length)});
@@ -59,6 +65,86 @@ Bytes join(std::initializer_list<Bytes> parts) {
         result.insert(result.end(), part.begin(), part.end());
     }
     return result;
+}
+
+bool valid_utf8(const std::string& value) {
+    std::size_t index = 0;
+    while (index < value.size()) {
+        const auto first = static_cast<unsigned char>(value[index++]);
+        if (first < 0x80) {
+            continue;
+        }
+        int remaining;
+        unsigned char lower = 0x80, upper = 0xbf;
+        if (first >= 0xc2 && first <= 0xdf) {
+            remaining = 1;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            remaining = 2;
+            if (first == 0xe0) lower = 0xa0;
+            if (first == 0xed) upper = 0x9f;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            remaining = 3;
+            if (first == 0xf0) lower = 0x90;
+            if (first == 0xf4) upper = 0x8f;
+        } else {
+            return false;
+        }
+        if (value.size() - index < static_cast<std::size_t>(remaining)) {
+            return false;
+        }
+        for (int continuation = 0; continuation < remaining; ++continuation) {
+            const auto byte = static_cast<unsigned char>(value[index++]);
+            if (byte < lower || byte > upper) return false;
+            lower = 0x80;
+            upper = 0xbf;
+        }
+    }
+    return true;
+}
+
+Bytes metadata_box(const Mp4Metadata* metadata) {
+    if (!metadata) return {};
+    const std::array<std::pair<const char*, const std::string*>, 18> entries{{
+        {"title", &metadata->title}, {"artist", &metadata->artist},
+        {"album_artist", &metadata->album_artist}, {"genre", &metadata->genre},
+        {"track", &metadata->track}, {"disc", &metadata->disc}, {"date", &metadata->date},
+        {"composer", &metadata->composer}, {"comment", &metadata->comment},
+        {"description", &metadata->description}, {"copyright", &metadata->copyright},
+        {"make", &metadata->make}, {"model", &metadata->model}, {"firmware", &metadata->firmware},
+        {"location", &metadata->location}, {"altitude", &metadata->altitude},
+        {"heading", &metadata->heading}, {"encoder", &metadata->encoder},
+    }};
+    std::uint64_t length = 69;
+    std::uint32_t count = 0;
+    for (const auto& entry : entries) {
+        if (!valid_utf8(*entry.second)) {
+            throw std::invalid_argument(std::string("MP4 metadata ") + entry.first + " is not valid UTF-8");
+        }
+        if (!entry.second->empty()) {
+            length += 32 + std::string(entry.first).size() + entry.second->size();
+            ++count;
+        }
+    }
+    if (!count) return {};
+    if (length > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("MP4 metadata exceeds the 32-bit box size limit");
+    }
+    Bytes keys, items;
+    std::uint32_t index = 0;
+    for (const auto& entry : entries) {
+        if (entry.second->empty()) continue;
+        ++index;
+        const auto key = box("mdta", {text(entry.first)});
+        keys.insert(keys.end(), key.begin(), key.end());
+        const auto index_bytes = u32s({index});
+        const auto item = box(std::string(index_bytes.begin(), index_bytes.end()), {
+            full_box("data", 1, join({u32s({0}), text(*entry.second)})),
+        });
+        items.insert(items.end(), item.begin(), item.end());
+    }
+    const auto handler = full_box("hdlr", 0, join({u32s({0}), text("mdta"), Bytes(12), Bytes(1)}));
+    return full_box("meta", 0, join({handler, full_box("keys", 0, join({u32s({count}), keys})),
+                                   box("ilst", {items})}));
 }
 
 Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
@@ -93,7 +179,8 @@ Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
 
 } // namespace
 
-Bytes Mp4Writer::encode(const H264Encoder& encoder) const {
+Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata) const {
+    const auto metadata_bytes = metadata_box(metadata);
     Bytes video;
     auto sizes = u32s({0, 25});
     for (std::uint16_t index = 0; index < 25; ++index) {
@@ -126,7 +213,7 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder) const {
         u32s({0, 0, 1000, 1000, 0x10000}), u16s({0x100, 0}), Bytes(8), matrix(),
         Bytes(24), u32s({3}),
     }));
-    return join({ftyp, box("mdat", {video, audio}), box("moov", {mvhd, video_track, audio_track})});
+    return join({ftyp, box("mdat", {video, audio}), box("moov", {mvhd, video_track, audio_track, metadata_bytes})});
 }
 
 } // namespace pygorvid

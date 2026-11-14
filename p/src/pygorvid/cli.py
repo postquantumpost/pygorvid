@@ -8,12 +8,23 @@ from .colorconv import PixelConverter
 from .codec import DecoderError, create_decoder, default_decoder_threads
 from .jpegencoder import JPEGEncoder
 from .h264encoder import H264Encoder
-from .mp4writer import Mp4Writer
+from .mp4writer import Mp4Metadata, Mp4Writer
 from .mp4boxes import Mp4FormatError
 from .pixelbuffer import PixelColorRange
 from .pngencoder import PNGEncoder
 from .videosamplereader import VideoSampleReader
 from .vidfile import openfile
+
+
+def _generation_metadata() -> Mp4Metadata:
+    return Mp4Metadata(
+        title="Title", artist="Artist", album_artist="Album Artist", genre="Genre",
+        track="1", disc="1", date="2016-12-31 23:59:60 UTC", composer="Composer",
+        comment="Comments", description="Description", copyright="Copyright",
+        make="Camera make", model="Camera model", firmware="firmware version",
+        location="11.3733\u00b0 N 142.5917\u00b0 E", altitude="-10925.0 meters",
+        heading="180.0", encoder="pygorvid",
+    )
 
 
 def _format_duration_hms(seconds: float) -> str:
@@ -120,7 +131,7 @@ def main(argv=None) -> int:
         try:
             if args.prefix is not None:
                 output = output.with_name(args.prefix + output.name)
-            payload = Mp4Writer().encode(H264Encoder())
+            payload = Mp4Writer().encode(H264Encoder(), _generation_metadata())
             with tempfile.TemporaryDirectory(prefix=".pygorvid-", dir=output.parent) as directory:
                 temporary = Path(directory) / "video"
                 temporary.write_bytes(payload)

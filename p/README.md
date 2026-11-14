@@ -31,6 +31,23 @@ from pygorvid import H264Encoder, Mp4Writer
 Path("grey.mp4").write_bytes(Mp4Writer().encode(H264Encoder()))
 ```
 
+An optional `Mp4Metadata` dataclass supplies UTF-8 string tags:
+
+```python
+from pygorvid import Mp4Metadata
+
+metadata = Mp4Metadata(title="My title", artist="My artist", date="2016")
+Path("tagged.mp4").write_bytes(Mp4Writer().encode(H264Encoder(), metadata))
+```
+
+Empty fields are omitted; `None` (the default) writes no metadata. Tags are
+stored in movie-level `mdta` keyed metadata as UTF-8 strings without parsing
+numbers, dates or GPS text. Fields are `title`, `artist`, `album_artist`,
+`genre`, `track`, `disc`, `date`, `composer`, `comment`, `description`,
+`copyright`, `make`, `model`, `firmware`, `location`, `altitude`, `heading`
+and `encoder`. The utility's `--generate` supplies test values for all fields,
+including `2016-12-31 23:59:60 UTC` and `11.3733° N 142.5917° E`.
+
 Generation takes no input and cannot be combined with extraction, output,
 or read-all options. `--prefix j_` writes `j_grey.mp4` instead of `grey.mp4`,
 without changing the output directory or extension. The CLI replaces the destination only after a

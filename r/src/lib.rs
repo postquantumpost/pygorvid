@@ -75,7 +75,7 @@ pub use hevc_decoder::HevcDecoder;
 pub use hevc_mp4::{HevcConfiguration, HevcNalArray};
 pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use mp4file::Mp4File;
-pub use mp4writer::Mp4Writer;
+pub use mp4writer::{Mp4Metadata, Mp4Writer};
 pub use nal::{
     ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals, NalHeader,
 };

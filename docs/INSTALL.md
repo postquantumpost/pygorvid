@@ -124,6 +124,18 @@ output or read-all options. `--prefix j_` prepends text to the generated
 filename without changing its directory or extension. The SDKs expose separate `H264Encoder`
 and `Mp4Writer` objects for this initial fixed format.
 
+All `--generate` commands pass test strings for the 18 `Mp4Metadata` fields:
+title, artist, album artist, genre, track/disc numbers, release date, composer,
+comments, description, copyright, camera make/model/firmware, GPS coordinates,
+altitude, heading and authoring software. The SDK writers accept optional
+metadata; omitted or empty metadata leaves library output unchanged.
+Python/C++ use an optional second argument to `encode`; Go uses
+`EncodeWithMetadata(encoder, *Mp4Metadata)` and Rust uses
+`encode_with_metadata(&encoder, Option<&Mp4Metadata>)`. Values are UTF-8
+strings in movie-level `mdta` keyed metadata; even date, track/disc and GPS
+fields are preserved as text rather than converted to binary values.
+See the source repository README for field names, test values and API examples.
+
 ## Building Release Images
 
 From the repository root, with GNU Make, tar, Go 1.22+, a current stable Rust

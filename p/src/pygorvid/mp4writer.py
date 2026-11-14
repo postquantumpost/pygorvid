@@ -1,6 +1,53 @@
 import struct
+from dataclasses import dataclass, fields
+from typing import Optional
 
 from .h264encoder import H264Encoder
+
+
+@dataclass
+class Mp4Metadata:
+    title: str = ""
+    artist: str = ""
+    album_artist: str = ""
+    genre: str = ""
+    track: str = ""
+    disc: str = ""
+    date: str = ""
+    composer: str = ""
+    comment: str = ""
+    description: str = ""
+    copyright: str = ""
+    make: str = ""
+    model: str = ""
+    firmware: str = ""
+    location: str = ""
+    altitude: str = ""
+    heading: str = ""
+    encoder: str = ""
+
+
+def _metadata_box(metadata: Optional[Mp4Metadata]) -> bytes:
+    if metadata is None:
+        return b""
+    entries = []
+    for field in fields(metadata):
+        value = getattr(metadata, field.name)
+        if not isinstance(value, str):
+            raise ValueError(f"MP4 metadata {field.name} must be a string")
+        if value:
+            entries.append((field.name.encode("ascii"), value.encode("utf-8")))
+    if not entries:
+        return b""
+    keys = _full_box(b"keys", _u32(len(entries)), *(
+        _box(b"mdta", key) for key, _ in entries
+    ))
+    items = _box(b"ilst", *(
+        _box(_u32(index), _full_box(b"data", _u32(0), value, flags=1))
+        for index, (_, value) in enumerate(entries, 1)
+    ))
+    handler = _full_box(b"hdlr", _u32(0), b"mdta", bytes(12), b"\0")
+    return _full_box(b"meta", handler, keys, items)
 
 
 def _u32(*values: int) -> bytes:
@@ -12,6 +59,8 @@ def _u16(*values: int) -> bytes:
 
 
 def _box(kind: bytes, *parts: bytes) -> bytes:
+    if sum(len(part) for part in parts) > 0xFFFFFFFF - 8:
+        raise ValueError("MP4 box exceeds the 32-bit size limit")
     payload = b"".join(parts)
     return _u32(len(payload) + 8) + kind + payload
 
@@ -53,7 +102,8 @@ def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
 class Mp4Writer:
     """Initial subset: one second of 64x64 H.264 and stereo PCM silence."""
 
-    def encode(self, encoder: H264Encoder) -> bytes:
+    def encode(self, encoder: H264Encoder, metadata: Optional[Mp4Metadata] = None) -> bytes:
+        metadata_box = _metadata_box(metadata)
         samples = [encoder.encode_grey_frame(index) for index in range(25)]
         # IDR IDs can change the sample size, so retain individual sizes.
         video = b"".join(samples)
@@ -81,4 +131,4 @@ class Mp4Writer:
             b"mvhd", _u32(0, 0, 1000, 1000, 0x10000), _u16(0x100, 0),
             bytes(8), _matrix(), bytes(24), _u32(3),
         )
-        return ftyp + _box(b"mdat", video, audio) + _box(b"moov", mvhd, video_track, audio_track)
+        return ftyp + _box(b"mdat", video, audio) + _box(b"moov", mvhd, video_track, audio_track, metadata_box)

@@ -16,6 +16,17 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+func generationMetadata() vid.Mp4Metadata {
+	return vid.Mp4Metadata{
+		Title: "Title", Artist: "Artist", AlbumArtist: "Album Artist", Genre: "Genre",
+		Track: "1", Disc: "1", Date: "2016-12-31 23:59:60 UTC", Composer: "Composer",
+		Comment: "Comments", Description: "Description", Copyright: "Copyright",
+		Make: "Camera make", Model: "Camera model", Firmware: "firmware version",
+		Location: "11.3733\u00b0 N 142.5917\u00b0 E", Altitude: "-10925.0 meters",
+		Heading: "180.0", Encoder: "pygorvid",
+	}
+}
+
 func run(args []string) int {
 	flags := flag.NewFlagSet("vidprobe", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -63,8 +74,13 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "--generate must end in .mp4")
 			return 2
 		}
-		payload := vid.NewMp4Writer().Encode(vid.NewH264Encoder())
 		outputPath := prefixedOutput(*generate, *prefix)
+		metadata := generationMetadata()
+		payload, err := vid.NewMp4Writer().EncodeWithMetadata(vid.NewH264Encoder(), &metadata)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", outputPath, err)
+			return 1
+		}
 		if err := writeOutputFile(outputPath, payload); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", outputPath, err)
 			return 1

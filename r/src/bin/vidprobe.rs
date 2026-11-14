@@ -7,6 +7,29 @@ fn main() {
     exit(run(std::env::args().skip(1).collect()));
 }
 
+fn generation_metadata() -> pygorvid::Mp4Metadata {
+    pygorvid::Mp4Metadata {
+        title: "Title".into(),
+        artist: "Artist".into(),
+        album_artist: "Album Artist".into(),
+        genre: "Genre".into(),
+        track: "1".into(),
+        disc: "1".into(),
+        date: "2016-12-31 23:59:60 UTC".into(),
+        composer: "Composer".into(),
+        comment: "Comments".into(),
+        description: "Description".into(),
+        copyright: "Copyright".into(),
+        make: "Camera make".into(),
+        model: "Camera model".into(),
+        firmware: "firmware version".into(),
+        location: "11.3733\u{b0} N 142.5917\u{b0} E".into(),
+        altitude: "-10925.0 meters".into(),
+        heading: "180.0".into(),
+        encoder: "pygorvid".into(),
+    }
+}
+
 fn run(args: Vec<String>) -> i32 {
     let (input, output, frame, prefix, threads, read_all, verbose, mut files, generate) =
         match parse_args(&args) {
@@ -37,7 +60,15 @@ fn run(args: Vec<String>) -> i32 {
         }
         let output_path = prefixed_output(&output_path, prefix.as_deref());
         let output = Path::new(&output_path);
-        let payload = pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new());
+        let payload = match pygorvid::Mp4Writer::new()
+            .encode_with_metadata(&pygorvid::H264Encoder::new(), Some(&generation_metadata()))
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("{output_path}: {error}");
+                return 1;
+            }
+        };
         if let Err(error) = write_output(output, &payload) {
             eprintln!("{output_path}: {error}");
             return 1;
@@ -361,7 +392,9 @@ mod tests {
         assert_eq!(run(vec![format!("--generate={output}")]), 0);
         assert_eq!(
             fs::read(output).unwrap(),
-            pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new())
+            pygorvid::Mp4Writer::new()
+                .encode_with_metadata(&pygorvid::H264Encoder::new(), Some(&generation_metadata()))
+                .unwrap()
         );
         let reader = pygorvid::VideoSampleReader::open(output).unwrap();
         assert_eq!(reader.sample_count(), 25);
@@ -404,7 +437,12 @@ mod tests {
             );
             assert_eq!(
                 fs::read(&written).unwrap(),
-                pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new())
+                pygorvid::Mp4Writer::new()
+                    .encode_with_metadata(
+                        &pygorvid::H264Encoder::new(),
+                        Some(&generation_metadata())
+                    )
+                    .unwrap()
             );
             fs::remove_file(&written).unwrap();
             fs::create_dir(&written).unwrap();

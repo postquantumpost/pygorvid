@@ -2,8 +2,8 @@ import subprocess
 
 import pytest
 
-from pygorvid import H264Decoder, H264Encoder, Mp4Writer, VideoSampleReader
-from pygorvid.cli import main
+from pygorvid import H264Decoder, H264Encoder, Mp4Metadata, Mp4Writer, VideoSampleReader
+from pygorvid.cli import _generation_metadata, main
 
 
 def test_generate_native_grey_video(tmp_path, monkeypatch):
@@ -14,7 +14,7 @@ def test_generate_native_grey_video(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "")
     output = tmp_path / "grey video.MP4"
     assert main(["--generate", str(output)]) == 0
-    assert output.read_bytes() == Mp4Writer().encode(H264Encoder())
+    assert output.read_bytes() == Mp4Writer().encode(H264Encoder(), _generation_metadata())
     reader = VideoSampleReader(output)
     try:
         assert reader.sample_count == 25
@@ -60,7 +60,7 @@ def test_generate_prefix(tmp_path, capsys, prefix):
     output = tmp_path / "grey video.MP4"
     written = output.with_name(prefix + output.name)
     assert main([f"--generate={output}", "--prefix", prefix]) == 0
-    assert written.read_bytes() == Mp4Writer().encode(H264Encoder())
+    assert written.read_bytes() == Mp4Writer().encode(H264Encoder(), _generation_metadata())
     assert str(written) in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == [written]
     written.unlink()
@@ -74,3 +74,20 @@ def test_generate_prefix(tmp_path, capsys, prefix):
 def test_encoder_rejects_out_of_range_picture_id(picture_id):
     with pytest.raises(ValueError, match="IDR picture ID"):
         H264Encoder().encode_grey_frame(picture_id)
+
+
+def test_optional_metadata_and_utf8():
+    writer, encoder = Mp4Writer(), H264Encoder()
+    plain = writer.encode(encoder)
+    assert writer.encode(encoder, None) == plain
+    assert writer.encode(encoder, Mp4Metadata()) == plain
+    value = "Caf\u00e9 \u65e5\u672c \U0001f4f7\0tail"
+    tagged = writer.encode(encoder, Mp4Metadata(title=value))
+    assert value.encode("utf-8") in tagged
+    assert len(tagged) - len(plain) == 69 + 32 + len("title") + len(value.encode("utf-8"))
+    assert b"mdta" not in plain
+    assert b"ilst" in tagged
+    with pytest.raises(ValueError, match="must be a string"):
+        writer.encode(encoder, Mp4Metadata(track=1))
+    with pytest.raises(UnicodeEncodeError):
+        writer.encode(encoder, Mp4Metadata(title="\ud800"))
