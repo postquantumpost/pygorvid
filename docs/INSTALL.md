@@ -114,6 +114,15 @@ Ensure `~/.local/bin` is on `PATH`. Python's `vidprobe` remains in its virtual
 environment. Running a native command without arguments prints usage and exits
 with status 2; Python's command also supports `--help` with a successful exit.
 
+All four installed commands accept `--generate grey.mp4` without any input
+file. This writes one second of 64x64 grey H.264 video at 25 fps with silent
+stereo 48 kHz, 16-bit PCM audio. The initial encoder uses Constrained Baseline
+Level 2.0 I_PCM IDR pictures; the MP4 writer uses the QuickTime `sowt` audio
+sample entry, so playback requires PCM-in-MP4 support. Generation is native
+and does not require ffmpeg. It cannot be combined with input, extraction,
+output, prefix or read-all options. The SDKs expose separate `H264Encoder`
+and `Mp4Writer` objects for this initial fixed format.
+
 ## Building Release Images
 
 From the repository root, with GNU Make, tar, Go 1.22+, a current stable Rust

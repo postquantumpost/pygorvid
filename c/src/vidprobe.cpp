@@ -1,4 +1,6 @@
 #include "pygorvid/h264.hpp"
+#include "pygorvid/h264_encoder.hpp"
+#include "pygorvid/mp4_writer.hpp"
 #include "pygorvid/jpeg.hpp"
 #include "pygorvid/pygorvid.hpp"
 #include "pygorvid/png.hpp"
@@ -6,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,9 +24,12 @@ struct Options {
     std::optional<std::size_t> extract_frame;
     std::optional<std::string> output_path;
     std::string output_prefix;
+    bool prefix_set = false;
+    std::optional<std::string> generate_path;
 };
 
 void usage() {
+    std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
     std::cerr << "usage: vidprobe [--extractframe INDEX --output IMAGE] "
                  "[--prefix TEXT] [--input FILE] FILE...\n";
 }
@@ -645,7 +651,14 @@ Options parse_options(const std::vector<std::string>& args) {
     Options options;
     for (std::size_t index = 0; index < args.size(); ++index) {
         const auto& arg = args[index];
-        if (arg == "--input") {
+        if (arg == "--generate") {
+            if (++index == args.size()) {
+                throw std::invalid_argument("--generate requires a value");
+            }
+            options.generate_path = args[index];
+        } else if (arg.rfind("--generate=", 0) == 0) {
+            options.generate_path = arg.substr(11);
+        } else if (arg == "--input") {
             if (++index == args.size()) {
                 throw std::invalid_argument("--input requires a value");
             }
@@ -671,8 +684,10 @@ Options parse_options(const std::vector<std::string>& args) {
                 throw std::invalid_argument("--prefix requires a value");
             }
             options.output_prefix = args[index];
+            options.prefix_set = true;
         } else if (arg.rfind("--prefix=", 0) == 0) {
             options.output_prefix = arg.substr(9);
+            options.prefix_set = true;
         } else if (!arg.empty() && arg.front() == '-') {
             throw std::invalid_argument("unknown option: " + arg);
         } else {
@@ -680,6 +695,48 @@ Options parse_options(const std::vector<std::string>& args) {
         }
     }
     return options;
+}
+
+void generate_video(const std::string& output_path) {
+    const auto payload = pygorvid::Mp4Writer().encode(pygorvid::H264Encoder());
+    const std::filesystem::path output(output_path);
+    const auto parent = output.has_parent_path() ? output.parent_path()
+                                                 : std::filesystem::path(".");
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path temporary;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = parent / (".pygorvid-" + std::to_string(nonce) +
+                                         "-" + std::to_string(attempt));
+        if (std::filesystem::create_directory(candidate)) {
+            temporary = candidate;
+            break;
+        }
+    }
+    if (temporary.empty()) {
+        throw std::runtime_error("cannot create temporary output directory");
+    }
+    struct Cleanup {
+        std::filesystem::path directory;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(directory, error);
+            if (error) {
+                std::cerr << "cannot clean temporary output directory: " << error.message() << '\n';
+            }
+        }
+    } cleanup{temporary};
+    const auto video = temporary / "video";
+    std::ofstream file(video, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("cannot open video output file");
+    }
+    file.write(reinterpret_cast<const char*>(payload.data()),
+               static_cast<std::streamsize>(payload.size()));
+    file.close();
+    if (!file) {
+        throw std::runtime_error("cannot write complete video output file");
+    }
+    std::filesystem::rename(video, output);
 }
 
 int run(const std::vector<std::string>& args) {
@@ -694,6 +751,28 @@ int run(const std::vector<std::string>& args) {
         std::cerr << error.what() << '\n';
         usage();
         return 2;
+    }
+    if (options.generate_path) {
+        if (!options.files.empty() || options.extract_frame || options.output_path || options.prefix_set) {
+            std::cerr << "--generate cannot be combined with inputs, --extractframe, --output or --prefix\n";
+            return 2;
+        }
+        auto extension = std::filesystem::path(*options.generate_path).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (extension != ".mp4") {
+            std::cerr << "--generate must end in .mp4\n";
+            return 2;
+        }
+        try {
+            generate_video(*options.generate_path);
+            std::cout << *options.generate_path
+                      << ": generated one second of 64x64 grey video with stereo silence\n";
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << *options.generate_path << ": " << error.what() << '\n';
+            return 1;
+        }
     }
     if (options.files.empty()) {
         usage();

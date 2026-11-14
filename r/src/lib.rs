@@ -14,12 +14,14 @@ mod decoder;
 mod h264_cavlc;
 mod h264_cavlc_syntax;
 mod h264_mp4;
+mod h264encoder;
 mod hevc_decoder;
 mod hevc_mp4;
 mod imageencoder;
 mod jpegencoder;
 mod mp4boxes;
 mod mp4file;
+mod mp4writer;
 #[path = "h264_nal.rs"]
 mod nal;
 #[path = "h264_pps.rs"]
@@ -68,10 +70,12 @@ pub use codec_frame::Yuv420Frame;
 pub use decoder::{DecodeError, DependencySlice, H264Decoder};
 pub use h264_cavlc::{decode_cavlc_residual_block, CavlcResidualBlock};
 pub use h264_mp4::AvcConfiguration;
+pub use h264encoder::H264Encoder;
 pub use hevc_decoder::HevcDecoder;
 pub use hevc_mp4::{HevcConfiguration, HevcNalArray};
 pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use mp4file::Mp4File;
+pub use mp4writer::Mp4Writer;
 pub use nal::{
     ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals, NalHeader,
 };

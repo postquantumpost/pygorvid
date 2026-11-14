@@ -8,7 +8,7 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> i32 {
-    let (input, output, frame, prefix, threads, read_all, verbose, mut files) =
+    let (input, output, frame, prefix, threads, read_all, verbose, mut files, generate) =
         match parse_args(&args) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -19,6 +19,28 @@ fn run(args: Vec<String>) -> i32 {
         };
     if let Some(input) = input {
         files.insert(0, input);
+    }
+    if let Some(output_path) = generate {
+        if !files.is_empty() || read_all || frame.is_some() || output.is_some() || prefix.is_some()
+        {
+            eprintln!("--generate cannot be combined with inputs, --readall, --extractframe, --output or --prefix");
+            return 2;
+        }
+        let output = Path::new(&output_path);
+        if !output
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+        {
+            eprintln!("--generate must end in .mp4");
+            return 2;
+        }
+        let payload = pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new());
+        if let Err(error) = write_output(output, &payload) {
+            eprintln!("{output_path}: {error}");
+            return 1;
+        }
+        println!("{output_path}: generated one second of 64x64 grey video with stereo silence");
+        return 0;
     }
     if files.is_empty() {
         print_usage();
@@ -117,10 +139,12 @@ fn parse_args(
         bool,
         bool,
         Vec<String>,
+        Option<String>,
     ),
     String,
 > {
     let mut input = None;
+    let mut generate = None;
     let mut output = None;
     let mut frame = None;
     let mut prefix = None;
@@ -143,6 +167,7 @@ fn parse_args(
             break;
         }
         if arg == "--input"
+            || arg == "--generate"
             || arg == "--output"
             || arg == "--extractframe"
             || arg == "--prefix"
@@ -154,6 +179,7 @@ fn parse_args(
                 .ok_or_else(|| format!("{arg} requires a value"))?;
             match arg.as_str() {
                 "--input" => input = Some(value.clone()),
+                "--generate" => generate = Some(value.clone()),
                 "--output" => output = Some(value.clone()),
                 "--prefix" => prefix = Some(value.clone()),
                 "--threads" => threads = parse_threads(value)?,
@@ -169,6 +195,8 @@ fn parse_args(
             verbose = true;
         } else if let Some(value) = arg.strip_prefix("--input=") {
             input = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("--generate=") {
+            generate = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("--output=") {
             output = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("--extractframe=") {
@@ -189,11 +217,12 @@ fn parse_args(
         index += 1;
     }
     Ok((
-        input, output, frame, prefix, threads, read_all, verbose, files,
+        input, output, frame, prefix, threads, read_all, verbose, files, generate,
     ))
 }
 
 fn print_usage() {
+    eprintln!("       vidprobe --generate OUTPUT.mp4");
     eprintln!("usage: vidprobe [--input FILE] [--threads N] [--verbose] [--readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
 }
 
@@ -315,6 +344,53 @@ fn write_output(output: &Path, payload: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generates_native_grey_video() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../tmp/generate-rust-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let cleanup = TemporaryOutputDirectory(directory.clone());
+        let output = directory.join("grey video.MP4");
+        let output = output.to_str().unwrap();
+        let args = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        assert_eq!(run(args(&["--generate", output])), 0);
+        assert_eq!(run(vec![format!("--generate={output}")]), 0);
+        assert_eq!(
+            fs::read(output).unwrap(),
+            pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new())
+        );
+        let reader = pygorvid::VideoSampleReader::open(output).unwrap();
+        assert_eq!(reader.sample_count(), 25);
+        let mut decoder = pygorvid::H264Decoder::new(reader);
+        decoder.set_threads(1);
+        for index in [0, 24] {
+            let frame = decoder.decode_frame(index).unwrap();
+            assert_eq!((frame.width, frame.height), (64, 64));
+            assert_eq!(frame.y, vec![128; 4096]);
+            assert_eq!(frame.u, vec![128; 1024]);
+            assert_eq!(frame.v, vec![128; 1024]);
+        }
+        for options in [
+            vec!["input.mp4"],
+            vec!["--input", "input.mp4"],
+            vec!["--readall"],
+            vec!["--extractframe", "0"],
+            vec!["--output", ""],
+            vec!["--prefix", ""],
+        ] {
+            let mut values = vec!["--generate", output];
+            values.extend(options);
+            assert_eq!(run(args(&values)), 2);
+        }
+        assert_eq!(run(args(&["--generate"])), 2);
+        assert_eq!(run(args(&["--generate", "bad.avi"])), 2);
+        let blocked = directory.join("directory.mp4");
+        fs::create_dir(&blocked).unwrap();
+        assert_eq!(run(args(&["--generate", blocked.to_str().unwrap()])), 1);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        drop(cleanup);
+    }
 
     #[test]
     fn reads_all_frames_and_accepts_multiple_files() {

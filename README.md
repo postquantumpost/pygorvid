@@ -126,6 +126,51 @@ Vulnerabilities:
 
 Version 1.0 does not expand the codec subset described below.
 
+To generate a native MP4 without an input file, use any language's command:
+
+```sh
+p/pygorvid --generate grey.mp4
+g/pygorvid --generate grey.mp4
+r/pygorvid --generate grey.mp4
+c/pygorvid --generate grey.mp4
+```
+
+Installed `vidprobe`, `vidprobe-go`, `vidprobe-rust` and `vidprobe-cpp` commands
+accept the same option. `--generate=grey.mp4` is also accepted. The initial
+output is exactly one second: 25 identical 64x64 grey frames at 25 fps and
+48,000 stereo audio sample pairs at 48 kHz containing silence. Video is
+Constrained Baseline H.264 Level 2.0, using I_PCM IDR macroblocks (no transform
+or predictive compression yet), with four-byte MP4 NAL lengths. The audio
+track is uncompressed signed 16-bit little-endian PCM, using the QuickTime
+`sowt` sample entry; players must support PCM in MP4, not only AAC.
+
+Each implementation exposes separate `H264Encoder` and `Mp4Writer` objects.
+The writer's `encode` method (`Encode` in Go) accepts an encoder and returns
+the MP4 bytes. These objects intentionally support only this initial fixed
+format; general frames, additional sizes and compression are future work.
+Generation does not invoke ffmpeg or require any external codecs.
+The CLI writes via a temporary directory beside the output and replaces the
+destination only after the complete file has been written.
+
+`--generate` requires an `.mp4` filename (case-insensitive) and cannot be
+combined with input files, `--input`, `--extractframe`, `--output`, `--prefix`
+or `--readall`. Invalid arguments return status 2; write failures return
+status 1. The root `./pygorvid` comparison wrapper runs all four generators
+on the same destination, without adding image prefixes; their bytes match.
+
+After building the native commands, the cross-language regression checks
+metadata, every decoded YUV pixel, every silent audio sample, argument/write
+errors and byte-for-byte parity. ffmpeg/ffprobe are used only as test oracles:
+
+```sh
+go build -C g -o ../tmp/generate-vidprobe-go ./cmd/vidprobe
+cargo build --manifest-path r/Cargo.toml --bin vidprobe
+cmake -S c -B tmp/generate-cpp -DPYGORVID_BUILD_TESTS=ON
+cmake --build tmp/generate-cpp
+timeout 60s .venv/bin/python scripts/test_generate.py p/pygorvid \
+  tmp/generate-vidprobe-go r/target/debug/vidprobe tmp/generate-cpp/vidprobe
+```
+
 `vidprobe` reports basic file information for one or more input files. `--input`
 adds a file that is processed before any positional input files. To extract a
 zero-based video frame as PNG or JPEG, provide one input file and both options:

@@ -20,6 +20,7 @@ func run(args []string) int {
 	flags := flag.NewFlagSet("vidprobe", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	input := flags.String("input", "", "first input video file")
+	generate := flags.String("generate", "", "generate one second of 64x64 grey video with stereo silence (.mp4)")
 	output := flags.String("output", "", "output image path (.png or .jpg)")
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
 	readAll := flags.Bool("readall", false, "decode all video frames without writing images")
@@ -35,17 +36,43 @@ func run(args []string) int {
 	}
 	frameSet := false
 	inputSet := false
+	generateSet := false
+	prefixSet := false
+	outputSet := false
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "extractframe":
 			frameSet = true
 		case "input":
 			inputSet = true
+		case "generate":
+			generateSet = true
+		case "prefix":
+			prefixSet = true
+		case "output":
+			outputSet = true
 		}
 	})
 	paths := flags.Args()
 	if inputSet {
 		paths = append([]string{*input}, paths...)
+	}
+	if generateSet {
+		if len(paths) != 0 || *readAll || frameSet || outputSet || prefixSet {
+			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --extractframe, --output or --prefix")
+			return 2
+		}
+		if strings.ToLower(filepath.Ext(*generate)) != ".mp4" {
+			fmt.Fprintln(os.Stderr, "--generate must end in .mp4")
+			return 2
+		}
+		payload := vid.NewMp4Writer().Encode(vid.NewH264Encoder())
+		if err := writeOutputFile(*generate, payload); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", *generate, err)
+			return 1
+		}
+		fmt.Printf("%s: generated one second of 64x64 grey video with stereo silence\n", *generate)
+		return 0
 	}
 	if len(paths) == 0 {
 		printUsage()
@@ -140,7 +167,7 @@ func flagsFirst(args []string) []string {
 			paths = append(paths, args[i:]...)
 			break
 		}
-		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" {
+		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" || arg == "--generate" {
 			options = append(options, arg)
 			if i+1 < len(args) {
 				i++
@@ -158,6 +185,7 @@ func flagsFirst(args []string) []string {
 }
 
 func printUsage() {
+	fmt.Fprintln(os.Stderr, "       vidprobe --generate OUTPUT.mp4")
 	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
@@ -204,9 +232,6 @@ func prefixedOutput(output, prefix string) string {
 }
 
 func writeOutputFile(output string, payload []byte) error {
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		return err
-	}
 	tempDir, err := os.MkdirTemp(filepath.Dir(output), ".tmp-*")
 	if err != nil {
 		return err
@@ -250,6 +275,9 @@ func extractFrame(input string, frame int, output string, threads int, verbose b
 		payload, err = vid.NewPNGEncoder().Encode(rgb)
 	}
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
 	return writeOutputFile(output, payload)

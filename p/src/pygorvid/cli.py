@@ -7,6 +7,8 @@ from pathlib import Path
 from .colorconv import PixelConverter
 from .codec import DecoderError, create_decoder, default_decoder_threads
 from .jpegencoder import JPEGEncoder
+from .h264encoder import H264Encoder
+from .mp4writer import Mp4Writer
 from .mp4boxes import Mp4FormatError
 from .pixelbuffer import PixelColorRange
 from .pngencoder import PNGEncoder
@@ -90,6 +92,7 @@ def _read_all_frames(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="vidprobe")
     parser.add_argument("--input", help="first input video file")
+    parser.add_argument("--generate", help="generate one second of 64x64 grey video with stereo silence (.mp4)")
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
     parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
@@ -108,6 +111,23 @@ def main(argv=None) -> int:
     parser.add_argument("files", nargs="*")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     files = ([args.input] if args.input is not None else []) + args.files
+    if args.generate is not None:
+        if files or args.readall or args.extractframe is not None or args.output is not None or args.prefix is not None:
+            parser.error("--generate cannot be combined with inputs, --readall, --extractframe, --output or --prefix")
+        output = Path(args.generate)
+        if output.suffix.lower() != ".mp4":
+            parser.error("--generate must end in .mp4")
+        try:
+            payload = Mp4Writer().encode(H264Encoder())
+            with tempfile.TemporaryDirectory(prefix=".pygorvid-", dir=output.parent) as directory:
+                temporary = Path(directory) / "video"
+                temporary.write_bytes(payload)
+                temporary.replace(output)
+        except (OSError, ValueError) as error:
+            print(f"{output}: {error}", file=sys.stderr)
+            return 1
+        print(f"{output}: generated one second of 64x64 grey video with stereo silence")
+        return 0
     if not files:
         parser.print_usage(sys.stderr)
         return 2

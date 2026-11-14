@@ -9,6 +9,8 @@ add_library(pygorvid STATIC
     src/pygorvid.cpp
     src/h264.cpp
     src/h264_pcm.cpp
+    src/h264_encoder.cpp
+    src/mp4_writer.cpp
     src/cabac.cpp
     src/cavlc.cpp
     src/jpeg.cpp
@@ -24,6 +26,10 @@ target_link_libraries(vidprobe PRIVATE pygorvid)
 option(PYGORVID_BUILD_TESTS "Build the pygorvid test suite" OFF)
 if(PYGORVID_BUILD_TESTS)
     enable_testing()
+    add_executable(pygorvid_generate_test tests/test_generate.cpp)
+    target_link_libraries(pygorvid_generate_test PRIVATE pygorvid)
+    add_test(NAME pygorvid_generate_test COMMAND pygorvid_generate_test)
+    set_tests_properties(pygorvid_generate_test PROPERTIES TIMEOUT 60)
     add_executable(pygorvid_test tests/test_pygorvid.cpp)
     target_link_libraries(pygorvid_test PRIVATE pygorvid)
     target_compile_definitions(pygorvid_test PRIVATE

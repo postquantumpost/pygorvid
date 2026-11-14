@@ -69,6 +69,8 @@ from .decoder import (
     default_decoder_threads,
 )
 from .mp4file import Mp4File
+from .mp4writer import Mp4Writer
+from .h264encoder import H264Encoder
 from .nal import NALHeader, NALUnitError, ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals
 from .colorconv import PixelConversionError, PixelConverter
 from .jpegencoder import (
@@ -455,6 +457,8 @@ __all__ = [
     "same_primary_picture",
     "group_slices_into_pictures",
     "Mp4File",
+    "Mp4Writer",
+    "H264Encoder",
     "VidFile",
     "construct",
     "openfile",
