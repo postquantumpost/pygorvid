@@ -44,6 +44,18 @@ def main() -> None:
             assert payload == reference, f"output differs across languages: {executable}"
             run([executable, f"--generate={output}"])
             assert output.read_bytes() == payload
+            for prefix in ("native_", ""):
+                requested = directory / f"prefixed video {index}.MP4"
+                written = requested.with_name(prefix + requested.name)
+                message = run([executable, f"--generate={requested}", "--prefix", prefix])
+                assert str(written).encode() in message
+                assert written.read_bytes() == payload
+                assert not prefix or not requested.exists()
+                written.unlink()
+                written.mkdir()
+                run([executable, "--generate", str(requested), f"--prefix={prefix}"], 1)
+                assert written.is_dir()
+                written.rmdir()
             metadata = json.loads(run([
                 ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(output),
             ]))
@@ -78,7 +90,6 @@ def main() -> None:
                 ["--generate", str(output), "--input", "input.mp4"],
                 ["--generate", str(output), "--extractframe", "0"],
                 ["--generate", str(output), "--output", ""],
-                ["--generate", str(output), "--prefix", ""],
                 ["--generate", str(output), "--readall"],
             ):
                 run([executable, *arguments], 2)

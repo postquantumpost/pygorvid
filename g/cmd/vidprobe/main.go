@@ -25,7 +25,7 @@ func run(args []string) int {
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
 	readAll := flags.Bool("readall", false, "decode all video frames without writing images")
 	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
-	prefix := flags.String("prefix", "", "prefix prepended to the output image filename")
+	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
 	if err := flags.Parse(flagsFirst(args)); err != nil {
 		return 2
@@ -37,7 +37,6 @@ func run(args []string) int {
 	frameSet := false
 	inputSet := false
 	generateSet := false
-	prefixSet := false
 	outputSet := false
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -47,8 +46,6 @@ func run(args []string) int {
 			inputSet = true
 		case "generate":
 			generateSet = true
-		case "prefix":
-			prefixSet = true
 		case "output":
 			outputSet = true
 		}
@@ -58,8 +55,8 @@ func run(args []string) int {
 		paths = append([]string{*input}, paths...)
 	}
 	if generateSet {
-		if len(paths) != 0 || *readAll || frameSet || outputSet || prefixSet {
-			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --extractframe, --output or --prefix")
+		if len(paths) != 0 || *readAll || frameSet || outputSet {
+			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --extractframe or --output")
 			return 2
 		}
 		if strings.ToLower(filepath.Ext(*generate)) != ".mp4" {
@@ -67,11 +64,12 @@ func run(args []string) int {
 			return 2
 		}
 		payload := vid.NewMp4Writer().Encode(vid.NewH264Encoder())
-		if err := writeOutputFile(*generate, payload); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", *generate, err)
+		outputPath := prefixedOutput(*generate, *prefix)
+		if err := writeOutputFile(outputPath, payload); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", outputPath, err)
 			return 1
 		}
-		fmt.Printf("%s: generated one second of 64x64 grey video with stereo silence\n", *generate)
+		fmt.Printf("%s: generated one second of 64x64 grey video with stereo silence\n", outputPath)
 		return 0
 	}
 	if len(paths) == 0 {

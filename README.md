@@ -153,10 +153,19 @@ The CLI writes via a temporary directory beside the output and replaces the
 destination only after the complete file has been written.
 
 `--generate` requires an `.mp4` filename (case-insensitive) and cannot be
-combined with input files, `--input`, `--extractframe`, `--output`, `--prefix`
-or `--readall`. Invalid arguments return status 2; write failures return
+combined with input files, `--input`, `--extractframe`, `--output`
+or `--readall`. `--prefix` prepends text to the generated filename, leaving
+its directory and extension unchanged:
+
+```sh
+vidprobe --generate grey.mp4 --prefix j_
+```
+
+This writes `j_grey.mp4`. An empty prefix leaves the filename unchanged.
+Invalid arguments return status 2; write failures return
 status 1. The root `./pygorvid` comparison wrapper runs all four generators
-on the same destination, without adding image prefixes; their bytes match.
+with per-language prefixes (`jc_`, `jr_`, `jg_`, `jp_`), so each writes a
+separate output file; their bytes match.
 
 After building the native commands, the cross-language regression checks
 metadata, every decoded YUV pixel, every silent audio sample, argument/write

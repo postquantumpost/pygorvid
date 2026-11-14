@@ -21,9 +21,10 @@ fn run(args: Vec<String>) -> i32 {
         files.insert(0, input);
     }
     if let Some(output_path) = generate {
-        if !files.is_empty() || read_all || frame.is_some() || output.is_some() || prefix.is_some()
-        {
-            eprintln!("--generate cannot be combined with inputs, --readall, --extractframe, --output or --prefix");
+        if !files.is_empty() || read_all || frame.is_some() || output.is_some() {
+            eprintln!(
+                "--generate cannot be combined with inputs, --readall, --extractframe or --output"
+            );
             return 2;
         }
         let output = Path::new(&output_path);
@@ -34,6 +35,8 @@ fn run(args: Vec<String>) -> i32 {
             eprintln!("--generate must end in .mp4");
             return 2;
         }
+        let output_path = prefixed_output(&output_path, prefix.as_deref());
+        let output = Path::new(&output_path);
         let payload = pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new());
         if let Err(error) = write_output(output, &payload) {
             eprintln!("{output_path}: {error}");
@@ -377,7 +380,6 @@ mod tests {
             vec!["--readall"],
             vec!["--extractframe", "0"],
             vec!["--output", ""],
-            vec!["--prefix", ""],
         ] {
             let mut values = vec!["--generate", output];
             values.extend(options);
@@ -389,6 +391,34 @@ mod tests {
         fs::create_dir(&blocked).unwrap();
         assert_eq!(run(args(&["--generate", blocked.to_str().unwrap()])), 1);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        for prefix in ["native_", ""] {
+            let requested = directory.join("prefixed video.MP4");
+            let written = directory.join(format!("{prefix}prefixed video.MP4"));
+            assert_eq!(
+                run(vec![
+                    format!("--generate={}", requested.display()),
+                    "--prefix".into(),
+                    prefix.into(),
+                ]),
+                0
+            );
+            assert_eq!(
+                fs::read(&written).unwrap(),
+                pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new())
+            );
+            fs::remove_file(&written).unwrap();
+            fs::create_dir(&written).unwrap();
+            assert_eq!(
+                run(vec![
+                    "--generate".into(),
+                    requested.to_str().unwrap().into(),
+                    format!("--prefix={prefix}"),
+                ]),
+                1
+            );
+            fs::remove_dir(&written).unwrap();
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        }
         drop(cleanup);
     }
 

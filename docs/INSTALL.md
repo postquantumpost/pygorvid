@@ -120,7 +120,8 @@ stereo 48 kHz, 16-bit PCM audio. The initial encoder uses Constrained Baseline
 Level 2.0 I_PCM IDR pictures; the MP4 writer uses the QuickTime `sowt` audio
 sample entry, so playback requires PCM-in-MP4 support. Generation is native
 and does not require ffmpeg. It cannot be combined with input, extraction,
-output, prefix or read-all options. The SDKs expose separate `H264Encoder`
+output or read-all options. `--prefix j_` prepends text to the generated
+filename without changing its directory or extension. The SDKs expose separate `H264Encoder`
 and `Mp4Writer` objects for this initial fixed format.
 
 ## Building Release Images

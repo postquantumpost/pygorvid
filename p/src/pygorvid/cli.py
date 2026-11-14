@@ -112,12 +112,14 @@ def main(argv=None) -> int:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     files = ([args.input] if args.input is not None else []) + args.files
     if args.generate is not None:
-        if files or args.readall or args.extractframe is not None or args.output is not None or args.prefix is not None:
-            parser.error("--generate cannot be combined with inputs, --readall, --extractframe, --output or --prefix")
+        if files or args.readall or args.extractframe is not None or args.output is not None:
+            parser.error("--generate cannot be combined with inputs, --readall, --extractframe or --output")
         output = Path(args.generate)
         if output.suffix.lower() != ".mp4":
             parser.error("--generate must end in .mp4")
         try:
+            if args.prefix is not None:
+                output = output.with_name(args.prefix + output.name)
             payload = Mp4Writer().encode(H264Encoder())
             with tempfile.TemporaryDirectory(prefix=".pygorvid-", dir=output.parent) as directory:
                 temporary = Path(directory) / "video"

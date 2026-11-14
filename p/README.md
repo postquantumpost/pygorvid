@@ -32,7 +32,8 @@ Path("grey.mp4").write_bytes(Mp4Writer().encode(H264Encoder()))
 ```
 
 Generation takes no input and cannot be combined with extraction, output,
-prefix or read-all options. The CLI replaces the destination only after a
+or read-all options. `--prefix j_` writes `j_grey.mp4` instead of `grey.mp4`,
+without changing the output directory or extension. The CLI replaces the destination only after a
 complete temporary file is written. The encoder and writer currently support
 only this fixed format; no external encoder is invoked.
 

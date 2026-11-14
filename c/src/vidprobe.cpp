@@ -24,7 +24,6 @@ struct Options {
     std::optional<std::size_t> extract_frame;
     std::optional<std::string> output_path;
     std::string output_prefix;
-    bool prefix_set = false;
     std::optional<std::string> generate_path;
 };
 
@@ -684,10 +683,8 @@ Options parse_options(const std::vector<std::string>& args) {
                 throw std::invalid_argument("--prefix requires a value");
             }
             options.output_prefix = args[index];
-            options.prefix_set = true;
         } else if (arg.rfind("--prefix=", 0) == 0) {
             options.output_prefix = arg.substr(9);
-            options.prefix_set = true;
         } else if (!arg.empty() && arg.front() == '-') {
             throw std::invalid_argument("unknown option: " + arg);
         } else {
@@ -753,8 +750,8 @@ int run(const std::vector<std::string>& args) {
         return 2;
     }
     if (options.generate_path) {
-        if (!options.files.empty() || options.extract_frame || options.output_path || options.prefix_set) {
-            std::cerr << "--generate cannot be combined with inputs, --extractframe, --output or --prefix\n";
+        if (!options.files.empty() || options.extract_frame || options.output_path) {
+            std::cerr << "--generate cannot be combined with inputs, --extractframe or --output\n";
             return 2;
         }
         auto extension = std::filesystem::path(*options.generate_path).extension().string();
@@ -764,13 +761,15 @@ int run(const std::vector<std::string>& args) {
             std::cerr << "--generate must end in .mp4\n";
             return 2;
         }
+        const auto output_path = prefixed_output_path(
+            *options.generate_path, options.output_prefix);
         try {
-            generate_video(*options.generate_path);
-            std::cout << *options.generate_path
+            generate_video(output_path);
+            std::cout << output_path
                       << ": generated one second of 64x64 grey video with stereo silence\n";
             return 0;
         } catch (const std::exception& error) {
-            std::cerr << *options.generate_path << ": " << error.what() << '\n';
+            std::cerr << output_path << ": " << error.what() << '\n';
             return 1;
         }
     }

@@ -54,7 +54,7 @@ func TestGenerate(t *testing.T) {
 	}
 	for _, options := range [][]string{
 		{"input.mp4"}, {"--input", "input.mp4"}, {"--readall"},
-		{"--extractframe", "0"}, {"--output", ""}, {"--prefix", ""},
+		{"--extractframe", "0"}, {"--output", ""},
 	} {
 		if status := run(append([]string{"--generate", output}, options...)); status != 2 {
 			t.Fatalf("generate %v status = %d", options, status)
@@ -72,6 +72,34 @@ func TestGenerate(t *testing.T) {
 	entries, err := os.ReadDir(directory)
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("temporary output leaked: %v, %v", entries, err)
+	}
+}
+
+func TestGeneratePrefix(t *testing.T) {
+	for _, prefix := range []string{"native_", ""} {
+		directory := t.TempDir()
+		output := filepath.Join(directory, "grey video.MP4")
+		written := filepath.Join(directory, prefix+"grey video.MP4")
+		if run([]string{"--generate=" + output, "--prefix", prefix}) != 0 {
+			t.Fatal("generation with prefix failed")
+		}
+		payload, err := os.ReadFile(written)
+		if err != nil || !bytes.Equal(payload, vid.NewMp4Writer().Encode(vid.NewH264Encoder())) {
+			t.Fatalf("prefixed output differs: %v", err)
+		}
+		if err := os.Remove(written); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(written, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if run([]string{"--generate", output, "--prefix=" + prefix}) != 1 {
+			t.Fatal("prefixed output write failure was not reported")
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("unexpected outputs: %v, %v", entries, err)
+		}
 	}
 }
 

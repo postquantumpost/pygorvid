@@ -34,7 +34,7 @@ def test_generate_native_grey_video(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("arguments", (
     [], ["input.mp4"], ["--input", "input.mp4"], ["--readall"],
-    ["--extractframe", "0"], ["--output", ""], ["--prefix", ""],
+    ["--extractframe", "0"], ["--output", ""],
 ))
 def test_generate_rejects_invalid_arguments(tmp_path, arguments):
     output = tmp_path / ("bad.avi" if not arguments else "grey.mp4")
@@ -53,6 +53,21 @@ def test_generate_equals_and_io_failure(tmp_path):
     assert main(["--generate", str(directory)]) == 1
     assert directory.is_dir()
     assert sorted(path.name for path in tmp_path.iterdir()) == ["directory.mp4", "grey.mp4"]
+
+
+@pytest.mark.parametrize("prefix", ("native_", ""))
+def test_generate_prefix(tmp_path, capsys, prefix):
+    output = tmp_path / "grey video.MP4"
+    written = output.with_name(prefix + output.name)
+    assert main([f"--generate={output}", "--prefix", prefix]) == 0
+    assert written.read_bytes() == Mp4Writer().encode(H264Encoder())
+    assert str(written) in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == [written]
+    written.unlink()
+    written.mkdir()
+    assert main(["--generate", str(output), f"--prefix={prefix}"]) == 1
+    assert str(written) in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == [written]
 
 
 @pytest.mark.parametrize("picture_id", (-1, 65536))

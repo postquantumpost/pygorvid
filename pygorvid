@@ -4,18 +4,7 @@
 #for d in r g p
 #for d in c r g
 #for d in c
-generate=false
-for arg in "$@"
-do
-    case "$arg" in
-        --generate|--generate=*) generate=true ;;
-    esac
-done
 for d in c r g p
 do
-    if "$generate"; then
-        time "$d/pygorvid" "$@"
-    else
-        time "$d/pygorvid" --prefix "j${d}_" "$@"
-    fi
+    time "$d/pygorvid" --prefix "j${d}_" "$@"
 done
