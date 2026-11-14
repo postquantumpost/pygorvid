@@ -103,6 +103,58 @@ mod tests {
             assert_eq!(payload.windows(4).any(|bytes| bytes == b"disk"), binary);
         }
     }
+
+    #[test]
+    fn windows_xtra_utf16_layout() {
+        let metadata = Mp4Metadata {
+            title: "A\u{e9}\u{65e5}\u{1f4f7}\0tail".into(),
+            ..Default::default()
+        };
+        let data = [
+            b'A', 0, 0xe9, 0, 0xe5, 0x65, 0x3d, 0xd8, 0xf7, 0xdc, 0, 0, b't', 0, b'a', 0, b'i', 0,
+            b'l', 0, 0, 0,
+        ];
+        let mut records = Vec::new();
+        for name in ["Title", "pygorvid_title"] {
+            records.extend((18 + name.len() as u32 + data.len() as u32).to_be_bytes());
+            records.extend((name.len() as u32).to_be_bytes());
+            records.extend(name.as_bytes());
+            records.extend(1u32.to_be_bytes());
+            records.extend((6 + data.len() as u32).to_be_bytes());
+            records.extend(8u16.to_be_bytes());
+            records.extend(data);
+        }
+        let mut expected = (8 + records.len() as u32).to_be_bytes().to_vec();
+        expected.extend(b"Xtra");
+        expected.extend(records);
+        assert_eq!(windows_metadata_box(Some(&metadata)).unwrap(), expected);
+        let payload = Mp4Writer::new()
+            .encode_with_metadata(&H264Encoder::new(), Some(&metadata))
+            .unwrap();
+        assert!(payload
+            .windows(expected.len())
+            .any(|bytes| bytes == expected));
+        assert!(windows_metadata_box(None).unwrap().is_empty());
+        assert!(windows_metadata_box(Some(&Mp4Metadata::default()))
+            .unwrap()
+            .is_empty());
+        for date in [
+            "2016",
+            "2016-12-31 23:59:60 UTC",
+            "2016junk",
+            "-2016",
+            "\u{662}\u{660}\u{661}\u{666}",
+            "",
+        ] {
+            let metadata = Mp4Metadata {
+                date: date.into(),
+                ..Default::default()
+            };
+            let payload = windows_metadata_box(Some(&metadata)).unwrap();
+            let year = date == "2016" || date == "2016-12-31 23:59:60 UTC";
+            assert_eq!(payload.windows(7).any(|bytes| bytes == b"WM/Year"), year);
+        }
+    }
 }
 
 fn metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
@@ -238,14 +290,93 @@ fn compatibility_metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<
         }
     }
     let handler = full_box(b"hdlr", 0, &[&u32s(&[0]), b"mdirappl", &[0; 8], &[0]]);
+    let windows = windows_metadata_box(Some(metadata))?;
+    if 61 + items.len() as u64 + windows.len() as u64 > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MP4 user metadata exceeds the 32-bit box size limit",
+        ));
+    }
     Ok(mp4_box(
         b"udta",
-        &[&full_box(
-            b"meta",
-            0,
-            &[&handler, &mp4_box(b"ilst", &[&items])],
-        )],
+        &[
+            &full_box(b"meta", 0, &[&handler, &mp4_box(b"ilst", &[&items])]),
+            &windows,
+        ],
     ))
+}
+
+fn windows_metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
+    let Some(metadata) = metadata else {
+        return Ok(Vec::new());
+    };
+    let mut attributes: Vec<(String, &str)> = [
+        ("Title", &metadata.title),
+        ("Author", &metadata.artist),
+        ("WM/AlbumArtist", &metadata.album_artist),
+        ("WM/Genre", &metadata.genre),
+        ("WM/TrackNumber", &metadata.track),
+        ("WM/PartOfSet", &metadata.disc),
+        ("WM/OriginalReleaseTime", &metadata.date),
+        ("WM/Composer", &metadata.composer),
+        ("Description", &metadata.comment),
+        ("WM/SubTitleDescription", &metadata.description),
+        ("Copyright", &metadata.copyright),
+        ("CameraManufacturer", &metadata.make),
+        ("CameraModel", &metadata.model),
+        ("WM/EncodedBy", &metadata.encoder),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.into(), value.as_str()))
+    .collect();
+    let date = metadata.date.as_bytes();
+    if date.len() >= 4
+        && date[..4].iter().all(u8::is_ascii_digit)
+        && (date.len() == 4 || date[4] == b'-')
+    {
+        attributes.push(("WM/Year".into(), &metadata.date[..4]));
+    }
+    attributes.extend(
+        metadata
+            .entries()
+            .into_iter()
+            .map(|(key, value)| (format!("pygorvid_{key}"), value.as_str())),
+    );
+    let length = 8u64
+        + attributes
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(key, value)| {
+                18 + key.len() as u64 + (value.encode_utf16().count() as u64 + 1) * 2
+            })
+            .sum::<u64>();
+    if length == 8 {
+        return Ok(Vec::new());
+    }
+    if length > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MP4 Xtra metadata exceeds the 32-bit box size limit",
+        ));
+    }
+    let mut records = Vec::new();
+    for (key, value) in attributes {
+        if value.is_empty() {
+            continue;
+        }
+        let mut data: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        data.extend([0, 0]);
+        let value_size = data.len() as u32 + 6;
+        records.extend(u32s(&[
+            12 + key.len() as u32 + value_size,
+            key.len() as u32,
+        ]));
+        records.extend(key.as_bytes());
+        records.extend(u32s(&[1, value_size]));
+        records.extend(u16s(&[8]));
+        records.extend(data);
+    }
+    Ok(mp4_box(b"Xtra", &[&records]))
 }
 
 fn u16s(values: &[u16]) -> Vec<u8> {

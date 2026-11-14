@@ -49,13 +49,22 @@ and `encoder`. The utility's `--generate` supplies test values for all fields,
 including `2016-12-31 23:59:60 UTC` and `11.3733° N 142.5917° E`.
 
 The writer retains those keyed tags and adds conventional iTunes-style
-metadata at `moov/udta/meta/ilst` for VLC and Windows' common media
-properties. Every non-empty field is also duplicated as a UTF-8 free-form
+metadata at `moov/udta/meta/ilst` for VLC.
+Every non-empty field is also duplicated as a UTF-8 free-form
 item in the `com.apple.iTunes` namespace. Numeric track/disc strings from
 0 through 65535 (one to five ASCII digits) additionally get binary
 `trkn`/`disk` items. VLC displays conventional tags in its standard metadata
-view and free-form tags in Extra Metadata. Windows only exposes fields
-supported by its property handler; arbitrary camera/GPS text may not appear.
+view and free-form tags in Extra Metadata.
+Microsoft attributes are additionally written in `moov/udta/Xtra` as
+NUL-terminated UTF-16LE strings: `Title`, `Author`, `WM/AlbumArtist`,
+`WM/Genre`, `WM/TrackNumber`, `WM/PartOfSet`, `WM/OriginalReleaseTime`,
+`WM/Composer`, `Description` (comments), `WM/SubTitleDescription`,
+`Copyright`, `CameraManufacturer`, `CameraModel` and `WM/EncodedBy`.
+A year-prefixed date also supplies `WM/Year`; the full date remains unchanged.
+Each field gets an exact `pygorvid_<key>` Xtra copy. Windows only exposes
+fields supported by its property handler; arbitrary camera/GPS text may not
+appear. Windows UI validation requires Windows; see the root README's
+PowerShell check.
 Existing files must be regenerated to include these compatibility copies.
 
 Generation takes no input and cannot be combined with extraction, output,

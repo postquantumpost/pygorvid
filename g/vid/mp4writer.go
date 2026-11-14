@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -100,7 +101,83 @@ func mp4CompatibilityMetadataBox(metadata *Mp4Metadata) ([]byte, error) {
 		}
 	}
 	handler := mp4FullBox("hdlr", 0, mp4U32(0), []byte("mdirappl"), make([]byte, 8), []byte{0})
-	return mp4Box("udta", mp4FullBox("meta", 0, handler, mp4Box("ilst", items))), nil
+	windows, err := mp4WindowsMetadataBox(metadata)
+	if err != nil {
+		return nil, err
+	}
+	if 61+uint64(len(items))+uint64(len(windows)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("MP4 user metadata exceeds the 32-bit box size limit")
+	}
+	return mp4Box("udta", mp4FullBox("meta", 0, handler, mp4Box("ilst", items)), windows), nil
+}
+
+func mp4WindowsMetadataBox(metadata *Mp4Metadata) ([]byte, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+	attributes := []mp4MetadataEntry{
+		{"Title", metadata.Title}, {"Author", metadata.Artist},
+		{"WM/AlbumArtist", metadata.AlbumArtist}, {"WM/Genre", metadata.Genre},
+		{"WM/TrackNumber", metadata.Track}, {"WM/PartOfSet", metadata.Disc},
+		{"WM/OriginalReleaseTime", metadata.Date}, {"WM/Composer", metadata.Composer},
+		{"Description", metadata.Comment}, {"WM/SubTitleDescription", metadata.Description},
+		{"Copyright", metadata.Copyright}, {"CameraManufacturer", metadata.Make},
+		{"CameraModel", metadata.Model}, {"WM/EncodedBy", metadata.Encoder},
+	}
+	if len(metadata.Date) >= 4 {
+		year := metadata.Date[:4]
+		digits := true
+		for _, ch := range year {
+			digits = digits && ch >= '0' && ch <= '9'
+		}
+		if digits && (len(metadata.Date) == 4 || metadata.Date[4] == '-') {
+			attributes = append(attributes, mp4MetadataEntry{"WM/Year", year})
+		}
+	}
+	for _, entry := range metadata.entries() {
+		attributes = append(attributes, mp4MetadataEntry{"pygorvid_" + entry.key, entry.value})
+	}
+	length := uint64(8)
+	for _, entry := range attributes {
+		if !utf8.ValidString(entry.value) {
+			return nil, fmt.Errorf("MP4 Xtra attribute %s is not valid UTF-8", entry.key)
+		}
+		if entry.value == "" {
+			continue
+		}
+		units := uint64(1) // UTF-16 terminating NUL.
+		for _, ch := range entry.value {
+			units++
+			if ch > 0xffff {
+				units++
+			}
+		}
+		length += 18 + uint64(len(entry.key)) + units*2
+	}
+	if length == 8 {
+		return nil, nil
+	}
+	if length > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("MP4 Xtra metadata exceeds the 32-bit box size limit")
+	}
+	var records []byte
+	for _, entry := range attributes {
+		if entry.value == "" {
+			continue
+		}
+		units := utf16.Encode([]rune(entry.value))
+		data := make([]byte, (len(units)+1)*2)
+		for index, unit := range units {
+			binary.LittleEndian.PutUint16(data[index*2:], unit)
+		}
+		valueSize := uint32(len(data) + 6)
+		record := mp4U32(uint32(12+len(entry.key))+valueSize, uint32(len(entry.key)))
+		record = append(record, []byte(entry.key)...)
+		record = append(record, mp4U32(1, valueSize)...)
+		record = append(record, mp4U16(8)...)
+		records = append(records, append(record, data...)...)
+	}
+	return mp4Box("Xtra", records), nil
 }
 
 func mp4MetadataBox(metadata *Mp4Metadata) ([]byte, error) {

@@ -135,12 +135,16 @@ Python/C++ use an optional second argument to `encode`; Go uses
 strings in movie-level `mdta` keyed metadata; even date, track/disc and GPS
 fields are preserved as text rather than converted to binary values.
 The original `mdta` tags are retained alongside an `mdir` item list at
-`moov/udta/meta/ilst`. This list includes conventional VLC/Windows media
+`moov/udta/meta/ilst`. This list includes conventional VLC media
 tags, binary `trkn`/`disk` copies when numeric strings fit 16-bit values,
 and `com.apple.iTunes` free-form UTF-8 copies of every field.
-VLC's Extra Metadata view can expose the free-form fields. Windows Details
-only shows its supported subset; arbitrary camera/GPS text has no universal
-Explorer mapping. Regenerate old files to add the compatibility metadata.
+VLC's Extra Metadata view can expose the free-form fields. Microsoft metadata
+is separately written in `moov/udta/Xtra` using Windows Media attribute names
+and NUL-terminated UTF-16LE values, with exact `pygorvid_<key>` copies of all
+fields. Windows Details only shows its supported subset; arbitrary camera/GPS
+text has no universal Explorer mapping. Native Explorer validation requires
+Windows; the source includes `scripts/test_windows_metadata.ps1` to check its
+Shell property handler. Regenerate old files to add the compatibility metadata.
 See the source repository README for field names, test values and API examples.
 
 ## Building Release Images

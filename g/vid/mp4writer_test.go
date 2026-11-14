@@ -2,6 +2,7 @@ package vid
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 )
@@ -42,9 +43,56 @@ func TestMp4CompatibilityNumbers(t *testing.T) {
 		if err != nil || !bytes.Contains(payload, []byte(value)) {
 			t.Fatalf("raw number lost: %q", value)
 		}
+
 		binary := value == "0" || value == "1" || value == "001" || value == "65535"
 		if bytes.Contains(payload, []byte("trkn")) != binary || bytes.Contains(payload, []byte("disk")) != binary {
 			t.Fatalf("unexpected binary number tag for %q", value)
+		}
+	}
+}
+
+func TestMp4WindowsXtra(t *testing.T) {
+	value := "A\u00e9\u65e5\U0001f4f7\x00tail"
+	data := []byte{'A', 0, 0xe9, 0, 0xe5, 0x65, 0x3d, 0xd8, 0xf7, 0xdc, 0, 0,
+		't', 0, 'a', 0, 'i', 0, 'l', 0, 0, 0}
+	var records []byte
+	for _, name := range []string{"Title", "pygorvid_title"} {
+		header := make([]byte, 8)
+		binary.BigEndian.PutUint32(header, uint32(18+len(name)+len(data)))
+		binary.BigEndian.PutUint32(header[4:], uint32(len(name)))
+		records = append(records, header...)
+		records = append(records, []byte(name)...)
+		header = make([]byte, 10)
+		binary.BigEndian.PutUint32(header, 1)
+		binary.BigEndian.PutUint32(header[4:], uint32(6+len(data)))
+		binary.BigEndian.PutUint16(header[8:], 8)
+		records = append(records, header...)
+		records = append(records, data...)
+	}
+	expected := make([]byte, 8)
+	binary.BigEndian.PutUint32(expected, uint32(8+len(records)))
+	copy(expected[4:], "Xtra")
+	expected = append(expected, records...)
+	metadata := &Mp4Metadata{Title: value}
+	actual, err := mp4WindowsMetadataBox(metadata)
+	if err != nil || !bytes.Equal(actual, expected) {
+		t.Fatalf("incorrect Xtra layout: %x, %v", actual, err)
+	}
+	payload, err := NewMp4Writer().EncodeWithMetadata(NewH264Encoder(), metadata)
+	if err != nil || !bytes.Contains(payload, expected) {
+		t.Fatalf("missing Xtra: %v", err)
+	}
+	for _, empty := range []*Mp4Metadata{nil, {}} {
+		payload, err := mp4WindowsMetadataBox(empty)
+		if err != nil || len(payload) != 0 {
+			t.Fatalf("empty Xtra emitted: %v", err)
+		}
+	}
+	for _, date := range []string{"2016", "2016-12-31 23:59:60 UTC", "2016junk", "-2016", "\u0662\u0660\u0661\u0666", ""} {
+		payload, err := mp4WindowsMetadataBox(&Mp4Metadata{Date: date})
+		year := date == "2016" || date == "2016-12-31 23:59:60 UTC"
+		if err != nil || bytes.Contains(payload, []byte("WM/Year")) != year {
+			t.Fatalf("incorrect year for %q: %v", date, err)
 		}
 	}
 }

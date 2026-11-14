@@ -1,6 +1,7 @@
 #include "pygorvid/mp4_writer.hpp"
 
 #include <initializer_list>
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <stdexcept>
@@ -152,6 +153,74 @@ Bytes metadata_box(const Mp4Metadata* metadata) {
                                    box("ilst", {items})}));
 }
 
+Bytes windows_metadata_box(const Mp4Metadata* metadata) {
+    if (!metadata) return {};
+    std::vector<std::pair<std::string, const std::string*>> attributes{
+        {"Title", &metadata->title}, {"Author", &metadata->artist},
+        {"WM/AlbumArtist", &metadata->album_artist}, {"WM/Genre", &metadata->genre},
+        {"WM/TrackNumber", &metadata->track}, {"WM/PartOfSet", &metadata->disc},
+        {"WM/OriginalReleaseTime", &metadata->date}, {"WM/Composer", &metadata->composer},
+        {"Description", &metadata->comment}, {"WM/SubTitleDescription", &metadata->description},
+        {"Copyright", &metadata->copyright}, {"CameraManufacturer", &metadata->make},
+        {"CameraModel", &metadata->model}, {"WM/EncodedBy", &metadata->encoder},
+    };
+    const auto year = metadata->date.substr(0, 4);
+    if (year.size() == 4 && std::all_of(year.begin(), year.end(),
+            [](char ch) { return ch >= '0' && ch <= '9'; }) &&
+        (metadata->date.size() == 4 || metadata->date[4] == '-')) {
+        attributes.emplace_back("WM/Year", &year);
+    }
+    for (const auto& entry : metadata_entries(metadata)) {
+        attributes.emplace_back(std::string("pygorvid_") + entry.first, entry.second);
+    }
+    Bytes records;
+    for (const auto& entry : attributes) {
+        const auto& value = *entry.second;
+        if (value.empty()) continue;
+        if (!valid_utf8(value)) {
+            throw std::invalid_argument("MP4 Xtra attribute " + entry.first + " is not valid UTF-8");
+        }
+        // Bound allocation before converting UTF-8 to UTF-16LE.
+        if (value.size() > (std::numeric_limits<std::uint32_t>::max() - 20 - entry.first.size()) / 2) {
+            throw std::length_error("MP4 Xtra record exceeds the 32-bit size limit");
+        }
+        Bytes data;
+        const auto append_unit = [&data](std::uint16_t unit) {
+            data.push_back(static_cast<std::uint8_t>(unit));
+            data.push_back(static_cast<std::uint8_t>(unit >> 8));
+        };
+        for (std::size_t index = 0; index < value.size();) {
+            const auto first = static_cast<unsigned char>(value[index++]);
+            std::uint32_t point = first;
+            int remaining = 0;
+            if (first >= 0xf0) { point = first & 7; remaining = 3; }
+            else if (first >= 0xe0) { point = first & 15; remaining = 2; }
+            else if (first >= 0xc0) { point = first & 31; remaining = 1; }
+            while (remaining--) {
+                point = (point << 6) | (static_cast<unsigned char>(value[index++]) & 63);
+            }
+            if (point <= 0xffff) append_unit(static_cast<std::uint16_t>(point));
+            else {
+                point -= 0x10000;
+                append_unit(static_cast<std::uint16_t>(0xd800 + (point >> 10)));
+                append_unit(static_cast<std::uint16_t>(0xdc00 + (point & 1023)));
+            }
+        }
+        append_unit(0);
+        const auto value_size = static_cast<std::uint32_t>(data.size()) + 6;
+        const auto record_size = 12 + entry.first.size() + value_size;
+        if (record_size > std::numeric_limits<std::uint32_t>::max() - 8 - records.size()) {
+            throw std::length_error("MP4 Xtra metadata exceeds the 32-bit box size limit");
+        }
+        const auto record = join({
+            u32s({static_cast<std::uint32_t>(record_size), static_cast<std::uint32_t>(entry.first.size())}),
+            text(entry.first), u32s({1, value_size}), u16s({8}), data,
+        });
+        records.insert(records.end(), record.begin(), record.end());
+    }
+    return records.empty() ? Bytes{} : box("Xtra", {records});
+}
+
 Bytes compatibility_metadata_box(const Mp4Metadata* metadata) {
     if (!metadata) return {};
     const auto entries = metadata_entries(metadata);
@@ -213,7 +282,8 @@ Bytes compatibility_metadata_box(const Mp4Metadata* metadata) {
         }
     }
     const auto handler = full_box("hdlr", 0, join({u32s({0}), text("mdirappl"), Bytes(8), Bytes(1)}));
-    return box("udta", {full_box("meta", 0, join({handler, box("ilst", {items})}))});
+    return box("udta", {full_box("meta", 0, join({handler, box("ilst", {items})})),
+                        windows_metadata_box(metadata)});
 }
 
 Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,

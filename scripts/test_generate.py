@@ -95,6 +95,32 @@ def read_compatibility_metadata(payload: bytes):
     return text, numbers, free_form
 
 
+def read_windows_metadata(payload: bytes) -> dict[str, str]:
+    movie = dict(boxes(payload))[b"moov"]
+    user_data = dict(boxes(movie))[b"udta"]
+    records = dict(boxes(user_data))[b"Xtra"]
+    values = {}
+    offset = 0
+    while offset < len(records):
+        assert len(records) - offset >= 20
+        size = int.from_bytes(records[offset:offset + 4], "big")
+        name_size = int.from_bytes(records[offset + 4:offset + 8], "big")
+        assert 20 + name_size <= size <= len(records) - offset
+        name_end = offset + 8 + name_size
+        name = records[offset + 8:name_end].decode("ascii")
+        assert name and "\0" not in name and name not in values
+        assert records[name_end:name_end + 4] == b"\0\0\0\1"
+        value_size = int.from_bytes(records[name_end + 4:name_end + 8], "big")
+        assert size == 12 + name_size + value_size
+        assert records[name_end + 8:name_end + 10] == b"\0\10"  # Xtra Unicode type 8.
+        data = records[name_end + 10:offset + size]
+        assert len(data) >= 2 and len(data) % 2 == 0 and data[-2:] == b"\0\0"
+        values[name] = data[:-2].decode("utf-16le")
+        offset += size
+    assert offset == len(records)
+    return values
+
+
 def without_mdta(payload: bytes) -> bytes:
     def pack_box(tag: bytes, data: bytes) -> bytes:
         return (len(data) + 8).to_bytes(4, "big") + tag + data
@@ -185,6 +211,15 @@ def main() -> None:
             run([executable, "--generate", str(output)])
             payload = output.read_bytes()
             assert read_metadata(payload) == EXPECTED_METADATA
+            assert read_windows_metadata(payload) == {
+                "Title": "Title", "Author": "Artist", "WM/AlbumArtist": "Album Artist",
+                "WM/Genre": "Genre", "WM/TrackNumber": "1", "WM/PartOfSet": "1",
+                "WM/OriginalReleaseTime": "2016-12-31 23:59:60 UTC", "WM/Composer": "Composer",
+                "Description": "Comments", "WM/SubTitleDescription": "Description",
+                "Copyright": "Copyright", "CameraManufacturer": "Camera make",
+                "CameraModel": "Camera model", "WM/EncodedBy": "pygorvid", "WM/Year": "2016",
+                **{"pygorvid_" + key: value for key, value in EXPECTED_METADATA.items()},
+            }
             text, numbers, free_form = read_compatibility_metadata(payload)
             assert free_form == EXPECTED_METADATA
             assert numbers == {b"trkn": 1, b"disk": 1}
@@ -273,7 +308,7 @@ def main() -> None:
             run([executable, "--generate", str(directory / "missing" / "video.mp4")], 1)
             assert output.read_bytes() == payload
             suffix = ", VLC metadata" if options.check_vlc else ""
-            print(f"{executable}: UTF-8 and compatibility metadata, media, silence, CLI errors and output parity{suffix} passed")
+            print(f"{executable}: UTF-8, VLC and Windows Xtra metadata, media, silence, CLI errors and output parity{suffix} passed")
         assert len(list(directory.iterdir())) == 2 * len(options.commands), "temporary files leaked"
 
 

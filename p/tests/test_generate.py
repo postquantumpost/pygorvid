@@ -91,10 +91,42 @@ def test_optional_metadata_and_utf8():
     assert b"mdirappl" in tagged
     assert b"mdta" not in plain
     assert b"ilst" in tagged
+    assert b"Xtra" not in plain
+    assert value.encode("utf-16le") + bytes(2) in tagged
     with pytest.raises(ValueError, match="must be a string"):
         writer.encode(encoder, Mp4Metadata(track=1))
     with pytest.raises(UnicodeEncodeError):
         writer.encode(encoder, Mp4Metadata(title="\ud800"))
+
+
+def test_windows_xtra_utf16_layout():
+    from struct import pack
+    from pygorvid.mp4writer import _windows_metadata_box
+
+    value = "A\u00e9\u65e5\U0001f4f7\0tail"
+    data = b"A\0\xe9\0\xe5\x65\x3d\xd8\xf7\xdc\0\0t\0a\0i\0l\0\0\0"
+    records = b""
+    for name in (b"Title", b"pygorvid_title"):
+        records += pack(">II", 12 + len(name) + 6 + len(data), len(name)) + name
+        records += pack(">IIH", 1, 6 + len(data), 8) + data
+    expected = pack(">I", len(records) + 8) + b"Xtra" + records
+    metadata = Mp4Metadata(title=value)
+    assert _windows_metadata_box(metadata) == expected
+    assert expected in Mp4Writer().encode(H264Encoder(), metadata)
+    assert _windows_metadata_box(None) == _windows_metadata_box(Mp4Metadata()) == b""
+
+
+@pytest.mark.parametrize("date,year", (
+    ("2016", "2016"), ("2016-12-31 23:59:60 UTC", "2016"),
+    ("2016junk", None), ("-2016", None), ("\u0662\u0660\u0661\u0666", None), ("", None),
+))
+def test_windows_xtra_year_and_exact_date(date, year):
+    from pygorvid.mp4writer import _windows_metadata_box
+
+    payload = _windows_metadata_box(Mp4Metadata(date=date))
+    assert (b"WM/Year" in payload) == (year is not None)
+    if date:
+        assert date.encode("utf-16le") + bytes(2) in payload
 
 
 @pytest.mark.parametrize("number", ("0", "1", "001", "65535", "65536", "-1", "1/2", "\u0661"))

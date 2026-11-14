@@ -87,7 +87,42 @@ def _compatibility_metadata_box(metadata: Optional[Mp4Metadata]) -> bytes:
         for key, value in entries
     )
     handler = _full_box(b"hdlr", _u32(0), b"mdirappl", bytes(8), b"\0")
-    return _box(b"udta", _full_box(b"meta", handler, _box(b"ilst", *items)))
+    return _box(b"udta", _full_box(b"meta", handler, _box(b"ilst", *items)),
+                _windows_metadata_box(metadata))
+
+
+def _windows_metadata_box(metadata: Optional[Mp4Metadata]) -> bytes:
+    if metadata is None:
+        return b""
+    attributes = [
+        ("Title", metadata.title), ("Author", metadata.artist),
+        ("WM/AlbumArtist", metadata.album_artist), ("WM/Genre", metadata.genre),
+        ("WM/TrackNumber", metadata.track), ("WM/PartOfSet", metadata.disc),
+        ("WM/OriginalReleaseTime", metadata.date), ("WM/Composer", metadata.composer),
+        ("Description", metadata.comment), ("WM/SubTitleDescription", metadata.description),
+        ("Copyright", metadata.copyright), ("CameraManufacturer", metadata.make),
+        ("CameraModel", metadata.model), ("WM/EncodedBy", metadata.encoder),
+    ]
+    year = metadata.date[:4]
+    if len(year) == 4 and all("0" <= char <= "9" for char in year) and (
+        len(metadata.date) == 4 or metadata.date[4] == "-"
+    ):
+        attributes.append(("WM/Year", year))
+    attributes.extend(("pygorvid_" + field.name, getattr(metadata, field.name))
+                      for field in fields(metadata))
+    records = []
+    for name, value in attributes:
+        if not value:
+            continue
+        name_bytes = name.encode("ascii")
+        data = value.encode("utf-16le") + bytes(2)
+        value_size = len(data) + 6
+        record_size = 12 + len(name_bytes) + value_size
+        if record_size > 0xFFFFFFFF:
+            raise ValueError("MP4 Xtra record exceeds the 32-bit size limit")
+        records.append(_u32(record_size, len(name_bytes)) + name_bytes +
+                       _u32(1, value_size) + _u16(8) + data)
+    return _box(b"Xtra", *records) if records else b""
 
 
 def _u32(*values: int) -> bytes:

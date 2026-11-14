@@ -35,6 +35,33 @@ int main() {
     assert(tagged.size() > payload.size() + 69 + 32 + 5 + metadata.title.size());
     const std::string handler = "mdirappl";
     assert(std::search(tagged.begin(), tagged.end(), handler.begin(), handler.end()) != tagged.end());
+    pygorvid::Mp4Metadata windows;
+    windows.title = u8"A\u00e9\u65e5\U0001f4f7";
+    windows.title += std::string("\0tail", 5);
+    const std::vector<std::uint8_t> utf16{
+        'A', 0, 0xe9, 0, 0xe5, 0x65, 0x3d, 0xd8, 0xf7, 0xdc, 0, 0,
+        't', 0, 'a', 0, 'i', 0, 'l', 0, 0, 0,
+    };
+    std::vector<std::uint8_t> xtra{0, 0, 0, 107, 'X', 't', 'r', 'a'};
+    for (const auto& name : {std::string("Title"), std::string("pygorvid_title")}) {
+        xtra.insert(xtra.end(), {0, 0, 0, static_cast<std::uint8_t>(18 + name.size() + utf16.size()),
+                                0, 0, 0, static_cast<std::uint8_t>(name.size())});
+        xtra.insert(xtra.end(), name.begin(), name.end());
+        xtra.insert(xtra.end(), {0, 0, 0, 1, 0, 0, 0, 28, 0, 8});
+        xtra.insert(xtra.end(), utf16.begin(), utf16.end());
+    }
+    const auto windows_payload = writer.encode(encoder, &windows);
+    assert(std::search(windows_payload.begin(), windows_payload.end(), xtra.begin(), xtra.end()) != windows_payload.end());
+    const std::string xtra_tag = "Xtra";
+    assert(std::search(payload.begin(), payload.end(), xtra_tag.begin(), xtra_tag.end()) == payload.end());
+    for (const auto& date : {"2016", "2016-12-31 23:59:60 UTC", "2016junk", "-2016", u8"\u0662\u0660\u0661\u0666", ""}) {
+        windows.title.clear();
+        windows.date = date;
+        const auto date_payload = writer.encode(encoder, &windows);
+        const std::string year_tag = "WM/Year";
+        const bool year = windows.date == "2016" || windows.date == "2016-12-31 23:59:60 UTC";
+        assert((std::search(date_payload.begin(), date_payload.end(), year_tag.begin(), year_tag.end()) != date_payload.end()) == year);
+    }
     for (const auto& number : {"0", "1", "001", "65535", "65536", "-1", "1/2", u8"\u0661"}) {
         pygorvid::Mp4Metadata numeric;
         numeric.track = number;

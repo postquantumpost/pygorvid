@@ -190,7 +190,7 @@ tags or ISO 6709 location records.
 Invalid UTF-8 is rejected, and metadata that exceeds 32-bit box sizes fails
 explicitly. No external metadata tool is invoked.
 
-For VLC and Windows compatibility, the same file additionally contains
+For VLC compatibility, the same file additionally contains
 `moov/udta/meta` with an `mdir` handler and an iTunes-style `ilst`.
 The original `moov/meta` keyed tags remain unchanged. The compatibility
 copies use these conventional item names:
@@ -227,17 +227,57 @@ share a display field; the active tag reader determines which it displays.
 The exact release-date text is stored in both layouts; a legacy reader may
 display only the year (`2016`) rather than the full leap-second date.
 
-Windows' built-in MP4 property handler reads common conventional items, but
-the Details window has a limited, version-dependent set of fields. There
-is no universal Explorer mapping for arbitrary free-form camera/GPS text,
-and writing those tags cannot force the window to display them. No Windows
-property handler was available for validation on this Linux host; native VLC
-and independent MP4 parsing are tested. Re-generate existing files to add
-the compatibility block; previously generated files are not modified.
+Windows-specific copies are stored separately in `moov/udta/Xtra`, the
+Microsoft metadata atom, rather than relying on iTunes items. Each record
+has a big-endian record size, ASCII name length and name, value count (1),
+value size and type (8), followed by NUL-terminated UTF-16LE text. Both sizes
+include their own size words; value size also includes the two-byte type.
+UTF-8 input is converted without losing non-ASCII characters or surrogate
+pairs. The movie-level `mdta` and VLC item list remain intact.
+
+| Field | Microsoft Xtra attribute |
+| --- | --- |
+| Title | `Title` |
+| Artist | `Author` |
+| Album artist | `WM/AlbumArtist` |
+| Genre | `WM/Genre` |
+| Track / disc number | `WM/TrackNumber` / `WM/PartOfSet` |
+| Release date | `WM/OriginalReleaseTime` |
+| Release year | `WM/Year` (first four ASCII digits of a year or year-prefixed date) |
+| Composer | `WM/Composer` |
+| Comments | `Description` (Microsoft's `System.Comment` mapping) |
+| Description | `WM/SubTitleDescription` |
+| Copyright | `Copyright` |
+| Camera make / model | `CameraManufacturer` / `CameraModel` |
+| Authoring software | `WM/EncodedBy` |
+
+Every non-empty field also has a `pygorvid_<key>` Xtra string containing the
+exact original value, including firmware, GPS, altitude and heading. Windows
+Details only exposes the properties its installed MP4 handler recognizes;
+these custom attributes do not create new Explorer fields. The release year
+is `2016`, while all original date copies retain `2016-12-31 23:59:60 UTC`;
+a Windows date property may not display arbitrary text or a leap second.
+Embedded NULs are preserved in storage, but Windows string displays may stop
+at the first NUL.
+
+The binary layout and Unicode values are regression-tested in all four
+languages and cross-checked with ExifTool. Native VLC is also tested.
+Windows Explorer itself cannot be validated on this Linux host. After
+regenerating files, run this Windows PowerShell check to read the actual
+Shell property handler (not a separate MP4 parser):
+
+```powershell
+.\scripts\test_windows_metadata.ps1 -Files .\jc_grey.mp4,.\jr_grey.mp4,.\jg_grey.mp4,.\jp_grey.mp4
+```
+
+The check expects the CLI's test metadata and fails explicitly if a property
+is missing or different. Re-generate existing files to add Xtra; previously
+generated files are not modified.
 
 Format and reader cross-checks:
 [QuickTime specification](https://developer.apple.com/library/archive/documentation/QuickTime/QTFF/),
 [ExifTool tag tables](https://exiftool.org/TagNames/QuickTime.html),
+[Microsoft Xtra tag definitions](https://exiftool.org/TagNames/Microsoft.html#Xtra),
 [VLC MP4 metadata reader](https://github.com/videolan/vlc/blob/3.0.x/modules/demux/mp4/meta.c),
 [Windows media metadata properties](https://learn.microsoft.com/en-us/windows/win32/medfound/metadata-properties-for-media-files).
 
