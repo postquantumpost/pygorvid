@@ -49,4 +49,26 @@ file(READ "${existing}" after_failure HEX)
 if(status EQUAL 0 OR NOT original STREQUAL after_failure)
     message(FATAL_ERROR "Failed extraction did not preserve existing JPEG")
 endif()
+
+set(generated "${directory}/readall.mp4")
+execute_process(
+    COMMAND "${VIDPROBE}" --generate "${generated}"
+    RESULT_VARIABLE status ERROR_VARIABLE error)
+if(NOT status EQUAL 0)
+    message(FATAL_ERROR "Generation for readall test failed: ${error}")
+endif()
+execute_process(
+    COMMAND "${VIDPROBE}" --prefix jc_ --readall --input "${generated}"
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT status EQUAL 0 OR NOT output MATCHES "read 25 frames")
+    message(FATAL_ERROR "Readall failed: ${error}${output}")
+endif()
+
+execute_process(
+    COMMAND "${VIDPROBE}" --readall --extractframe 0 --output "${existing}"
+            "${generated}"
+    RESULT_VARIABLE status OUTPUT_QUIET ERROR_QUIET)
+if(status EQUAL 0)
+    message(FATAL_ERROR "--readall accepted incompatible extraction options")
+endif()
 file(REMOVE_RECURSE "${directory}")

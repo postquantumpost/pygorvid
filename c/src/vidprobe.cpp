@@ -25,11 +25,12 @@ struct Options {
     std::optional<std::string> output_path;
     std::string output_prefix;
     std::optional<std::string> generate_path;
+    bool read_all = false;
 };
 
 void usage() {
     std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
-    std::cerr << "usage: vidprobe [--extractframe INDEX --output IMAGE] "
+    std::cerr << "usage: vidprobe [--readall | --extractframe INDEX --output IMAGE] "
                  "[--prefix TEXT] [--input FILE] FILE...\n";
 }
 
@@ -92,42 +93,52 @@ void save_image(const std::string& path, const pygorvid::Yuv420Frame& frame) {
     }
 }
 
-void extract_frame(const std::string& input_path, std::size_t frame_index,
-                   const std::string& output_path) {
-    std::error_code path_error;
-    const auto normalized_input =
-        std::filesystem::absolute(input_path, path_error).lexically_normal();
-    if (path_error) {
-        throw std::runtime_error("cannot resolve input file path");
-    }
-    const auto normalized_output =
-        std::filesystem::absolute(output_path, path_error).lexically_normal();
-    if (path_error || normalized_input == normalized_output) {
-        throw std::invalid_argument(
-            "image output path must not overwrite the input video");
-    }
-    const bool output_exists = std::filesystem::exists(output_path, path_error);
-    if (path_error) {
-        throw std::runtime_error("cannot inspect image output path");
-    }
-    if (output_exists &&
-        std::filesystem::equivalent(input_path, output_path, path_error)) {
-        throw std::invalid_argument(
-            "image output path must not overwrite the input video");
-    }
-    if (path_error) {
-        throw std::runtime_error("cannot compare input and output paths");
+std::size_t decode_video(
+    const std::string& input_path,
+    const std::optional<std::size_t>& frame_index = std::nullopt,
+    const std::optional<std::string>& output_path = std::nullopt) {
+    if (output_path) {
+        std::error_code path_error;
+        const auto normalized_input =
+            std::filesystem::absolute(input_path, path_error).lexically_normal();
+        if (path_error) {
+            throw std::runtime_error("cannot resolve input file path");
+        }
+        const auto normalized_output =
+            std::filesystem::absolute(*output_path, path_error).lexically_normal();
+        if (path_error || normalized_input == normalized_output) {
+            throw std::invalid_argument(
+                "image output path must not overwrite the input video");
+        }
+        const bool output_exists =
+            std::filesystem::exists(*output_path, path_error);
+        if (path_error) {
+            throw std::runtime_error("cannot inspect image output path");
+        }
+        if (output_exists &&
+            std::filesystem::equivalent(input_path, *output_path, path_error)) {
+            throw std::invalid_argument(
+                "image output path must not overwrite the input video");
+        }
+        if (path_error) {
+            throw std::runtime_error("cannot compare input and output paths");
+        }
     }
 
     pygorvid::VideoSampleReader sample_reader;
     if (!sample_reader.open(input_path)) {
         throw std::runtime_error(sample_reader.error_info());
     }
-    if (frame_index >= sample_reader.sample_count()) {
+    if (frame_index && *frame_index >= sample_reader.sample_count()) {
         throw std::out_of_range("requested frame index exceeds the sample count");
     }
-    const auto target_sample_index =
-        sample_reader.presentation_sample_index(frame_index);
+    const auto target_sample_index = frame_index
+        ? std::optional<std::size_t>{
+              sample_reader.presentation_sample_index(*frame_index)}
+        : std::nullopt;
+    const auto sample_count = target_sample_index
+        ? *target_sample_index + 1
+        : sample_reader.sample_count();
     const auto& configuration = sample_reader.configuration();
     std::vector<pygorvid::SpsInfo> sequence_parameter_sets;
     std::vector<pygorvid::PpsInfo> picture_parameter_sets;
@@ -147,7 +158,8 @@ void extract_frame(const std::string& input_path, std::size_t frame_index,
     std::vector<std::int64_t> reference_picture_order;
     std::optional<std::uint32_t> maximum_long_term_frame_idx;
     std::optional<pygorvid::Yuv420Frame> decoded_frame;
-    for (std::size_t sample_index = 0; sample_index <= target_sample_index;
+    std::size_t decoded_count = 0;
+    for (std::size_t sample_index = 0; sample_index < sample_count;
          ++sample_index) {
         const auto sample = sample_reader.sample_at(sample_index);
         const auto nals = pygorvid::split_h264_sample_nals(
@@ -196,7 +208,7 @@ void extract_frame(const std::string& input_path, std::size_t frame_index,
             slices.push_back(nal);
         }
         if (slices.empty()) {
-            if (sample_index == target_sample_index) {
+            if (target_sample_index && sample_index == *target_sample_index) {
                 throw std::runtime_error(
                     "requested MP4 sample contains no H.264 picture");
             }
@@ -446,6 +458,7 @@ void extract_frame(const std::string& input_path, std::size_t frame_index,
             slices, selected_sps_info, selected_pps_info, reference_list_l0,
             reference_list_l1);
         decoded_frame = decoded;
+        ++decoded_count;
         if (current_picture_is_reference) {
             auto stored_frame_num = current_frame_num;
             std::optional<std::uint32_t> current_long_term_frame_idx =
@@ -643,7 +656,10 @@ void extract_frame(const std::string& input_path, std::size_t frame_index,
     if (!decoded_frame) {
         throw std::runtime_error("no supported H.264 picture was decoded");
     }
-    save_image(output_path, *decoded_frame);
+    if (output_path) {
+        save_image(*output_path, *decoded_frame);
+    }
+    return decoded_count;
 }
 
 Options parse_options(const std::vector<std::string>& args) {
@@ -685,6 +701,8 @@ Options parse_options(const std::vector<std::string>& args) {
             options.output_prefix = args[index];
         } else if (arg.rfind("--prefix=", 0) == 0) {
             options.output_prefix = arg.substr(9);
+        } else if (arg == "--readall") {
+            options.read_all = true;
         } else if (!arg.empty() && arg.front() == '-') {
             throw std::invalid_argument("unknown option: " + arg);
         } else {
@@ -757,8 +775,9 @@ int run(const std::vector<std::string>& args) {
         return 2;
     }
     if (options.generate_path) {
-        if (!options.files.empty() || options.extract_frame || options.output_path) {
-            std::cerr << "--generate cannot be combined with inputs, --extractframe or --output\n";
+        if (!options.files.empty() || options.extract_frame || options.output_path ||
+            options.read_all) {
+            std::cerr << "--generate cannot be combined with inputs, --readall, --extractframe or --output\n";
             return 2;
         }
         auto extension = std::filesystem::path(*options.generate_path).extension().string();
@@ -784,6 +803,11 @@ int run(const std::vector<std::string>& args) {
         usage();
         return 2;
     }
+    if (options.read_all && (options.extract_frame || options.output_path)) {
+        std::cerr << "--readall cannot be used with --extractframe or --output\n";
+        usage();
+        return 2;
+    }
     if (options.extract_frame.has_value() != options.output_path.has_value()) {
         std::cerr << "--extractframe and --output must be used together\n";
         usage();
@@ -798,8 +822,8 @@ int run(const std::vector<std::string>& args) {
         const auto output_path = prefixed_output_path(
             *options.output_path, options.output_prefix);
         try {
-            extract_frame(options.files[0], *options.extract_frame,
-                          output_path);
+            (void)decode_video(options.files[0], options.extract_frame,
+                               output_path);
             std::cout << options.files[0] << ": wrote frame "
                       << *options.extract_frame << " to "
                       << output_path << '\n';
@@ -811,6 +835,16 @@ int run(const std::vector<std::string>& args) {
     }
     int status = 0;
     for (const auto& path : options.files) {
+        if (options.read_all) {
+            try {
+                const auto decoded_count = decode_video(path);
+                std::cout << path << ": read " << decoded_count << " frames\n";
+            } catch (const std::exception& error) {
+                std::cerr << path << ": " << error.what() << '\n';
+                status = 1;
+            }
+            continue;
+        }
         try {
             const auto format = pygorvid::probe_file(path);
             if (format != "mp4") {
