@@ -63,6 +63,14 @@ class H264Encoder:
         return writer.nal(0x68)
 
     def encode_grey_frame(self, idr_pic_id: int = 0) -> bytes:
+        return self._encode_pcm_frame(idr_pic_id, False)
+
+    def encode_generated_frame(self, frame_index: int) -> bytes:
+        if not 0 <= frame_index <= 65535:
+            raise ValueError("H.264 IDR picture ID must be between 0 and 65535")
+        return self._encode_pcm_frame(frame_index, frame_index == 1)
+
+    def _encode_pcm_frame(self, idr_pic_id: int, emulation_prevention_test: bool) -> bytes:
         if not 0 <= idr_pic_id <= 65535:
             raise ValueError("H.264 IDR picture ID must be between 0 and 65535")
         writer = _BitWriter()
@@ -73,10 +81,15 @@ class H264Encoder:
         writer.bits(0, 2)
         writer.ue(0)
         writer.ue(1)
-        for _ in range(16):
+        for macroblock in range(16):
             writer.ue(25)
             writer.align()
-            writer.data.extend(bytes([128]) * 384)
+            if emulation_prevention_test and macroblock == 0:
+                writer.data.extend((0, 0, 1))
+                writer.data.extend(bytes([128]) * 253)
+            else:
+                writer.data.extend(bytes([128]) * 256)
+            writer.data.extend(bytes([128]) * 128)
             writer.bit_count += 384 * 8
         nal = writer.nal(0x65)
         return len(nal).to_bytes(4, "big") + nal

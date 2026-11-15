@@ -20,7 +20,7 @@ container timing, and decoder state remain possible causes.
 | Frame | First feature exercised | Planned stimulus and isolation |
 | ---: | --- | --- |
 | 1 | Stream bootstrap; IDR I-slice with I_PCM macroblocks | Keep the existing simple flat 64x64 8-bit 4:2:0 picture. Exercise SPS/PPS activation, one access unit and slice, IDR reset, NAL/RBSP framing, PCM alignment, and trailing bits. This is the known-good anchor, not a claim that all these prerequisites can be diagnosed independently. |
-| 2 | Emulation-prevention insertion and removal | Use another I_PCM IDR picture with sample bytes that would otherwise form forbidden start-code patterns in the NAL payload. Keep slice syntax and all other coding tools unchanged; verify that decoding restores the exact samples. |
+| 2 | Emulation-prevention insertion and removal | Use another I_PCM IDR picture with its first three luma samples set to `00 00 01`; keep every other luma/chroma sample at 128 and all slice syntax unchanged. Its EBSP must contain `00 00 03 01`, and decoding must restore the exact `00 00 01` samples. |
 | 3 | Non-IDR I picture and reference-picture continuity | Encode I_PCM without resetting the decoded-picture buffer. Advance `frame_num` and POC, and mark the picture as a reference. Keep pixels flat so only picture/reference state changes. |
 | 4 | Intra_16x16 DC prediction | Use I_16x16 with zero residual and a flat but different luma level; exercise the DC path and unavailable top/left neighbors. |
 | 5 | Intra_16x16 directional and chroma prediction | Use vertical, horizontal, and plane luma modes, plus the 4:2:0 chroma DC/horizontal/vertical/plane modes. Place patterns that distinguish each mode. |
@@ -79,9 +79,13 @@ Appendix for the profile-transition and broad-playability gate.
 
 ### A. Scope and stream envelope
 
-The initial `--generate` output is documented in the root [README](./README.md):
-25 identical 64x64 frames at 25 fps, with 48 kHz stereo silence, in an MP4.
-The current video is Constrained Baseline, IDR I_PCM. The plan changes the
+The current `--generate` output is documented in the root [README](./README.md):
+60 64x64 frames at 60 fps, with 48 kHz stereo silence, in an MP4. Frame 1 is
+the flat-gray I_PCM anchor. Frame 2 has luma samples `00 00 01` at the
+upper-left and all its other samples remain 128 to force emulation prevention
+without changing the coding path. Frames 3–60 are gray padding; the padded
+duration is at least one second. All current pictures are Constrained
+Baseline IDR I_PCM. The plan changes the
 eventual core video sequence to Progressive High, 8-bit 4:2:0, progressive,
 so CAVLC, CABAC, B pictures, and 8x8 transform tools can be introduced
 without changing profile halfway through the core sequence. Frame 1 remains
@@ -89,8 +93,9 @@ an IDR/I_PCM anchor. The required Progressive High constraints are in H.264
 Annex A, clauses A.2.4 and A.2.4.1.
 
 The generated duration may grow as feature frames are added; keep the existing
-dimensions, frame rate, silent audio track, and MP4 behavior unless a later
-plan revision explicitly changes them. Frame numbering in this table is the
+dimensions, 60 fps frame rate, silent audio track, and MP4 behavior unless a
+later plan revision explicitly changes them. Keep at least 60 frames by padding
+with gray pictures after the implemented feature frames. Frame numbering in this table is the
 video presentation order. B pictures make coded/decode order different, so
 test output must report the planned frame ID, zero-based presentation index,
 and decode-order index where available. Feature-target pictures should have

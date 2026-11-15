@@ -60,7 +60,7 @@ endif()
 execute_process(
     COMMAND "${VIDPROBE}" --prefix jc_ --readall --input "${generated}"
     RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
-if(NOT status EQUAL 0 OR NOT output MATCHES "read 25 frames")
+if(NOT status EQUAL 0 OR NOT output MATCHES "read 60 frames")
     message(FATAL_ERROR "Readall failed: ${error}${output}")
 endif()
 

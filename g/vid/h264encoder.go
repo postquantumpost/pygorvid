@@ -89,6 +89,14 @@ func (e H264Encoder) PictureParameterSet() []byte {
 }
 
 func (e H264Encoder) EncodeGreyFrame(idrPicID uint16) []byte {
+	return e.encodePCMFrame(idrPicID, false)
+}
+
+func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
+	return e.encodePCMFrame(frameIndex, frameIndex == 1)
+}
+
+func (e H264Encoder) encodePCMFrame(idrPicID uint16, emulationPreventionTest bool) []byte {
 	w := h264BitWriter{}
 	for _, value := range []uint32{0, 2, 0} {
 		w.ue(value)
@@ -101,7 +109,17 @@ func (e H264Encoder) EncodeGreyFrame(idrPicID uint16) []byte {
 	for mb := 0; mb < 16; mb++ {
 		w.ue(25)
 		w.align()
-		for i := 0; i < 384; i++ {
+		if emulationPreventionTest && mb == 0 {
+			w.data = append(w.data, 0, 0, 1)
+			for i := 0; i < 253; i++ {
+				w.data = append(w.data, 128)
+			}
+		} else {
+			for i := 0; i < 256; i++ {
+				w.data = append(w.data, 128)
+			}
+		}
+		for i := 0; i < 128; i++ {
 			w.data = append(w.data, 128)
 		}
 		w.bitCount += 384 * 8

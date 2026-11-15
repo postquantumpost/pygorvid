@@ -33,7 +33,7 @@ func run(args []string) int {
 	flags := flag.NewFlagSet("vidprobe", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	input := flags.String("input", "", "first input video file")
-	generate := flags.String("generate", "", "generate one second of 64x64 grey video with stereo silence (.mp4)")
+	generate := flags.String("generate", "", "generate 64x64 H.264 feature-test video with stereo silence (.mp4)")
 	output := flags.String("output", "", "output image path (.png or .jpg)")
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
 	readAll := flags.Bool("readall", false, "decode all video frames without writing images")
@@ -87,7 +87,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", outputPath, err)
 			return 1
 		}
-		fmt.Printf("%s: generated one second of 64x64 grey video with stereo silence\n", outputPath)
+		fmt.Printf("%s: generated one second of 64x64 H.264 feature-test video with stereo silence\n", outputPath)
 		return 0
 	}
 	if len(paths) == 0 {

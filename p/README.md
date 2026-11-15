@@ -19,9 +19,10 @@ The `vidprobe` command is installed alongside the library:
 vidprobe --generate grey.mp4
 ```
 
-This natively writes exactly one second of 64x64 grey H.264 video (25 fps,
-Constrained Baseline Level 2.0 I_PCM IDR pictures), with silent stereo 48 kHz
-16-bit PCM audio (`sowt`, requiring a PCM-capable MP4 player).
+This natively writes exactly one second of 64x64 H.264 video (60 fps,
+Constrained Baseline Level 2.0 I_PCM IDR pictures), with frame 2 testing
+emulation prevention and gray padding through frame 60. It includes silent
+stereo 48 kHz 16-bit PCM audio (`sowt`, requiring a PCM-capable MP4 player).
 The initial `H264Encoder` and `Mp4Writer` objects are also exported:
 
 ```python

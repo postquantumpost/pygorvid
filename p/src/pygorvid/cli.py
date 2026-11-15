@@ -105,7 +105,7 @@ def _read_all_frames(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="vidprobe")
     parser.add_argument("--input", help="first input video file")
-    parser.add_argument("--generate", help="generate one second of 64x64 grey video with stereo silence (.mp4)")
+    parser.add_argument("--generate", help="generate 64x64 H.264 feature-test video with stereo silence (.mp4)")
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
     parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
@@ -141,7 +141,7 @@ def main(argv=None) -> int:
         except (OSError, ValueError) as error:
             print(f"{output}: {error}", file=sys.stderr)
             return 1
-        print(f"{output}: generated one second of 64x64 grey video with stereo silence")
+        print(f"{output}: generated one second of 64x64 H.264 feature-test video with stereo silence")
         return 0
     if not files:
         parser.print_usage(sys.stderr)

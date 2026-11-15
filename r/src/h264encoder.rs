@@ -86,6 +86,14 @@ impl H264Encoder {
     }
 
     pub fn encode_grey_frame(&self, idr_pic_id: u16) -> Vec<u8> {
+        self.encode_pcm_frame(idr_pic_id, false)
+    }
+
+    pub fn encode_generated_frame(&self, frame_index: u16) -> Vec<u8> {
+        self.encode_pcm_frame(frame_index, frame_index == 1)
+    }
+
+    fn encode_pcm_frame(&self, idr_pic_id: u16, emulation_prevention_test: bool) -> Vec<u8> {
         let mut writer = BitWriter::default();
         for value in [0, 2, 0] {
             writer.ue(value);
@@ -95,10 +103,16 @@ impl H264Encoder {
         writer.bits(0, 2);
         writer.ue(0);
         writer.ue(1);
-        for _ in 0..16 {
+        for macroblock in 0..16 {
             writer.ue(25);
             writer.align();
-            writer.data.extend_from_slice(&[128; 384]);
+            if emulation_prevention_test && macroblock == 0 {
+                writer.data.extend_from_slice(&[0, 0, 1]);
+                writer.data.extend_from_slice(&[128; 253]);
+            } else {
+                writer.data.extend_from_slice(&[128; 256]);
+            }
+            writer.data.extend_from_slice(&[128; 128]);
             writer.bit_count += 384 * 8;
         }
         let nal = writer.nal(0x65);

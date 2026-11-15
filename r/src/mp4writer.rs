@@ -1,6 +1,11 @@
 use crate::H264Encoder;
 use std::io;
 
+const VIDEO_FRAME_RATE: u32 = 60;
+const MIN_VIDEO_FRAME_COUNT: u32 = VIDEO_FRAME_RATE;
+const GENERATED_FEATURE_FRAME_COUNT: u32 = 2;
+const AUDIO_SAMPLE_RATE: u32 = 48_000;
+
 #[derive(Clone, Debug, Default)]
 pub struct Mp4Metadata {
     pub title: String,
@@ -422,6 +427,7 @@ fn track(
     sizes: &[u8],
     count: u32,
     timescale: u32,
+    duration_ms: u32,
     offset: u32,
     video: bool,
 ) -> Vec<u8> {
@@ -431,7 +437,7 @@ fn track(
         b"tkhd",
         7,
         &[
-            &u32s(&[0, 0, id, 0, 1000]),
+            &u32s(&[0, 0, id, 0, duration_ms]),
             &[0; 8],
             &u16s(&[0, 0, volume, 0]),
             &matrix(),
@@ -488,7 +494,7 @@ fn track(
     )
 }
 
-/// Initial subset: one second of 64x64 H.264 and stereo PCM silence.
+/// Write generated H.264 frames and synchronized stereo PCM silence.
 #[derive(Default)]
 pub struct Mp4Writer;
 
@@ -510,13 +516,20 @@ impl Mp4Writer {
         let compatibility = compatibility_metadata_box(metadata)?;
         let metadata = metadata_box(metadata)?;
         let mut video = Vec::new();
-        let mut sizes = vec![0, 25];
-        for index in 0..25 {
-            let sample = encoder.encode_grey_frame(index);
+        let frame_count = MIN_VIDEO_FRAME_COUNT.max(GENERATED_FEATURE_FRAME_COUNT);
+        let mut sizes = vec![0, frame_count];
+        for index in 0..frame_count {
+            let sample = encoder.encode_generated_frame(index as u16);
             sizes.push(sample.len() as u32);
             video.extend(sample);
         }
-        let audio = vec![0; 48000 * 2 * 2];
+        let audio_sample_count =
+            AUDIO_SAMPLE_RATE.max(frame_count * AUDIO_SAMPLE_RATE / VIDEO_FRAME_RATE);
+        let audio = vec![0; audio_sample_count as usize * 2 * 2];
+        let video_duration_ms = (frame_count * 1000 + VIDEO_FRAME_RATE - 1) / VIDEO_FRAME_RATE;
+        let audio_duration_ms =
+            (audio_sample_count * 1000 + AUDIO_SAMPLE_RATE - 1) / AUDIO_SAMPLE_RATE;
+        let movie_duration_ms = video_duration_ms.max(audio_duration_ms);
         let sps = encoder.sequence_parameter_set();
         let pps = encoder.picture_parameter_set();
         let avcc = mp4_box(
@@ -551,7 +564,7 @@ impl Mp4Writer {
                 &u16s(&[1]),
                 &[0; 8],
                 &u16s(&[2, 16, 0, 0]),
-                &u32s(&[48000 << 16]),
+                &u32s(&[AUDIO_SAMPLE_RATE << 16]),
             ],
         );
         let ftyp = mp4_box(b"ftyp", &[b"isom", &u32s(&[0x200]), b"isomiso2avc1qt  "]);
@@ -560,17 +573,19 @@ impl Mp4Writer {
             1,
             &visual,
             &full_box(b"stsz", 0, &[&u32s(&sizes)]),
-            25,
-            25,
+            frame_count,
+            VIDEO_FRAME_RATE,
+            video_duration_ms,
             offset,
             true,
         );
         let audio_track = track(
             2,
             &sound,
-            &full_box(b"stsz", 0, &[&u32s(&[4, 48000])]),
-            48000,
-            48000,
+            &full_box(b"stsz", 0, &[&u32s(&[4, audio_sample_count])]),
+            audio_sample_count,
+            AUDIO_SAMPLE_RATE,
+            audio_duration_ms,
             offset + video.len() as u32,
             false,
         );
@@ -578,7 +593,7 @@ impl Mp4Writer {
             b"mvhd",
             0,
             &[
-                &u32s(&[0, 0, 1000, 1000, 0x10000]),
+                &u32s(&[0, 0, 1000, movie_duration_ms, 0x10000]),
                 &u16s(&[0x100, 0]),
                 &[0; 8],
                 &matrix(),

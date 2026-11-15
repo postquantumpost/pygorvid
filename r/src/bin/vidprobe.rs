@@ -77,7 +77,7 @@ fn run(args: Vec<String>) -> i32 {
             eprintln!("{output_path}: {error}");
             return 1;
         }
-        println!("{output_path}: generated one second of 64x64 grey video with stereo silence");
+        println!("{output_path}: generated one second of 64x64 H.264 feature-test video with stereo silence");
         return 0;
     }
     if files.is_empty() {
@@ -401,13 +401,28 @@ mod tests {
                 .unwrap()
         );
         let reader = pygorvid::VideoSampleReader::open(output).unwrap();
-        assert_eq!(reader.sample_count(), 25);
+        assert_eq!(reader.sample_count(), 60);
+        let mut reader = reader;
+        for index in [0, 1, 2, 59] {
+            let sample = reader.sample_at(index).unwrap();
+            assert_eq!(sample.dts_ticks, index as i64);
+            assert_eq!(sample.pts_ticks, index as i64);
+            assert_eq!(sample.duration_ticks, 1);
+            assert!(sample.is_sync);
+            if index == 1 {
+                assert!(sample.data.windows(4).any(|bytes| bytes == [0, 0, 3, 1]));
+            }
+        }
         let mut decoder = pygorvid::H264Decoder::new(reader);
         decoder.set_threads(1);
-        for index in [0, 24] {
+        for index in [0, 1, 2, 59] {
             let frame = decoder.decode_frame(index).unwrap();
             assert_eq!((frame.width, frame.height), (64, 64));
-            assert_eq!(frame.y, vec![128; 4096]);
+            let mut expected_luma = vec![128; 4096];
+            if index == 1 {
+                expected_luma[..3].copy_from_slice(&[0, 0, 1]);
+            }
+            assert_eq!(frame.y, expected_luma);
             assert_eq!(frame.u, vec![128; 1024]);
             assert_eq!(frame.v, vec![128; 1024]);
         }

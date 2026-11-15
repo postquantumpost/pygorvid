@@ -87,6 +87,15 @@ std::vector<std::uint8_t> H264Encoder::picture_parameter_set() const {
 }
 
 std::vector<std::uint8_t> H264Encoder::encode_grey_frame(std::uint16_t idr_pic_id) const {
+    return encode_pcm_frame(idr_pic_id, false);
+}
+
+std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t frame_index) const {
+    return encode_pcm_frame(frame_index, frame_index == 1);
+}
+
+std::vector<std::uint8_t> H264Encoder::encode_pcm_frame(
+    std::uint16_t idr_pic_id, bool emulation_prevention_test) const {
     BitWriter writer;
     for (const auto value : {0u, 2u, 0u}) {
         writer.ue(value);
@@ -99,7 +108,13 @@ std::vector<std::uint8_t> H264Encoder::encode_grey_frame(std::uint16_t idr_pic_i
     for (int macroblock = 0; macroblock < 16; ++macroblock) {
         writer.ue(25);
         writer.align();
-        writer.data.insert(writer.data.end(), 384, 128);
+        if (emulation_prevention_test && macroblock == 0) {
+            writer.data.insert(writer.data.end(), {0, 0, 1});
+            writer.data.insert(writer.data.end(), 253, 128);
+        } else {
+            writer.data.insert(writer.data.end(), 256, 128);
+        }
+        writer.data.insert(writer.data.end(), 128, 128);
         writer.bit_count += 384 * 8;
     }
     const auto nal = writer.nal(0x65);

@@ -273,7 +273,7 @@ def main() -> None:
             assert video["codec_type"] == "video" and video["codec_name"] == "h264"
             assert video["profile"] == "Constrained Baseline" and video["level"] == 20
             assert (video["width"], video["height"]) == (64, 64)
-            assert video["r_frame_rate"] == "25/1" and video["nb_frames"] == "25"
+            assert video["r_frame_rate"] == "60/1" and video["nb_frames"] == "60"
             assert video["pix_fmt"] == "yuv420p"
             assert audio["codec_type"] == "audio" and audio["codec_name"] == "pcm_s16le"
             assert audio["channels"] == 2 and audio["sample_rate"] == "48000"
@@ -286,7 +286,11 @@ def main() -> None:
                 ffmpeg, "-v", "error", "-xerror", "-i", str(output), "-map", "0:v:0",
                 "-pix_fmt", "yuv420p", "-f", "rawvideo", "-",
             ])
-            assert decoded == bytes([128]) * (25 * 64 * 64 * 3 // 2)
+            frame_size = 64 * 64 * 3 // 2
+            expected_video = bytearray(bytes([128]) * (60 * frame_size))
+            expected_video[frame_size:frame_size + 3] = bytes((0, 0, 1))
+            assert decoded == expected_video
+            assert b"\x00\x00\x03\x01" in payload
             silence = run([
                 ffmpeg, "-v", "error", "-xerror", "-i", str(output), "-map", "0:a:0",
                 "-acodec", "pcm_s16le", "-f", "s16le", "-",
@@ -310,7 +314,7 @@ def main() -> None:
             run([executable, "--generate", str(directory / "missing" / "video.mp4")], 1)
             assert output.read_bytes() == payload
             suffix = ", VLC metadata" if options.check_vlc else ""
-            print(f"{executable}: UTF-8, VLC and Windows Xtra metadata, media, silence, CLI errors and output parity{suffix} passed")
+            print(f"{executable}: metadata, 60 fps feature frames, gray padding, silence, CLI errors and output parity{suffix} passed")
         assert len(list(directory.iterdir())) == 2 * len(options.commands), "temporary files leaked"
 
 

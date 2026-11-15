@@ -11,6 +11,10 @@ namespace pygorvid {
 namespace {
 
 using Bytes = std::vector<std::uint8_t>;
+constexpr std::uint32_t kVideoFrameRate = 60;
+constexpr std::uint32_t kMinimumVideoFrameCount = kVideoFrameRate;
+constexpr std::uint32_t kGeneratedFeatureFrameCount = 2;
+constexpr std::uint32_t kAudioSampleRate = 48000;
 
 Bytes u32s(std::initializer_list<std::uint32_t> values) {
     Bytes result;
@@ -290,11 +294,11 @@ Bytes compatibility_metadata_box(const Mp4Metadata* metadata) {
 
 Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
             std::uint32_t count, std::uint32_t timescale,
-            std::uint32_t offset, bool video) {
+            std::uint32_t duration_ms, std::uint32_t offset, bool video) {
     const std::uint32_t dimension = video ? 64u << 16 : 0;
     const std::uint16_t volume = video ? 0 : 0x100;
     const auto tkhd = full_box("tkhd", 7, join({
-        u32s({0, 0, id, 0, 1000}), Bytes(8), u16s({0, 0, volume, 0}),
+        u32s({0, 0, id, 0, duration_ms}), Bytes(8), u16s({0, 0, volume, 0}),
         matrix(), u32s({dimension, dimension}),
     }));
     const auto mdhd = full_box("mdhd", 0, join({
@@ -324,14 +328,22 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
     const auto metadata_bytes = metadata_box(metadata);
     const auto compatibility_bytes = compatibility_metadata_box(metadata);
     Bytes video;
-    auto sizes = u32s({0, 25});
-    for (std::uint16_t index = 0; index < 25; ++index) {
-        const auto sample = encoder.encode_grey_frame(index);
+    const auto frame_count = std::max(kMinimumVideoFrameCount, kGeneratedFeatureFrameCount);
+    auto sizes = u32s({0, frame_count});
+    for (std::uint16_t index = 0; index < frame_count; ++index) {
+        const auto sample = encoder.encode_generated_frame(index);
         const auto size = u32s({static_cast<std::uint32_t>(sample.size())});
         sizes.insert(sizes.end(), size.begin(), size.end());
         video.insert(video.end(), sample.begin(), sample.end());
     }
-    const Bytes audio(48000 * 2 * 2);
+    const auto audio_sample_count = std::max(
+        kAudioSampleRate, frame_count * kAudioSampleRate / kVideoFrameRate);
+    const Bytes audio(audio_sample_count * 2 * 2);
+    const auto video_duration_ms =
+        (frame_count * 1000 + kVideoFrameRate - 1) / kVideoFrameRate;
+    const auto audio_duration_ms =
+        (audio_sample_count * 1000 + kAudioSampleRate - 1) / kAudioSampleRate;
+    const auto movie_duration_ms = std::max(video_duration_ms, audio_duration_ms);
     const auto sps = encoder.sequence_parameter_set();
     const auto pps = encoder.picture_parameter_set();
     const auto avcc = box("avcC", {
@@ -344,15 +356,19 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
         u32s({0x480000, 0x480000, 0}), u16s({1}), Bytes(32), u16s({24, 0xffff}), avcc,
     });
     const auto sound = box("sowt", {
-        Bytes(6), u16s({1}), Bytes(8), u16s({2, 16, 0, 0}), u32s({48000u << 16}),
+        Bytes(6), u16s({1}), Bytes(8), u16s({2, 16, 0, 0}), u32s({kAudioSampleRate << 16}),
     });
     const auto ftyp = box("ftyp", {text("isom"), u32s({0x200}), text("isomiso2avc1qt  ")});
     const auto offset = static_cast<std::uint32_t>(ftyp.size()) + 8;
-    const auto video_track = track(1, visual, full_box("stsz", 0, sizes), 25, 25, offset, true);
-    const auto audio_track = track(2, sound, full_box("stsz", 0, u32s({4, 48000})),
-        48000, 48000, offset + static_cast<std::uint32_t>(video.size()), false);
+    const auto video_track = track(
+        1, visual, full_box("stsz", 0, sizes), frame_count, kVideoFrameRate,
+        video_duration_ms, offset, true);
+    const auto audio_track = track(
+        2, sound, full_box("stsz", 0, u32s({4, audio_sample_count})),
+        audio_sample_count, kAudioSampleRate, audio_duration_ms,
+        offset + static_cast<std::uint32_t>(video.size()), false);
     const auto mvhd = full_box("mvhd", 0, join({
-        u32s({0, 0, 1000, 1000, 0x10000}), u16s({0x100, 0}), Bytes(8), matrix(),
+        u32s({0, 0, 1000, movie_duration_ms, 0x10000}), u16s({0x100, 0}), Bytes(8), matrix(),
         Bytes(24), u32s({3}),
     }));
     return join({ftyp, box("mdat", {video, audio}),

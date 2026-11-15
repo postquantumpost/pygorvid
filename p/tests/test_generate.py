@@ -7,7 +7,7 @@ from pygorvid.cli import _generation_metadata, main
 from pygorvid.mp4writer import _metadata_box
 
 
-def test_generate_native_grey_video(tmp_path, monkeypatch):
+def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
     def reject_subprocess(*args, **kwargs):
         raise AssertionError("generation invoked a subprocess")
 
@@ -18,15 +18,20 @@ def test_generate_native_grey_video(tmp_path, monkeypatch):
     assert output.read_bytes() == Mp4Writer().encode(H264Encoder(), _generation_metadata())
     reader = VideoSampleReader(output)
     try:
-        assert reader.sample_count == 25
+        assert reader.sample_count == 60
         decoder = H264Decoder(reader, threads=1)
-        for index in (0, 24):
+        for index in (0, 1, 2, 59):
             sample = reader.sample_at(index)
             assert (sample.dts_ticks, sample.pts_ticks, sample.duration_ticks) == (index, index, 1)
             assert sample.is_sync
+            if index == 1:
+                assert b"\x00\x00\x03\x01" in sample.data
             frame = decoder.decode_frame(index)
             assert (frame.width, frame.height) == (64, 64)
-            assert bytes(frame.y) == bytes([128]) * 4096
+            expected_luma = bytearray([128] * 4096)
+            if index == 1:
+                expected_luma[:3] = bytes((0, 0, 1))
+            assert bytes(frame.y) == expected_luma
             assert bytes(frame.u) == bytes(frame.v) == bytes([128]) * 1024
     finally:
         reader.close()
@@ -75,6 +80,11 @@ def test_generate_prefix(tmp_path, capsys, prefix):
 def test_encoder_rejects_out_of_range_picture_id(picture_id):
     with pytest.raises(ValueError, match="IDR picture ID"):
         H264Encoder().encode_grey_frame(picture_id)
+
+@pytest.mark.parametrize("frame_index", (-1, 65536))
+def test_generated_frame_rejects_out_of_range_picture_id(frame_index):
+    with pytest.raises(ValueError, match="IDR picture ID"):
+        H264Encoder().encode_generated_frame(frame_index)
 
 
 def test_optional_metadata_and_utf8():

@@ -33,22 +33,30 @@ func TestGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	if reader.SampleCount() != 25 {
+	if reader.SampleCount() != 60 {
 		t.Fatalf("sample count = %d", reader.SampleCount())
 	}
 	decoder := vid.NewH264Decoder(reader)
 	decoder.SetThreads(1)
-	for _, index := range []uint64{0, 24} {
+	for _, index := range []uint64{0, 1, 2, 59} {
 		sample, err := reader.SampleAt(index)
-		if err != nil || !sample.IsSync || sample.DurationTicks != 1 {
+		if err != nil || sample.DTSTicks != int64(index) || sample.PTSTicks != int64(index) ||
+			!sample.IsSync || sample.DurationTicks != 1 {
 			t.Fatalf("sample %d: %+v, %v", index, sample, err)
+		}
+		if index == 1 && !bytes.Contains(sample.Data, []byte{0, 0, 3, 1}) {
+			t.Fatal("frame 2 does not contain the emulation-prevention byte")
 		}
 		frame, err := decoder.DecodeFrame(index)
 		if err != nil {
 			t.Fatal(err)
 		}
+		expectedLuma := bytes.Repeat([]byte{128}, 4096)
+		if index == 1 {
+			copy(expectedLuma, []byte{0, 0, 1})
+		}
 		if frame.Width != 64 || frame.Height != 64 ||
-			!bytes.Equal(frame.Y, bytes.Repeat([]byte{128}, 4096)) ||
+			!bytes.Equal(frame.Y, expectedLuma) ||
 			!bytes.Equal(frame.U, bytes.Repeat([]byte{128}, 1024)) ||
 			!bytes.Equal(frame.V, bytes.Repeat([]byte{128}, 1024)) {
 			t.Fatal("generated frame is not 64x64 grey")

@@ -4,6 +4,11 @@ from typing import Optional
 
 from .h264encoder import H264Encoder
 
+_VIDEO_FRAME_RATE = 60
+_MIN_VIDEO_FRAME_COUNT = _VIDEO_FRAME_RATE
+_GENERATED_FEATURE_FRAME_COUNT = 2
+_AUDIO_SAMPLE_RATE = 48000
+
 
 @dataclass
 class Mp4Metadata:
@@ -153,9 +158,10 @@ def _matrix() -> bytes:
 
 
 def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
-           sample_count: int, timescale: int, chunk_offset: int, video: bool) -> bytes:
+           sample_count: int, timescale: int, duration_ms: int,
+           chunk_offset: int, video: bool) -> bytes:
     tkhd = _full_box(
-        b"tkhd", _u32(0, 0, track_id, 0, 1000), bytes(8),
+        b"tkhd", _u32(0, 0, track_id, 0, duration_ms), bytes(8),
         _u16(0, 0, 0 if video else 0x100, 0), _matrix(),
         _u32(64 << 16 if video else 0, 64 << 16 if video else 0), flags=7,
     )
@@ -179,15 +185,20 @@ def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
 
 
 class Mp4Writer:
-    """Initial subset: one second of 64x64 H.264 and stereo PCM silence."""
+    """Write generated H.264 frames and synchronized stereo PCM silence."""
 
     def encode(self, encoder: H264Encoder, metadata: Optional[Mp4Metadata] = None) -> bytes:
         metadata_box = _metadata_box(metadata)
         compatibility_box = _compatibility_metadata_box(metadata)
-        samples = [encoder.encode_grey_frame(index) for index in range(25)]
+        frame_count = max(_MIN_VIDEO_FRAME_COUNT, _GENERATED_FEATURE_FRAME_COUNT)
+        samples = [encoder.encode_generated_frame(index) for index in range(frame_count)]
         # IDR IDs can change the sample size, so retain individual sizes.
         video = b"".join(samples)
-        audio = bytes(48000 * 2 * 2)
+        audio_sample_count = max(_AUDIO_SAMPLE_RATE, frame_count * _AUDIO_SAMPLE_RATE // _VIDEO_FRAME_RATE)
+        audio = bytes(audio_sample_count * 2 * 2)
+        video_duration_ms = (frame_count * 1000 + _VIDEO_FRAME_RATE - 1) // _VIDEO_FRAME_RATE
+        audio_duration_ms = (audio_sample_count * 1000 + _AUDIO_SAMPLE_RATE - 1) // _AUDIO_SAMPLE_RATE
+        movie_duration_ms = max(video_duration_ms, audio_duration_ms)
         sps = encoder.sequence_parameter_set()
         pps = encoder.picture_parameter_set()
         avcc = _box(
@@ -199,16 +210,22 @@ class Mp4Writer:
             _u32(0x480000, 0x480000, 0), _u16(1), bytes(32), _u16(24, 0xFFFF), avcc,
         )
         sound = _box(
-            b"sowt", bytes(6), _u16(1), bytes(8), _u16(2, 16, 0, 0), _u32(48000 << 16),
+            b"sowt", bytes(6), _u16(1), bytes(8), _u16(2, 16, 0, 0),
+            _u32(_AUDIO_SAMPLE_RATE << 16),
         )
         ftyp = _box(b"ftyp", b"isom", _u32(0x200), b"isomiso2avc1qt  ")
         video_offset = len(ftyp) + 8
-        sizes = _full_box(b"stsz", _u32(0, 25), _u32(*(len(sample) for sample in samples)))
-        video_track = _track(1, visual, sizes, 25, 25, video_offset, True)
-        audio_sizes = _full_box(b"stsz", _u32(4, 48000))
-        audio_track = _track(2, sound, audio_sizes, 48000, 48000, video_offset + len(video), False)
+        sizes = _full_box(b"stsz", _u32(0, frame_count), _u32(*(len(sample) for sample in samples)))
+        video_track = _track(
+            1, visual, sizes, frame_count, _VIDEO_FRAME_RATE, video_duration_ms, video_offset, True,
+        )
+        audio_sizes = _full_box(b"stsz", _u32(4, audio_sample_count))
+        audio_track = _track(
+            2, sound, audio_sizes, audio_sample_count, _AUDIO_SAMPLE_RATE,
+            audio_duration_ms, video_offset + len(video), False,
+        )
         mvhd = _full_box(
-            b"mvhd", _u32(0, 0, 1000, 1000, 0x10000), _u16(0x100, 0),
+            b"mvhd", _u32(0, 0, 1000, movie_duration_ms, 0x10000), _u16(0x100, 0),
             bytes(8), _matrix(), bytes(24), _u32(3),
         )
         return ftyp + _box(b"mdat", video, audio) + _box(

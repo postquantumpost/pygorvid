@@ -792,7 +792,7 @@ int run(const std::vector<std::string>& args) {
         try {
             generate_video(output_path);
             std::cout << output_path
-                      << ": generated one second of 64x64 grey video with stereo silence\n";
+                      << ": generated one second of 64x64 H.264 feature-test video with stereo silence\n";
             return 0;
         } catch (const std::exception& error) {
             std::cerr << output_path << ": " << error.what() << '\n';

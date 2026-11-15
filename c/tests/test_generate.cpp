@@ -20,6 +20,16 @@ int main() {
         assert(frame.chroma_u == std::vector<std::uint8_t>(1024, 128));
         assert(frame.chroma_v == std::vector<std::uint8_t>(1024, 128));
     }
+    const auto feature_sample = encoder.encode_generated_frame(1);
+    const std::vector<std::uint8_t> prevention_sequence{0, 0, 3, 1};
+    assert(std::search(feature_sample.begin() + 4, feature_sample.end(),
+        prevention_sequence.begin(), prevention_sequence.end()) != feature_sample.end());
+    const auto feature_frame = pygorvid::decode_idr_i_pcm_sample(feature_sample, 4, sps, pps);
+    assert(feature_frame.luma[0] == 0 && feature_frame.luma[1] == 0 && feature_frame.luma[2] == 1);
+    assert(std::all_of(feature_frame.luma.begin() + 3, feature_frame.luma.end(),
+        [](std::uint8_t value) { return value == 128; }));
+    assert(feature_frame.chroma_u == std::vector<std::uint8_t>(1024, 128));
+    assert(feature_frame.chroma_v == std::vector<std::uint8_t>(1024, 128));
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload.size() < 400000);
