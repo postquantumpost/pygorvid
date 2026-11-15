@@ -8,6 +8,10 @@ namespace pygorvid {
 struct Mp4Metadata {
     std::string title;
     std::string artist;
+    std::string album;
+    std::string publisher;
+    std::string language;
+    std::string now_playing;
     std::string album_artist;
     std::string genre;
     std::string track;

@@ -163,6 +163,10 @@ Each `--generate` utility now passes the following test metadata:
 | --- | --- | --- |
 | Title | `title` | `Title` |
 | Artist | `artist` | `Artist` |
+| Album | `album` | `Album` |
+| Publisher | `publisher` | `Publisher` |
+| Language | `language` | `Language` |
+| Now Playing | `now_playing` | `Now Playing` |
 | Album Artist | `album_artist` | `Album Artist` |
 | Genre | `genre` | `Genre` |
 | Track Number | `track` | `1` |
@@ -336,7 +340,7 @@ with per-language prefixes (`jc_`, `jr_`, `jg_`, `jp_`), so each writes a
 separate output file; their bytes match.
 
 After building the native commands, the cross-language regression checks
-all 18 UTF-8 metadata strings (independent box parsing and ffprobe), every
+all 22 UTF-8 metadata strings (independent box parsing and ffprobe), every
 decoded YUV pixel, every silent audio sample, argument/write
 errors and byte-for-byte parity. It also checks compatibility item layouts
 and tag readability with the `mdta` block removed from a temporary test file.

@@ -11,6 +11,10 @@ fn generation_metadata() -> pygorvid::Mp4Metadata {
     pygorvid::Mp4Metadata {
         title: "Title".into(),
         artist: "Artist".into(),
+        album: "Album".into(),
+        publisher: "Publisher".into(),
+        language: "Language".into(),
+        now_playing: "Now Playing".into(),
         album_artist: "Album Artist".into(),
         genre: "Genre".into(),
         track: "1".into(),

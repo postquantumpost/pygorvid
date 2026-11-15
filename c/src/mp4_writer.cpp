@@ -103,10 +103,12 @@ bool valid_utf8(const std::string& value) {
     return true;
 }
 
-std::array<std::pair<const char*, const std::string*>, 18>
+std::array<std::pair<const char*, const std::string*>, 22>
 metadata_entries(const Mp4Metadata* metadata) {
     return {{
         {"title", &metadata->title}, {"artist", &metadata->artist},
+        {"album", &metadata->album}, {"publisher", &metadata->publisher},
+        {"language", &metadata->language}, {"now_playing", &metadata->now_playing},
         {"album_artist", &metadata->album_artist}, {"genre", &metadata->genre},
         {"track", &metadata->track}, {"disc", &metadata->disc}, {"date", &metadata->date},
         {"composer", &metadata->composer}, {"comment", &metadata->comment},

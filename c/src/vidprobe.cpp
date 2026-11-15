@@ -696,7 +696,8 @@ Options parse_options(const std::vector<std::string>& args) {
 
 void generate_video(const std::string& output_path) {
     const pygorvid::Mp4Metadata metadata{
-        "Title", "Artist", "Album Artist", "Genre", "1", "1", "2016-12-31 23:59:60 UTC",
+        "Title", "Artist", "Album", "Publisher", "Language", "Now Playing",
+        "Album Artist", "Genre", "1", "1", "2016-12-31 23:59:60 UTC",
         "Composer", "Comments", "Description", "Copyright", "Camera make", "Camera model",
         "firmware version", u8"11.3733\u00b0 N 142.5917\u00b0 E", "-10925.0 meters",
         "180.0", "pygorvid",

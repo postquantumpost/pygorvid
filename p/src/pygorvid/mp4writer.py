@@ -9,6 +9,10 @@ from .h264encoder import H264Encoder
 class Mp4Metadata:
     title: str = ""
     artist: str = ""
+    album: str = ""
+    publisher: str = ""
+    language: str = ""
+    now_playing: str = ""
     album_artist: str = ""
     genre: str = ""
     track: str = ""

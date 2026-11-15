@@ -9,7 +9,8 @@ import (
 )
 
 type Mp4Metadata struct {
-	Title, Artist, AlbumArtist, Genre, Track, Disc, Date        string
+	Title, Artist, Album, Publisher, Language, NowPlaying       string
+	AlbumArtist, Genre, Track, Disc, Date                       string
 	Composer, Comment, Description, Copyright                   string
 	Make, Model, Firmware, Location, Altitude, Heading, Encoder string
 }
@@ -19,6 +20,8 @@ type mp4MetadataEntry struct{ key, value string }
 func (metadata *Mp4Metadata) entries() []mp4MetadataEntry {
 	return []mp4MetadataEntry{
 		{"title", metadata.Title}, {"artist", metadata.Artist},
+		{"album", metadata.Album}, {"publisher", metadata.Publisher},
+		{"language", metadata.Language}, {"now_playing", metadata.NowPlaying},
 		{"album_artist", metadata.AlbumArtist}, {"genre", metadata.Genre},
 		{"track", metadata.Track}, {"disc", metadata.Disc}, {"date", metadata.Date},
 		{"composer", metadata.Composer}, {"comment", metadata.Comment},

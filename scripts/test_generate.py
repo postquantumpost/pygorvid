@@ -13,7 +13,9 @@ import tempfile
 
 
 EXPECTED_METADATA = {
-    "title": "Title", "artist": "Artist", "album_artist": "Album Artist", "genre": "Genre",
+    "title": "Title", "artist": "Artist", "album": "Album", "publisher": "Publisher",
+    "language": "Language", "now_playing": "Now Playing",
+    "album_artist": "Album Artist", "genre": "Genre",
     "track": "1", "disc": "1", "date": "2016-12-31 23:59:60 UTC", "composer": "Composer",
     "comment": "Comments", "description": "Description", "copyright": "Copyright",
     "make": "Camera make", "model": "Camera model", "firmware": "firmware version",

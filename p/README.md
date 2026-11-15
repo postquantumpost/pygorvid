@@ -42,8 +42,9 @@ Path("tagged.mp4").write_bytes(Mp4Writer().encode(H264Encoder(), metadata))
 
 Empty fields are omitted; `None` (the default) writes no metadata. Tags are
 stored in movie-level `mdta` keyed metadata as UTF-8 strings without parsing
-numbers, dates or GPS text. Fields are `title`, `artist`, `album_artist`,
-`genre`, `track`, `disc`, `date`, `composer`, `comment`, `description`,
+numbers, dates or GPS text. Fields are `title`, `artist`, `album`,
+`publisher`, `language`, `now_playing`, `album_artist`, `genre`, `track`,
+`disc`, `date`, `composer`, `comment`, `description`,
 `copyright`, `make`, `model`, `firmware`, `location`, `altitude`, `heading`
 and `encoder`. The utility's `--generate` supplies test values for all fields,
 including `2016-12-31 23:59:60 UTC` and `11.3733° N 142.5917° E`.

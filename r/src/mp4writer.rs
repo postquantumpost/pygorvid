@@ -5,6 +5,10 @@ use std::io;
 pub struct Mp4Metadata {
     pub title: String,
     pub artist: String,
+    pub album: String,
+    pub publisher: String,
+    pub language: String,
+    pub now_playing: String,
     pub album_artist: String,
     pub genre: String,
     pub track: String,
@@ -24,10 +28,14 @@ pub struct Mp4Metadata {
 }
 
 impl Mp4Metadata {
-    fn entries(&self) -> [(&str, &String); 18] {
+    fn entries(&self) -> [(&str, &String); 22] {
         [
             ("title", &self.title),
             ("artist", &self.artist),
+            ("album", &self.album),
+            ("publisher", &self.publisher),
+            ("language", &self.language),
+            ("now_playing", &self.now_playing),
             ("album_artist", &self.album_artist),
             ("genre", &self.genre),
             ("track", &self.track),

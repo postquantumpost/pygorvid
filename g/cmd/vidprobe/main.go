@@ -18,7 +18,9 @@ func main() {
 
 func generationMetadata() vid.Mp4Metadata {
 	return vid.Mp4Metadata{
-		Title: "Title", Artist: "Artist", AlbumArtist: "Album Artist", Genre: "Genre",
+		Title: "Title", Artist: "Artist", Album: "Album", Publisher: "Publisher",
+		Language: "Language", NowPlaying: "Now Playing",
+		AlbumArtist: "Album Artist", Genre: "Genre",
 		Track: "1", Disc: "1", Date: "2016-12-31 23:59:60 UTC", Composer: "Composer",
 		Comment: "Comments", Description: "Description", Copyright: "Copyright",
 		Make: "Camera make", Model: "Camera model", Firmware: "firmware version",
