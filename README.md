@@ -339,6 +339,9 @@ status 1. The root `./pygorvid` comparison wrapper runs all four generators
 with per-language prefixes (`jc_`, `jr_`, `jg_`, `jp_`), so each writes a
 separate output file; their bytes match.
 
+The planned frame-by-frame H.264 feature sequence for `--generate` is in
+[generate.md](./generate.md).
+
 After building the native commands, the cross-language regression checks
 all 22 UTF-8 metadata strings (independent box parsing and ffprobe), every
 decoded YUV pixel, every silent audio sample, argument/write
