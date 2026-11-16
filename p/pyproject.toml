@@ -12,6 +12,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.23.5"]
 
+[project.optional-dependencies]
+slideshow = ["PySDL2>=0.9.16"]
+
 [project.urls]
 Repository = "https://github.com/postquantumpost/pygorvid"
 

@@ -33,6 +33,7 @@ pub struct VideoSampleReader {
     file: Option<File>,
     path: Option<std::path::PathBuf>,
     configuration: CodecConfiguration,
+    timescale: u32,
     samples: Vec<SampleLocation>,
     next_index: usize,
 }
@@ -166,6 +167,7 @@ impl VideoSampleReader {
             file: Some(file),
             path: Some(path_buf),
             configuration,
+            timescale,
             samples,
             next_index: 0,
         })
@@ -206,13 +208,21 @@ impl VideoSampleReader {
         self.samples.len()
     }
 
+    pub fn timescale(&self) -> u32 {
+        self.timescale
+    }
+
     pub fn presentation_sample_index(&self, presentation_index: usize) -> io::Result<usize> {
         if presentation_index >= self.samples.len() {
             return Err(invalid("presentation frame index is out of range"));
         }
+        Ok(self.presentation_sample_indices()[presentation_index])
+    }
+
+    pub fn presentation_sample_indices(&self) -> Vec<usize> {
         let mut display_order: Vec<usize> = (0..self.samples.len()).collect();
         display_order.sort_by_key(|index| (self.samples[*index].pts_ticks, *index));
-        Ok(display_order[presentation_index])
+        display_order
     }
 
     pub fn presentation_index_for_sample_index(&self, sample_index: usize) -> io::Result<usize> {

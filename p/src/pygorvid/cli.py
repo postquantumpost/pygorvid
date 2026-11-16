@@ -2,6 +2,7 @@ import argparse
 import math
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .colorconv import PixelConverter
@@ -102,6 +103,42 @@ def _read_all_frames(
         reader.close()
 
 
+def _slideshow(input_path: str, threads: "int | None" = None, verbose: bool = False) -> int:
+    from .slideshow import SlideshowWindow
+
+    window = SlideshowWindow(input_path)
+    try:
+        reader = VideoSampleReader(input_path)
+        try:
+            decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
+            if reader.configuration is None:
+                raise Mp4FormatError("video configuration is unavailable")
+            timescale = reader.configuration.timescale
+            presentation_order = reader.presentation_sample_indices()
+            deadline_seconds = time.monotonic()
+            count = 0
+            for index, sample_index in enumerate(presentation_order):
+                if not window.is_open():
+                    break
+                try:
+                    sample = reader.sample_at(sample_index)
+                    frame = decoder.decode_frame(index)
+                except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
+                    raise DecoderError(f"decode frame {index}: {error}") from error
+                if not window.wait_until(deadline_seconds):
+                    break
+                window.show(frame)
+                count += 1
+                deadline_seconds = time.monotonic() + sample.duration_ticks / timescale
+            if count:
+                window.wait_until(deadline_seconds)
+            return count
+        finally:
+            reader.close()
+    finally:
+        window.close()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="vidprobe")
     parser.add_argument("--input", help="first input video file")
@@ -109,6 +146,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
     parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
+    parser.add_argument("--slideshow", action="store_true", help="display decoded frames in an SDL2 window")
     parser.add_argument("--verbose", action="store_true", help="print decoder progress and debug information")
     parser.add_argument(
         "--extractframe",
@@ -125,8 +163,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     files = ([args.input] if args.input is not None else []) + args.files
     if args.generate is not None:
-        if files or args.readall or args.extractframe is not None or args.output is not None:
-            parser.error("--generate cannot be combined with inputs, --readall, --extractframe or --output")
+        if files or args.readall or args.slideshow or args.extractframe is not None or args.output is not None:
+            parser.error("--generate cannot be combined with inputs, --readall, --slideshow, --extractframe or --output")
         output = Path(args.generate)
         if output.suffix.lower() != ".mp4":
             parser.error("--generate must end in .mp4")
@@ -146,8 +184,10 @@ def main(argv=None) -> int:
     if not files:
         parser.print_usage(sys.stderr)
         return 2
-    if args.readall and (args.extractframe is not None or args.output is not None):
-        parser.error("--readall cannot be used with --extractframe or --output")
+    if args.readall and args.slideshow:
+        parser.error("--readall cannot be combined with --slideshow")
+    if (args.readall or args.slideshow) and (args.extractframe is not None or args.output is not None):
+        parser.error("--readall and --slideshow cannot be used with --extractframe or --output")
     if (args.extractframe is None) != (args.output is None):
         parser.error("--extractframe and --output must be used together")
     if args.extractframe is not None:
@@ -165,6 +205,16 @@ def main(argv=None) -> int:
         return 0
     status = 0
     for path in files:
+        if args.slideshow:
+            from .slideshow import SlideshowError
+            try:
+                count = _slideshow(path, args.threads, args.verbose)
+            except (OSError, ValueError, DecoderError, Mp4FormatError, SlideshowError) as error:
+                print(f"{path}: {error}", file=sys.stderr)
+                status = 1
+            else:
+                print(f"{path}: displayed {count} frames")
+            continue
         if args.readall:
             try:
                 count = _read_all_frames(path, args.threads, args.verbose)

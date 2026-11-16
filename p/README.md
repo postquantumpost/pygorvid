@@ -17,9 +17,18 @@ The `vidprobe` command is installed alongside the library:
 
 ```sh
 vidprobe --generate grey.mp4
+vidprobe --slideshow --input video.mp4
 ```
 
-This natively writes exactly one second of 64x64 H.264 video (60 fps,
+`--slideshow` displays each decoded frame in presentation order in an SDL2
+window. Install the optional Python binding with `pip install 'pygorvid[slideshow]'`
+and install the SDL2 runtime separately; SDL2 is loaded only for this option.
+Frames are paced to their sample durations when decoding is fast enough, but
+slow decoding reduces the playback rate. Audio is not played. Closing the
+window stops the current slideshow. It cannot be combined with `--generate`,
+`--readall`, `--extractframe`, or `--output`.
+
+The `--generate` option natively writes exactly one second of 64x64 H.264 video (60 fps,
 Constrained Baseline Level 2.0 I_PCM IDR pictures), with frame 2 testing
 emulation prevention and gray padding through frame 60. It includes silent
 stereo 48 kHz 16-bit PCM audio (`sowt`, requiring a PCM-capable MP4 player).

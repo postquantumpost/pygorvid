@@ -37,6 +37,7 @@ func run(args []string) int {
 	output := flags.String("output", "", "output image path (.png or .jpg)")
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
 	readAll := flags.Bool("readall", false, "decode all video frames without writing images")
+	slideshow := flags.Bool("slideshow", false, "display decoded frames in a window")
 	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
 	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
@@ -68,8 +69,8 @@ func run(args []string) int {
 		paths = append([]string{*input}, paths...)
 	}
 	if generateSet {
-		if len(paths) != 0 || *readAll || frameSet || outputSet {
-			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --extractframe or --output")
+		if len(paths) != 0 || *readAll || *slideshow || frameSet || outputSet {
+			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --slideshow, --extractframe or --output")
 			return 2
 		}
 		if strings.ToLower(filepath.Ext(*generate)) != ".mp4" {
@@ -94,8 +95,8 @@ func run(args []string) int {
 		printUsage()
 		return 2
 	}
-	if *readAll && (frameSet || *output != "") {
-		fmt.Fprintln(os.Stderr, "--readall cannot be used with --extractframe or --output")
+	if (*readAll && *slideshow) || ((*readAll || *slideshow) && (frameSet || outputSet)) {
+		fmt.Fprintln(os.Stderr, "--slideshow, --readall and extraction options cannot be combined")
 		return 2
 	}
 	if frameSet || *output != "" {
@@ -121,6 +122,16 @@ func run(args []string) int {
 	}
 	status := 0
 	for _, p := range paths {
+		if *slideshow {
+			count, err := showSlideshow(p, *threads, *verbose)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
+				status = 1
+			} else {
+				fmt.Printf("%s: displayed %d frames\n", p, count)
+			}
+			continue
+		}
 		if *readAll {
 			count, err := readAllFrames(p, *threads, *verbose)
 			if err != nil {
@@ -202,7 +213,7 @@ func flagsFirst(args []string) []string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "       vidprobe --generate OUTPUT.mp4")
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
 func readAllFrames(input string, threads int, verbose bool) (int, error) {

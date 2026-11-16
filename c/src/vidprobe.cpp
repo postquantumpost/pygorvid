@@ -13,9 +13,15 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+#ifdef PYGORVID_SLIDESHOW
+#include "slideshow.hpp"
+#endif
 
 namespace {
 
@@ -26,11 +32,12 @@ struct Options {
     std::string output_prefix;
     std::optional<std::string> generate_path;
     bool read_all = false;
+    bool slideshow = false;
 };
 
 void usage() {
     std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
-    std::cerr << "usage: vidprobe [--readall | --extractframe INDEX --output IMAGE] "
+    std::cerr << "usage: vidprobe [--slideshow | --readall | --extractframe INDEX --output IMAGE] "
                  "[--prefix TEXT] [--input FILE] FILE...\n";
 }
 
@@ -96,7 +103,18 @@ void save_image(const std::string& path, const pygorvid::Yuv420Frame& frame) {
 std::size_t decode_video(
     const std::string& input_path,
     const std::optional<std::size_t>& frame_index = std::nullopt,
-    const std::optional<std::string>& output_path = std::nullopt) {
+    const std::optional<std::string>& output_path = std::nullopt,
+    bool slideshow = false) {
+#ifndef PYGORVID_SLIDESHOW
+    if (slideshow) throw std::runtime_error(
+        "optional slideshow build feature was not included; rebuild with -DPYGORVID_SLIDESHOW=ON");
+#else
+    std::unique_ptr<Slideshow> window;
+    std::map<std::size_t, std::pair<pygorvid::Yuv420Frame, std::uint32_t>> pending;
+    std::vector<std::size_t> display_indices;
+    std::size_t displayed_count = 0;
+    auto deadline = std::chrono::steady_clock::now();
+#endif
     if (output_path) {
         std::error_code path_error;
         const auto normalized_input =
@@ -129,6 +147,15 @@ std::size_t decode_video(
     if (!sample_reader.open(input_path)) {
         throw std::runtime_error(sample_reader.error_info());
     }
+#ifdef PYGORVID_SLIDESHOW
+    if (slideshow) {
+        window = std::make_unique<Slideshow>(input_path);
+        display_indices.resize(sample_reader.sample_count());
+        const auto presentation_order = sample_reader.presentation_sample_indices();
+        for (std::size_t index = 0; index < presentation_order.size(); ++index)
+            display_indices[presentation_order[index]] = index;
+    }
+#endif
     if (frame_index && *frame_index >= sample_reader.sample_count()) {
         throw std::out_of_range("requested frame index exceeds the sample count");
     }
@@ -457,6 +484,21 @@ std::size_t decode_video(
         auto decoded = pygorvid::decode_h264_reference_frame(
             slices, selected_sps_info, selected_pps_info, reference_list_l0,
             reference_list_l1);
+#ifdef PYGORVID_SLIDESHOW
+        if (window) {
+            pending.emplace(display_indices[sample_index], std::make_pair(decoded, sample.duration_ticks));
+            while (!pending.empty() && pending.begin()->first == displayed_count) {
+                if (!window->wait(deadline)) return displayed_count;
+                window->show(pending.begin()->second.first);
+                const auto duration_seconds = std::chrono::duration<double>(
+                    static_cast<double>(pending.begin()->second.second) / sample_reader.timescale());
+                deadline = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration_seconds);
+                pending.erase(pending.begin());
+                ++displayed_count;
+            }
+        }
+#endif
         decoded_frame = decoded;
         ++decoded_count;
         if (current_picture_is_reference) {
@@ -659,6 +701,12 @@ std::size_t decode_video(
     if (output_path) {
         save_image(*output_path, *decoded_frame);
     }
+#ifdef PYGORVID_SLIDESHOW
+    if (window) {
+        if (displayed_count) window->wait(deadline);
+        return displayed_count;
+    }
+#endif
     return decoded_count;
 }
 
@@ -703,6 +751,8 @@ Options parse_options(const std::vector<std::string>& args) {
             options.output_prefix = arg.substr(9);
         } else if (arg == "--readall") {
             options.read_all = true;
+        } else if (arg == "--slideshow") {
+            options.slideshow = true;
         } else if (!arg.empty() && arg.front() == '-') {
             throw std::invalid_argument("unknown option: " + arg);
         } else {
@@ -776,7 +826,7 @@ int run(const std::vector<std::string>& args) {
     }
     if (options.generate_path) {
         if (!options.files.empty() || options.extract_frame || options.output_path ||
-            options.read_all) {
+            options.read_all || options.slideshow) {
             std::cerr << "--generate cannot be combined with inputs, --readall, --extractframe or --output\n";
             return 2;
         }
@@ -803,8 +853,9 @@ int run(const std::vector<std::string>& args) {
         usage();
         return 2;
     }
-    if (options.read_all && (options.extract_frame || options.output_path)) {
-        std::cerr << "--readall cannot be used with --extractframe or --output\n";
+    if ((options.read_all && options.slideshow) ||
+        ((options.read_all || options.slideshow) && (options.extract_frame || options.output_path))) {
+        std::cerr << "--slideshow, --readall and extraction options cannot be combined\n";
         usage();
         return 2;
     }
@@ -835,6 +886,16 @@ int run(const std::vector<std::string>& args) {
     }
     int status = 0;
     for (const auto& path : options.files) {
+        if (options.slideshow) {
+            try {
+                const auto count = decode_video(path, std::nullopt, std::nullopt, true);
+                std::cout << path << ": displayed " << count << " frames\n";
+            } catch (const std::exception& error) {
+                std::cerr << path << ": " << error.what() << '\n';
+                status = 1;
+            }
+            continue;
+        }
         if (options.read_all) {
             try {
                 const auto decoded_count = decode_video(path);

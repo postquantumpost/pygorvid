@@ -52,6 +52,133 @@ def test_read_all_reports_failing_frame(monkeypatch, capsys):
     assert "decode frame 1: invalid frame data" in capsys.readouterr().err
 
 
+def test_slideshow_displays_frames_and_closes(monkeypatch, capsys):
+    from pygorvid import cli, slideshow
+
+    shown = []
+    windows = []
+
+    class FakeWindow:
+        def __init__(self, title):
+            self.closed = False
+            windows.append(self)
+
+        def is_open(self):
+            return True
+
+        def wait_until(self, deadline_seconds):
+            return True
+
+        def show(self, frame):
+            shown.append(frame)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(slideshow, "SlideshowWindow", FakeWindow)
+    assert cli.main(["--slideshow", str(FIXTURE), "--threads", "1"]) == 0
+    assert len(shown) == 3
+    assert windows[0].closed
+    assert "displayed 3 frames" in capsys.readouterr().out
+
+
+def test_slideshow_closes_window_after_display_error(monkeypatch, capsys):
+    from pygorvid import cli, slideshow
+
+    windows = []
+
+    class FailingWindow:
+        def __init__(self, title):
+            self.closed = False
+            windows.append(self)
+
+        def is_open(self):
+            return True
+
+        def wait_until(self, deadline_seconds):
+            return True
+
+        def show(self, frame):
+            raise slideshow.SlideshowError("display failed")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(slideshow, "SlideshowWindow", FailingWindow)
+    assert cli.main(["--slideshow", str(FIXTURE), "--threads", "1"]) == 1
+    assert "display failed" in capsys.readouterr().err
+    assert windows[0].closed
+
+
+def test_slideshow_reports_missing_optional_feature(monkeypatch, capsys):
+    from pygorvid import slideshow
+    monkeypatch.setattr(slideshow.importlib.util, "find_spec", lambda name: None)
+    assert main(["--slideshow", str(FIXTURE), "--threads", "1"]) == 1
+    assert "optional slideshow feature was not included" in capsys.readouterr().err
+
+
+def test_slideshow_presents_frames_in_order_and_stops_on_close(monkeypatch):
+    from pygorvid import cli, slideshow
+
+    shown = []
+    read_indices = []
+    closed = []
+
+    class FakeReader:
+        configuration = type("Configuration", (), {"timescale": 10})()
+
+        def __init__(self, path):
+            pass
+
+        def presentation_sample_indices(self):
+            return [0, 2, 1]
+
+        def sample_at(self, index):
+            read_indices.append(index)
+            return type("Sample", (), {"duration_ticks": 1})()
+
+        def close(self):
+            closed.append("reader")
+
+    class FakeDecoder:
+        def decode_frame(self, index):
+            return index
+
+    class FakeWindow:
+        def __init__(self, title):
+            pass
+
+        def is_open(self):
+            return len(shown) < 2
+
+        def wait_until(self, deadline_seconds):
+            return True
+
+        def show(self, frame):
+            shown.append(frame)
+
+        def close(self):
+            closed.append("window")
+
+    monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
+    monkeypatch.setattr(cli, "create_decoder", lambda *args, **kwargs: FakeDecoder())
+    monkeypatch.setattr(slideshow, "SlideshowWindow", FakeWindow)
+    assert cli._slideshow("fake.mp4") == 2
+    assert read_indices == [0, 2]
+    assert shown == [0, 1]
+    assert closed == ["reader", "window"]
+
+
+@pytest.mark.parametrize("options", (
+    ("--readall",), ("--extractframe", "0"), ("--output", "out.png"),
+    ("--generate", "out.mp4"),
+))
+def test_slideshow_rejects_conflicting_options(options):
+    with pytest.raises(SystemExit) as error:
+        main(["--slideshow", str(FIXTURE), *options])
+    assert error.value.code == 2
+
+
 def test_verbose_flag_enables_decoder_progress(monkeypatch, capsys):
     from pygorvid import cli
 

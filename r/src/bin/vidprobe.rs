@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "slideshow")]
+#[path = "vidprobe/slideshow.rs"]
+mod slideshow;
+
 fn main() {
     exit(run(std::env::args().skip(1).collect()));
 }
@@ -35,7 +39,7 @@ fn generation_metadata() -> pygorvid::Mp4Metadata {
 }
 
 fn run(args: Vec<String>) -> i32 {
-    let (input, output, frame, prefix, threads, read_all, verbose, mut files, generate) =
+    let (input, output, frame, prefix, threads, read_all, slideshow, verbose, mut files, generate) =
         match parse_args(&args) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -48,7 +52,7 @@ fn run(args: Vec<String>) -> i32 {
         files.insert(0, input);
     }
     if let Some(output_path) = generate {
-        if !files.is_empty() || read_all || frame.is_some() || output.is_some() {
+        if !files.is_empty() || read_all || slideshow || frame.is_some() || output.is_some() {
             eprintln!(
                 "--generate cannot be combined with inputs, --readall, --extractframe or --output"
             );
@@ -84,8 +88,9 @@ fn run(args: Vec<String>) -> i32 {
         print_usage();
         return 2;
     }
-    if read_all && (frame.is_some() || output.is_some()) {
-        eprintln!("--readall cannot be used with --extractframe or --output");
+    if (read_all && slideshow) || ((read_all || slideshow) && (frame.is_some() || output.is_some()))
+    {
+        eprintln!("--slideshow, --readall and extraction options cannot be combined");
         return 2;
     }
     if frame.is_some() != output.is_some() {
@@ -107,6 +112,16 @@ fn run(args: Vec<String>) -> i32 {
     }
     let mut status = 0;
     for p in &files {
+        if slideshow {
+            match show_slideshow(p, threads, verbose) {
+                Ok(count) => println!("{p}: displayed {count} frames"),
+                Err(error) => {
+                    eprintln!("{p}: {error}");
+                    status = 1;
+                }
+            }
+            continue;
+        }
         if read_all {
             match read_all_frames(p, threads, verbose) {
                 Ok(count) => println!("{p}: read {count} frames"),
@@ -176,6 +191,7 @@ fn parse_args(
         usize,
         bool,
         bool,
+        bool,
         Vec<String>,
         Option<String>,
     ),
@@ -188,6 +204,7 @@ fn parse_args(
     let mut prefix = None;
     let mut threads = pygorvid::default_decoder_threads();
     let mut read_all = false;
+    let mut slideshow = false;
     let mut verbose = false;
     let parse_threads = |value: &str| {
         value
@@ -229,6 +246,8 @@ fn parse_args(
             }
         } else if arg == "--readall" {
             read_all = true;
+        } else if arg == "--slideshow" {
+            slideshow = true;
         } else if arg == "--verbose" {
             verbose = true;
         } else if let Some(value) = arg.strip_prefix("--input=") {
@@ -255,13 +274,26 @@ fn parse_args(
         index += 1;
     }
     Ok((
-        input, output, frame, prefix, threads, read_all, verbose, files, generate,
+        input, output, frame, prefix, threads, read_all, slideshow, verbose, files, generate,
     ))
 }
 
 fn print_usage() {
     eprintln!("       vidprobe --generate OUTPUT.mp4");
-    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--verbose] [--readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--verbose] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+}
+
+#[cfg(not(feature = "slideshow"))]
+fn show_slideshow(_: &str, _: usize, _: bool) -> Result<usize, String> {
+    Err(
+        "optional slideshow build feature was not included; rebuild with --features slideshow"
+            .into(),
+    )
+}
+
+#[cfg(feature = "slideshow")]
+fn show_slideshow(input: &str, threads: usize, verbose: bool) -> Result<usize, String> {
+    slideshow::show(input, threads, verbose)
 }
 
 fn read_all_frames(input: &str, threads: usize, verbose: bool) -> Result<usize, String> {
@@ -382,6 +414,41 @@ fn write_output(output: &Path, payload: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slideshow_rejects_conflicting_options() {
+        for options in [
+            vec!["--slideshow", "--readall", "input.mp4"],
+            vec!["--slideshow", "--extractframe", "0", "input.mp4"],
+            vec!["--slideshow", "--output", "", "input.mp4"],
+            vec!["--slideshow", "--generate", "output.mp4"],
+        ] {
+            assert_eq!(
+                run(options.iter().map(|value| value.to_string()).collect()),
+                2
+            );
+        }
+    }
+
+    #[cfg(not(feature = "slideshow"))]
+    #[test]
+    fn slideshow_disabled_reports_missing_feature() {
+        assert!(show_slideshow("unused", 1, false)
+            .unwrap_err()
+            .contains("optional slideshow build feature was not included"));
+    }
+
+    #[cfg(feature = "slideshow")]
+    #[test]
+    fn slideshow_displays_sample() {
+        std::env::set_var("SDL_VIDEODRIVER", "dummy");
+        let input =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
+        assert_eq!(
+            show_slideshow(input.to_str().unwrap(), 1, false).unwrap(),
+            3
+        );
+    }
 
     #[test]
     fn generates_native_grey_video() {

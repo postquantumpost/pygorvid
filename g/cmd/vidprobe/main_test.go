@@ -13,6 +13,19 @@ import (
 	"pygorvid/vid"
 )
 
+func TestSlideshowRejectsConflictingOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"--slideshow", "--readall", "input.mp4"},
+		{"--slideshow", "--extractframe", "0", "input.mp4"},
+		{"--slideshow", "--output", "", "input.mp4"},
+		{"--slideshow", "--generate", "output.mp4"},
+	} {
+		if status := run(args); status != 2 {
+			t.Errorf("%v returned %d, want 2", args, status)
+		}
+	}
+}
+
 func TestGenerate(t *testing.T) {
 	t.Setenv("PATH", "")
 	directory := t.TempDir()

@@ -237,11 +237,13 @@ class VideoSampleReader:
             or not 0 <= presentation_index < len(self._samples)
         ):
             raise IndexError("presentation frame index is out of range")
-        display_order = sorted(
+        return self.presentation_sample_indices()[presentation_index]
+
+    def presentation_sample_indices(self) -> List[int]:
+        return sorted(
             range(len(self._samples)),
             key=lambda index: (self._samples[index].pts_ticks, index),
         )
-        return display_order[presentation_index]
 
     def presentation_index_for_sample_index(self, sample_index: int) -> int:
         if (

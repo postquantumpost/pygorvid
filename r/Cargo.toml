@@ -17,3 +17,7 @@ path = "src/bin/vidprobe.rs"
 [dependencies]
 bincode = "1.3"
 serde = { version = "1", features = ["derive", "rc"] }
+sdl2 = { version = "0.37", optional = true }
+
+[features]
+slideshow = ["dep:sdl2"]

@@ -23,6 +23,13 @@ target_compile_options(pygorvid PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(vidprobe src/vidprobe.cpp)
 target_link_libraries(vidprobe PRIVATE pygorvid)
 
+option(PYGORVID_SLIDESHOW "Enable SDL2 slideshow support" OFF)
+if(PYGORVID_SLIDESHOW)
+    find_package(SDL2 REQUIRED)
+    target_compile_definitions(vidprobe PRIVATE PYGORVID_SLIDESHOW)
+    target_link_libraries(vidprobe PRIVATE SDL2::SDL2)
+endif()
+
 option(PYGORVID_BUILD_TESTS "Build the pygorvid test suite" OFF)
 if(PYGORVID_BUILD_TESTS)
     enable_testing()
@@ -42,6 +49,12 @@ if(PYGORVID_BUILD_TESTS)
         -DFFMPEG=${PYGORVID_FFMPEG}
         -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_formats.cmake)
+    add_test(NAME vidprobe_slideshow COMMAND ${CMAKE_COMMAND}
+        -DVIDPROBE=$<TARGET_FILE:vidprobe>
+        -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../samples/decoder-smoke-16x16.mp4
+        -DENABLED=${PYGORVID_SLIDESHOW}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_slideshow.cmake)
+    set_tests_properties(vidprobe_slideshow PROPERTIES TIMEOUT 60)
 endif()
 
 install(TARGETS pygorvid vidprobe
