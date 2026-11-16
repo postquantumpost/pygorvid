@@ -19,6 +19,9 @@ Other Python projects can install the same wheel into their own virtual
 environment and `from pygorvid import probe_file`. Python 3.9 or newer is required.
 The wheel is pure Python and is not restricted to one CPU architecture.
 The source distribution is also pip-installable; building it requires setuptools.
+Standard installation includes the PySDL2 binding; slideshow also requires the
+SDL2 runtime. To omit the binding, install NumPy separately and install the
+wheel with `--no-deps`.
 After the maintainer publishes version 1.0.0 to PyPI, the wheel path can be replaced
 with `pygorvid==1.0.0`. Building release images does not publish them.
 
@@ -38,6 +41,9 @@ Import `vid "pygorvid/vid"`. Go 1.22 or newer is required to compile projects
 using the library. The module name is intentionally unchanged; these local SDK
 images use `replace`, not a public `go get` module path.
 No Go compiler is needed to run the prebuilt, statically linked `bin/vidprobe-go`.
+The prebuilt command omits slideshow. Building the SDK command enables it by
+default and requires cgo and the SDL2 development SDK; use `CGO_ENABLED=0`
+or `-tags noslideshow` to omit it.
 
 ## Rust
 
@@ -55,6 +61,9 @@ included lockfile uses format 4). Cargo downloads the Rust dependencies on first
 build; this is not an offline dependency bundle. Rust libraries are distributed
 as source because compiled Rust libraries do not have a stable cross-toolchain
 ABI. The prebuilt `bin/vidprobe-rust` does not need a Rust toolchain.
+The prebuilt command omits slideshow. SDK builds enable it by default and
+require the SDL2 development SDK; use `--no-default-features` to omit it.
+Library consumers can similarly set `default-features = false`.
 
 ## C++
 
@@ -84,6 +93,9 @@ decoded intra macroblocks; P-picture reconstruction requires deblocking to be
 disabled. I8x8 prediction, weighted/reordered references,
 adaptive reference marking, custom scaling lists, and CABAC are not supported.
 Sample DTS, PTS, and durations are in `VideoSampleReader::timescale()`.
+For cropped pictures, the C++ decoder reconstructs and retains the full coded
+picture for inter prediction, while exposing cropped output planes.
+P-slice Intra_NxN macroblocks remain unsupported in the C++ decoder.
 
 The `vidprobe-cpp` command extracts one frame by MP4 sample index. An output
 ending in `.jpg` (case-insensitive) selects JPEG; other names produce PNG:
@@ -92,6 +104,10 @@ ending in `.jpg` (case-insensitive) selects JPEG; other names produce PNG:
 vidprobe-cpp --extractframe 0 --output frame.png input.mp4
 vidprobe-cpp --extractframe 0 --output frame.jpg input.mp4
 ```
+
+The prebuilt command omits slideshow. Building the SDK with CMake enables it by
+default and requires the SDL2 development SDK; set
+`-DPYGORVID_SLIDESHOW=OFF` to omit it.
 
 It decodes earlier supported samples to establish the reference frame. Only
 IDR pictures followed by supported P pictures with P-picture deblocking

@@ -4,6 +4,7 @@
 #include "pygorvid/pygorvid.hpp"
 
 #include <array>
+#include <memory>
 #include <optional>
 
 namespace pygorvid {
@@ -138,6 +139,8 @@ struct Yuv420Frame {
     std::vector<std::uint8_t> chroma_u;
     std::vector<std::uint8_t> chroma_v;
     std::vector<std::array<ColocatedMotionFact, 16>> colocated_motion_field;
+    // Cropped output retains the coded picture for later inter prediction.
+    std::shared_ptr<const Yuv420Frame> coded_reference;
 };
 
 NalHeader parse_nal_header(const std::vector<std::uint8_t>& nal);

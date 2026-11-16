@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
-dependencies = ["numpy>=1.23.5"]
+dependencies = ["numpy>=1.23.5", "PySDL2>=0.9.16"]
 
 [project.optional-dependencies]
 slideshow = ["PySDL2>=0.9.16"]

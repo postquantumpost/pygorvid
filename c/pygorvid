@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-set -x
+set -ex
 #./tmp/cmake-debug/vidprobe "$@"
 
-cmake -S c -B tmp/cmake-release -DCMAKE_BUILD_TYPE=Release
+cmake -S c -B tmp/cmake-release -DCMAKE_BUILD_TYPE=Release -DPYGORVID_SLIDESHOW="${PYGORVID_SLIDESHOW:-ON}"
 cmake --build tmp/cmake-release
 ./tmp/cmake-release/vidprobe "$@"

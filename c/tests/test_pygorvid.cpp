@@ -808,6 +808,21 @@ void test_h264_p_skip_picture() {
     const auto shifted_p_picture = pygorvid::decode_p_frame(
         {make_p_l0_16x16_slice(8)}, single_macroblock_sps, pps,
         single_reference);
+    const auto cropped_single_sps =
+        pygorvid::parse_sps(make_sps(66, 0, 0, {1, 1, 1, 1}));
+    const auto cropped_single_reference = pygorvid::decode_idr_i_pcm_frame(
+        {make_i_pcm_slice(0, single_luma, single_u, single_v)},
+        cropped_single_sps, pps);
+    const auto cropped_shifted = pygorvid::decode_p_frame(
+        {make_p_l0_16x16_slice(8)}, cropped_single_sps, pps,
+        cropped_single_reference);
+    for (std::size_t row = 0; row < cropped_shifted.height; ++row) {
+        for (std::size_t column = 0; column < cropped_shifted.width; ++column) {
+            assert(cropped_shifted.luma[row * cropped_shifted.width + column] ==
+                   shifted_p_picture.luma[(row + 2) * shifted_p_picture.width +
+                                          column + 2]);
+        }
+    }
     for (std::uint32_t row = 0; row < 16; ++row) {
         for (std::uint32_t column = 0; column < 16; ++column) {
             const auto source_column = std::min(column + 2, 15U);
@@ -1601,6 +1616,18 @@ void test_h264_i4x4_residual_reconstruction() {
     zero_luma_bits.fill("1");
     const auto baseline = pygorvid::decode_idr_i_frame(
         {make_i4x4_slice(3, zero_luma_bits)}, sps, pps);
+    const auto cropped_sps =
+        pygorvid::parse_sps(make_sps(66, 0, 0, {1, 1, 1, 1}));
+    const auto cropped = pygorvid::decode_idr_i_frame(
+        {make_i4x4_slice(3, zero_luma_bits)}, cropped_sps, pps);
+    assert(cropped.width == 12 && cropped.height == 12);
+    assert(cropped.coded_reference && cropped.coded_reference->width == 16);
+    for (std::size_t row = 0; row < cropped.height; ++row) {
+        for (std::size_t column = 0; column < cropped.width; ++column) {
+            assert(cropped.luma[row * cropped.width + column] ==
+                   baseline.luma[(row + 2) * baseline.width + column + 2]);
+        }
+    }
 
     auto luma_bits = zero_luma_bits;
     luma_bits[0] = "0101";
@@ -1680,6 +1707,23 @@ void test_h264_i16x16_residual_reconstruction() {
     assert(frame.luma[16 * 32 + 16] == 47);
     assert(frame.chroma_u[8 * 16 + 8] == 71);
     assert(frame.chroma_v[8 * 16 + 8] == 185);
+    const auto cropped_sps =
+        pygorvid::parse_sps(make_sps(66, 1, 1, {1, 1, 1, 1}));
+    const auto cropped = pygorvid::decode_idr_i_frame({slice}, cropped_sps, pps);
+    assert(cropped.width == 28 && cropped.height == 28);
+    for (std::size_t row = 0; row < cropped.height; ++row) {
+        for (std::size_t column = 0; column < cropped.width; ++column) {
+            assert(cropped.luma[row * cropped.width + column] ==
+                   frame.luma[(row + 2) * frame.width + column + 2]);
+        }
+    }
+    const auto predicted = pygorvid::decode_p_skip_frame(
+        {make_p_skip_slice(0, 4, 1, 1)}, cropped_sps, pps, cropped);
+    assert(predicted.width == cropped.width && predicted.height == cropped.height);
+    assert(predicted.luma == cropped.luma);
+    assert(predicted.chroma_u == cropped.chroma_u);
+    assert(predicted.chroma_v == cropped.chroma_v);
+    assert(predicted.coded_reference && predicted.coded_reference->width == 32);
 
     const auto filtered_slice = make_mixed_i_slice(
         luma, chroma_u, chroma_v, {"1", "1", "1"}, {0, 0, 0}, {2, 1, 4},
@@ -1689,6 +1733,15 @@ void test_h264_i16x16_residual_reconstruction() {
     assert(filtered_frame.luma != frame.luma ||
            filtered_frame.chroma_u != frame.chroma_u ||
            filtered_frame.chroma_v != frame.chroma_v);
+    const auto cropped_filtered =
+        pygorvid::decode_idr_i_frame({filtered_slice}, cropped_sps, pps);
+    for (std::size_t row = 0; row < cropped_filtered.height; ++row) {
+        for (std::size_t column = 0; column < cropped_filtered.width; ++column) {
+            assert(cropped_filtered.luma[row * cropped_filtered.width + column] ==
+                   filtered_frame.luma[(row + 2) * filtered_frame.width +
+                                       column + 2]);
+        }
+    }
 
     std::vector<std::uint8_t> sample;
     append_u32(sample, static_cast<std::uint32_t>(slice.size()));

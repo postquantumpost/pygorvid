@@ -1,4 +1,4 @@
-//go:build slideshow
+//go:build cgo && !noslideshow
 
 package main
 

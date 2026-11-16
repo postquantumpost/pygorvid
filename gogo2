@@ -10,5 +10,7 @@ set -x
 #./pygorvid --extractframe 0 --output frame0.jpg --input samples/samp3.mp4
 #./pygorvid --generate grey.mp4
 #./pygorvid --readall --input jr_grey.mp4
-./pygorvid --slideshow --input jr_grey.mp4
+#./pygorvid --slideshow --input jr_grey.mp4
 #./pygorvid --slideshow --input samples/ew1.mp4
+#./pygorvid --slideshow --input samples/grace1.mp4
+./pygorvid --readall --input samples/grace1.mp4

@@ -388,32 +388,37 @@ status 1. `--readall` cannot be combined with `--extractframe` or `--output`.
 This uses the same native MP4/H.264 decoder and supported codec subset as frame
 extraction; it does not just read compressed samples.
 
-To display decoded frames in presentation order, enable the optional slideshow
-feature and run `vidprobe --slideshow --input input.mp4`. The window closes
+To display decoded frames in presentation order, run
+`vidprobe --slideshow --input input.mp4`. The window closes
 after the last frame; closing it early stops that input. Subsequent inputs are
 handled in order. Frame durations are respected when decoding is fast enough;
 slow decoding reduces the display rate. Audio is not played. This mode cannot be
 combined with `--readall`, `--generate`, `--extractframe` or `--output`.
 
-The feature is off by default. SDL2 runtime libraries are required to display
-the window; Go, Rust and C++ also require the SDL2 development SDK for enabled
-builds. To enable it:
+Slideshow is enabled by default for development builds. SDL2 runtime libraries
+are required to display the window; Go, Rust and C++ also require the SDL2
+development SDK for enabled builds. The standard development builds are:
 
 ```sh
-# Python: install the optional binding into the selected environment.
-python -m pip install -e './p[slideshow]'
+# Python: installs the PySDL2 binding into the selected environment.
+python -m pip install -e ./p
 # Go: cgo and SDL2 development files are required.
-go build -C g -tags slideshow -o ../tmp/vidprobe-go ./cmd/vidprobe
+go build -C g -o ../tmp/vidprobe-go ./cmd/vidprobe
 # Rust:
-cargo build --manifest-path r/Cargo.toml --features slideshow --bin vidprobe
+cargo build --manifest-path r/Cargo.toml --bin vidprobe
 # C++:
-cmake -S c -B tmp/cmake-slideshow -DPYGORVID_SLIDESHOW=ON
+cmake -S c -B tmp/cmake-slideshow
 cmake --build tmp/cmake-slideshow --target vidprobe
 ```
 
-Default builds do not need SDL2. If the feature was not included, `--slideshow`
-reports that it is unavailable rather than opening a window. An enabled build
-also reports SDL2 initialization and rendering failures.
+To build without SDL2, use `CGO_ENABLED=0` or `-tags noslideshow` for Go,
+`--no-default-features` for Rust, and `-DPYGORVID_SLIDESHOW=OFF` for C++
+(or `PYGORVID_SLIDESHOW=OFF c/pygorvid` for its launcher). For Python,
+install NumPy separately and install pygorvid with `--no-deps`, leaving PySDL2
+uninstalled. If the feature was not included, `--slideshow` reports that it is
+unavailable rather than opening a window. Enabled builds also report SDL2
+initialization and rendering failures. The prebuilt Go, Rust, and C++ release
+commands are built without slideshow; their SDKs can be rebuilt with it.
 
 For a late H.264 framing or slice-header error, inspect only the selected
 presentation frame without decoding its predecessors:

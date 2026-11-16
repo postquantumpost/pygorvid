@@ -35,7 +35,7 @@ if [[ $language == all || $language == go ]]; then
     name="pygorvid-go-$version-linux-$(go env GOARCH)"
     image="$work/$name"
     mkdir -p "$image/bin" "$image/sdk"
-    cp "$root/g/go.mod" "$image/sdk/"
+    cp "$root/g/go.mod" "$root/g/go.sum" "$image/sdk/"
     cp -R "$root/g/vid" "$root/g/cmd" "$image/sdk/"
     find "$image/sdk" -name '*_test.go' -delete
     cp "$root/LICENSE" "$root/VERSION" "$image/"
@@ -55,7 +55,7 @@ if [[ $language == all || $language == rust ]]; then
     cp "$root/LICENSE" "$root/VERSION" "$image/"
     cp "$root/LICENSE" "$image/sdk/"
     cp "$root/docs/INSTALL.md" "$image/README.md"
-    CARGO_TARGET_DIR="$work/rust-target" cargo build --locked --release --manifest-path "$image/sdk/Cargo.toml" --bin vidprobe
+    CARGO_TARGET_DIR="$work/rust-target" cargo build --locked --release --no-default-features --manifest-path "$image/sdk/Cargo.toml" --bin vidprobe
     cp "$work/rust-target/release/vidprobe" "$image/bin/vidprobe-rust"
     tar -C "$work" -czf "$work/$name.tar.gz" "$name"
     mv "$work/$name.tar.gz" "$dist/"
@@ -68,7 +68,7 @@ if [[ $language == all || $language == cpp ]]; then
     mkdir -p "$image/bin" "$image/sdk/include" "$image/sdk/src" "$image/sdk/lib"
     cp "$root/c/CMakeLists.txt" "$image/sdk/"
     cp -R "$root/c/include/pygorvid" "$image/sdk/include/"
-    cp "$root/c/src/pygorvid.cpp" "$root/c/src/h264.cpp" "$root/c/src/h264_pcm.cpp" "$root/c/src/h264_encoder.cpp" "$root/c/src/mp4_writer.cpp" "$root/c/src/cabac.cpp" "$root/c/src/cavlc.cpp" "$root/c/src/jpeg.cpp" "$root/c/src/png.cpp" "$root/c/src/vidprobe.cpp" "$root/c/src/cabac_context_init.hpp" "$image/sdk/src/"
+    cp "$root/c/src/pygorvid.cpp" "$root/c/src/h264.cpp" "$root/c/src/h264_pcm.cpp" "$root/c/src/h264_encoder.cpp" "$root/c/src/mp4_writer.cpp" "$root/c/src/cabac.cpp" "$root/c/src/cavlc.cpp" "$root/c/src/jpeg.cpp" "$root/c/src/png.cpp" "$root/c/src/vidprobe.cpp" "$root/c/src/cabac_context_init.hpp" "$root/c/src/slideshow.hpp" "$image/sdk/src/"
     cp "$root/LICENSE" "$root/VERSION" "$image/"
     cp "$root/docs/INSTALL.md" "$image/README.md"
     "$cxx" -std=c++17 -O2 -Wall -Wextra -Wpedantic \

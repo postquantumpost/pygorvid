@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+#source ../.venv/bin/activate
+source /home/jph/work/pygorvid/.venv/bin/activate
 set -x
 d=$(cd "$(dirname "$0")" && pwd)
 PYTHONPATH="$d/src" python3 -m pygorvid.cli "$@"

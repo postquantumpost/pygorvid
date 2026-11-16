@@ -20,4 +20,5 @@ serde = { version = "1", features = ["derive", "rc"] }
 sdl2 = { version = "0.37", optional = true }
 
 [features]
+default = ["slideshow"]
 slideshow = ["dep:sdl2"]

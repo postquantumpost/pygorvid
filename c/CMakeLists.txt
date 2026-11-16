@@ -23,7 +23,7 @@ target_compile_options(pygorvid PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(vidprobe src/vidprobe.cpp)
 target_link_libraries(vidprobe PRIVATE pygorvid)
 
-option(PYGORVID_SLIDESHOW "Enable SDL2 slideshow support" OFF)
+option(PYGORVID_SLIDESHOW "Enable SDL2 slideshow support" ON)
 if(PYGORVID_SLIDESHOW)
     find_package(SDL2 REQUIRED)
     target_compile_definitions(vidprobe PRIVATE PYGORVID_SLIDESHOW)

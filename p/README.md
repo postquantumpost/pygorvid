@@ -2,7 +2,8 @@
 
 Native Python video file inspection, H.264 decoding, and PNG/JPEG encoding.
 Requires Python 3.9 or newer; no runtime FFmpeg or image library is required.
-NumPy is a runtime dependency for pixel-format conversions.
+NumPy is a runtime dependency for pixel-format conversions. PySDL2 is installed
+by default for slideshow support; the SDL2 runtime is installed separately.
 
 Install with `python -m pip install pygorvid`, or install the wheel from the
 project's release images with `python -m pip install /path/to/pygorvid-1.0.0-py3-none-any.whl`.
@@ -21,8 +22,8 @@ vidprobe --slideshow --input video.mp4
 ```
 
 `--slideshow` displays each decoded frame in presentation order in an SDL2
-window. Install the optional Python binding with `pip install 'pygorvid[slideshow]'`
-and install the SDL2 runtime separately; SDL2 is loaded only for this option.
+window. SDL2 is loaded only for this option. To omit PySDL2, install NumPy
+separately and install pygorvid with `pip install --no-deps`.
 Frames are paced to their sample durations when decoding is fast enough, but
 slow decoding reduces the playback rate. Audio is not played. Closing the
 window stops the current slideshow. It cannot be combined with `--generate`,

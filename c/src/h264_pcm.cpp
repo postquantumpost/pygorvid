@@ -24,6 +24,37 @@ std::size_t checked_plane_size(std::uint32_t width, std::uint32_t height) {
     return static_cast<std::size_t>(width) * height;
 }
 
+Yuv420Frame crop_decoded_frame(Yuv420Frame frame, const SpsInfo& sps) {
+    if (frame.width == sps.width && frame.height == sps.height) {
+        return frame;
+    }
+    Yuv420Frame output;
+    output.width = sps.width;
+    output.height = sps.height;
+    output.long_term_reference = frame.long_term_reference;
+    const auto crop_plane = [&](const std::vector<std::uint8_t>& source,
+                                std::vector<std::uint8_t>& destination,
+                                std::uint32_t divisor) {
+        const auto width = sps.width / divisor;
+        const auto height = sps.height / divisor;
+        const auto stride = frame.width / divisor;
+        const auto left = sps.frame_crop_left / divisor;
+        const auto top = sps.frame_crop_top / divisor;
+        destination.resize(checked_plane_size(width, height));
+        for (std::uint32_t row = 0; row < height; ++row) {
+            std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(
+                            static_cast<std::size_t>(top + row) * stride + left),
+                        width, destination.begin() + static_cast<std::ptrdiff_t>(
+                                   static_cast<std::size_t>(row) * width));
+        }
+    };
+    crop_plane(frame.luma, output.luma, 1);
+    crop_plane(frame.chroma_u, output.chroma_u, 2);
+    crop_plane(frame.chroma_v, output.chroma_v, 2);
+    output.coded_reference = std::make_shared<Yuv420Frame>(std::move(frame));
+    return output;
+}
+
 std::int32_t chroma_qp(std::int32_t qpy, std::int64_t chroma_qp_offset);
 
 constexpr std::array<std::uint8_t, 52> deblock_alpha{{
@@ -580,46 +611,29 @@ void require_same_picture(const IdrSliceHeader& expected,
 }
 
 void write_luma_macroblock(BitReader& reader, Yuv420Frame& frame,
-                           const SpsInfo& sps, std::uint32_t macroblock_x,
+                           std::uint32_t macroblock_x,
                            std::uint32_t macroblock_y) {
     for (std::uint32_t sample_y = 0; sample_y < 16; ++sample_y) {
         for (std::uint32_t sample_x = 0; sample_x < 16; ++sample_x) {
             const auto value = static_cast<std::uint8_t>(reader.read_bits(8));
             const auto coded_x = macroblock_x * 16 + sample_x;
             const auto coded_y = macroblock_y * 16 + sample_y;
-            if (coded_x < sps.frame_crop_left ||
-                coded_y < sps.frame_crop_top ||
-                coded_x >= sps.frame_crop_left + frame.width ||
-                coded_y >= sps.frame_crop_top + frame.height) {
-                continue;
-            }
-            const auto x = coded_x - sps.frame_crop_left;
-            const auto y = coded_y - sps.frame_crop_top;
-            frame.luma[static_cast<std::size_t>(y) * frame.width + x] = value;
+            frame.luma[static_cast<std::size_t>(coded_y) * frame.width + coded_x] = value;
         }
     }
 }
 
 void write_chroma_macroblock(BitReader& reader, std::vector<std::uint8_t>& plane,
-                             const Yuv420Frame& frame, const SpsInfo& sps,
+                             const Yuv420Frame& frame,
                              std::uint32_t macroblock_x,
                              std::uint32_t macroblock_y) {
     const auto plane_width = frame.width / 2;
-    const auto crop_left = sps.frame_crop_left / 2;
-    const auto crop_top = sps.frame_crop_top / 2;
     for (std::uint32_t sample_y = 0; sample_y < 8; ++sample_y) {
         for (std::uint32_t sample_x = 0; sample_x < 8; ++sample_x) {
             const auto value = static_cast<std::uint8_t>(reader.read_bits(8));
             const auto coded_x = macroblock_x * 8 + sample_x;
             const auto coded_y = macroblock_y * 8 + sample_y;
-            if (coded_x < crop_left || coded_y < crop_top ||
-                coded_x >= crop_left + plane_width ||
-                coded_y >= crop_top + frame.height / 2) {
-                continue;
-            }
-            const auto x = coded_x - crop_left;
-            const auto y = coded_y - crop_top;
-            plane[static_cast<std::size_t>(y) * plane_width + x] = value;
+            plane[static_cast<std::size_t>(coded_y) * plane_width + coded_x] = value;
         }
     }
 }
@@ -1697,8 +1711,8 @@ Yuv420Frame decode_idr_i_frame_impl(
     const auto macroblock_count =
         checked_plane_size(macroblock_width, macroblock_height);
     Yuv420Frame frame;
-    frame.width = sps.width;
-    frame.height = sps.height;
+    frame.width = sps.coded_width;
+    frame.height = sps.coded_height;
     frame.luma.resize(checked_plane_size(frame.width, frame.height));
     frame.chroma_u.resize(
         checked_plane_size(frame.width / 2, frame.height / 2));
@@ -1873,11 +1887,11 @@ Yuv420Frame decode_idr_i_frame_impl(
                             "pcm_alignment_zero_bit is not zero");
                     }
                 }
-                write_luma_macroblock(reader, frame, sps, macroblock_x,
+                write_luma_macroblock(reader, frame, macroblock_x,
                                       macroblock_y);
-                write_chroma_macroblock(reader, frame.chroma_u, frame, sps,
+                write_chroma_macroblock(reader, frame.chroma_u, frame,
                                         macroblock_x, macroblock_y);
-                write_chroma_macroblock(reader, frame.chroma_v, frame, sps,
+                write_chroma_macroblock(reader, frame.chroma_v, frame,
                                         macroblock_x, macroblock_y);
                 if (cabac_decoder) {
                     cabac_decoder->reset_after_ipcm();
@@ -1911,11 +1925,6 @@ Yuv420Frame decode_idr_i_frame_impl(
                     }
                 }
             } else if (intra4x4_macroblock) {
-                if (sps.frame_crop_left != 0 || sps.frame_crop_top != 0 ||
-                    sps.frame_crop_right != 0 || sps.frame_crop_bottom != 0) {
-                    throw std::runtime_error(
-                        "I4x4 prediction currently requires uncropped pictures");
-                }
                 bool transform_8x8 = false;
                 if (pps.transform_8x8_mode) {
                     const bool left_transform =
@@ -2699,11 +2708,6 @@ Yuv420Frame decode_idr_i_frame_impl(
                     frame.chroma_v, frame.width / 2, macroblock_x, macroblock_y,
                     chroma_residual_blocks[1]);
             } else {
-                if (sps.frame_crop_left != 0 || sps.frame_crop_top != 0 ||
-                    sps.frame_crop_right != 0 || sps.frame_crop_bottom != 0) {
-                    throw std::runtime_error(
-                        "I16x16 prediction currently requires uncropped pictures");
-                }
                 const auto luma_mode =
                     static_cast<std::uint8_t>((macroblock_type - 1) % 4);
                 const bool luma_ac_coded = macroblock_type >= 13;
@@ -3154,7 +3158,7 @@ Yuv420Frame decode_idr_i_frame_impl(
         frame, macroblock_width, macroblock_height, macroblock_qpy,
         macroblock_slice_ids, macroblock_disable_idc,
         macroblock_alpha_offsets, macroblock_beta_offsets, pps);
-    return frame;
+    return crop_decoded_frame(std::move(frame), sps);
 }
 
 std::int64_t floor_divide(std::int64_t value, std::int64_t divisor) {
@@ -3348,15 +3352,26 @@ Yuv420Frame decode_idr_i_frame(
 Yuv420Frame decode_p_frame_with_lists(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps,
-    const std::vector<const Yuv420Frame*>& reference_frames_l0,
-    const std::vector<const Yuv420Frame*>& reference_frames_l1) {
+    const std::vector<const Yuv420Frame*>& input_frames_l0,
+    const std::vector<const Yuv420Frame*>& input_frames_l1) {
     if (slice_nals.empty()) {
         throw std::invalid_argument("P picture contains no slice NAL units");
     }
-    if (reference_frames_l0.empty() || reference_frames_l0.front() == nullptr) {
+    if (input_frames_l0.empty() || input_frames_l0.front() == nullptr) {
         throw std::invalid_argument(
             "inter picture requires a decoded L0 reference frame");
     }
+    const auto coded_references = [](const std::vector<const Yuv420Frame*>& inputs) {
+        std::vector<const Yuv420Frame*> result;
+        result.reserve(inputs.size());
+        for (const auto* frame : inputs) {
+            result.push_back(frame != nullptr && frame->coded_reference
+                                 ? frame->coded_reference.get() : frame);
+        }
+        return result;
+    };
+    const auto reference_frames_l0 = coded_references(input_frames_l0);
+    const auto reference_frames_l1 = coded_references(input_frames_l1);
     const auto& reference_frame = *reference_frames_l0.front();
     const auto* reference_frame_l1 =
         reference_frames_l1.empty() ? nullptr : reference_frames_l1.front();
@@ -3368,10 +3383,9 @@ Yuv420Frame decode_p_frame_with_lists(
         sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 ||
         sps.coded_width == 0 || sps.coded_height == 0 ||
         sps.coded_width % 16 != 0 || sps.coded_height % 16 != 0 ||
-        sps.frame_crop_left != 0 || sps.frame_crop_right != 0 ||
-        sps.frame_crop_top != 0 || sps.frame_crop_bottom != 0 ||
         sps.width == 0 || sps.height == 0 || sps.width % 2 != 0 ||
         sps.height % 2 != 0 ||
+        sps.frame_crop_left % 2 != 0 || sps.frame_crop_top % 2 != 0 ||
         static_cast<std::uint64_t>(sps.frame_crop_left) + sps.width +
                 sps.frame_crop_right !=
             sps.coded_width ||
@@ -3379,35 +3393,35 @@ Yuv420Frame decode_p_frame_with_lists(
                 sps.frame_crop_bottom !=
             sps.coded_height) {
         throw std::runtime_error(
-            "P-picture decoding requires an uncropped progressive 8-bit 4:2:0 SPS");
+            "P-picture decoding requires a valid progressive 8-bit 4:2:0 SPS");
     }
-    if (reference_frame.width != sps.width ||
-        reference_frame.height != sps.height ||
+    if (reference_frame.width != sps.coded_width ||
+        reference_frame.height != sps.coded_height ||
         reference_frame.luma.size() !=
-            checked_plane_size(sps.width, sps.height) ||
+            checked_plane_size(sps.coded_width, sps.coded_height) ||
         reference_frame.chroma_u.size() !=
-            checked_plane_size(sps.width / 2, sps.height / 2) ||
+            checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
         reference_frame.chroma_v.size() != reference_frame.chroma_u.size()) {
         throw std::invalid_argument(
             "P-picture reference frame dimensions or planes do not match the SPS");
     }
     for (const auto* reference : reference_frames_l0) {
-        if (reference == nullptr || reference->width != sps.width ||
-            reference->height != sps.height ||
-            reference->luma.size() != checked_plane_size(sps.width, sps.height) ||
+        if (reference == nullptr || reference->width != sps.coded_width ||
+            reference->height != sps.coded_height ||
+            reference->luma.size() != checked_plane_size(sps.coded_width, sps.coded_height) ||
             reference->chroma_u.size() !=
-                checked_plane_size(sps.width / 2, sps.height / 2) ||
+                checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
             reference->chroma_v.size() != reference->chroma_u.size()) {
             throw std::invalid_argument(
                 "P-picture L0 reference dimensions or planes do not match the SPS");
         }
     }
     for (const auto* reference : reference_frames_l1) {
-        if (reference == nullptr || reference->width != sps.width ||
-            reference->height != sps.height ||
-            reference->luma.size() != checked_plane_size(sps.width, sps.height) ||
+        if (reference == nullptr || reference->width != sps.coded_width ||
+            reference->height != sps.coded_height ||
+            reference->luma.size() != checked_plane_size(sps.coded_width, sps.coded_height) ||
             reference->chroma_u.size() !=
-                checked_plane_size(sps.width / 2, sps.height / 2) ||
+                checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
             reference->chroma_v.size() != reference->chroma_u.size()) {
             throw std::invalid_argument(
                 "B-picture L1 reference dimensions or planes do not match the SPS");
@@ -3955,7 +3969,7 @@ Yuv420Frame decode_p_frame_with_lists(
                 }
                 bool colocated_zero = false;
                 if (!reference_frames_l1.empty() &&
-                    !reference_frames_l1.front()->long_term_reference &&
+                    !input_frames_l1.front()->long_term_reference &&
                     macroblock_address <
                         reference_frames_l1.front()
                             ->colocated_motion_field.size()) {
@@ -5699,8 +5713,8 @@ Yuv420Frame decode_p_frame_with_lists(
         macroblock_intra16, luma_total_coefficients,
         macroblock_slice_ids, macroblock_disable_idc,
         macroblock_alpha_offsets, macroblock_beta_offsets, pps,
-        reference_frames_l0, reference_frames_l1);
-    return frame;
+        input_frames_l0, input_frames_l1);
+    return crop_decoded_frame(std::move(frame), sps);
 }
 
 Yuv420Frame decode_p_frame(

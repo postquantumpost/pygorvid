@@ -14,7 +14,7 @@ class SlideshowError(RuntimeError):
 
 def _load_sdl():
     if importlib.util.find_spec("sdl2") is None:
-        raise SlideshowError("optional slideshow feature was not included; install pygorvid[slideshow]")
+        raise SlideshowError("optional slideshow feature was not included; install PySDL2")
     try:
         import sdl2
     except (ImportError, RuntimeError, OSError) as error:
