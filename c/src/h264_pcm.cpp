@@ -5041,6 +5041,22 @@ Yuv420Frame decode_p_frame_with_lists(
                 sub_macroblock_reference_indices{};
             std::array<std::array<bool, 4>, 2>
                 sub_macroblock_reference_index_decoded{};
+            motion_vector_valid[macroblock_address].fill(0);
+            for (std::size_t partition_index = 0;
+                 partition_index < partition_count; ++partition_index) {
+                if (!partition_direct[partition_index]) {
+                    continue;
+                }
+                if (!slice_header.direct_spatial_mv_pred) {
+                    throw std::runtime_error(
+                        "B-slice temporal direct prediction is unsupported");
+                }
+                const auto& partition = partitions[partition_index];
+                derive_spatial_direct(
+                    macroblock_address, slice_id, partition.x, partition.y,
+                    partition.width, partition.height, reference_indices,
+                    prediction_flags, motion, motion_l1);
+            }
             for (std::size_t list_index = 0; list_index < 2; ++list_index) {
                 for (std::size_t partition_index = 0;
                      partition_index < partition_count; ++partition_index) {
@@ -5144,22 +5160,6 @@ Yuv420Frame decode_p_frame_with_lists(
                         }
                     }
                 }
-            }
-            motion_vector_valid[macroblock_address].fill(0);
-            for (std::size_t partition_index = 0;
-                 partition_index < partition_count; ++partition_index) {
-                if (!partition_direct[partition_index]) {
-                    continue;
-                }
-                if (!slice_header.direct_spatial_mv_pred) {
-                    throw std::runtime_error(
-                        "B-slice temporal direct prediction is unsupported");
-                }
-                const auto& partition = partitions[partition_index];
-                derive_spatial_direct(
-                    macroblock_address, slice_id, partition.x, partition.y,
-                    partition.width, partition.height, reference_indices,
-                    prediction_flags, motion, motion_l1);
             }
             std::array<std::array<MotionVector, 2>, 16> partition_motions{};
             std::array<std::array<MotionVector, 2>, 16> motion_differences{};
