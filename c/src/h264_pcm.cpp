@@ -5935,7 +5935,8 @@ Yuv420Frame decode_h264_reference_frame(
     if (unit_type == 1) {
         const std::vector<std::uint8_t> ebsp(slice_nals.front().begin() + 1,
                                              slice_nals.front().end());
-        BitReader slice_type_reader(ebsp_to_rbsp(ebsp));
+        const auto rbsp = ebsp_to_rbsp(ebsp);
+        BitReader slice_type_reader(rbsp);
         (void)slice_type_reader.read_ue();
         if (slice_type_reader.read_ue() % 5 == 2) {
             return decode_idr_i_frame(slice_nals, sps, pps);

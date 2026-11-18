@@ -139,10 +139,11 @@ Installed `vidprobe`, `vidprobe-go`, `vidprobe-rust` and `vidprobe-cpp` commands
 accept the same option. `--generate=grey.mp4` is also accepted. The initial
 output is exactly one second: 60 64x64 frames at 60 fps, with 48,000 stereo
 audio sample pairs at 48 kHz containing silence. Frame 1 is flat gray; frame 2
-uses the luma bytes `00 00 01` to test H.264 emulation prevention; the third frame is a reference non-IDR I_PCM picture with `frame_num=1`; the
-remaining 57 frames are gray IDR padding. All pictures use Constrained Baseline
-H.264 Level 2.0 I_PCM macroblocks (no transform or predictive compression yet),
-with four-byte MP4 NAL lengths. The audio track is uncompressed signed 16-bit
+uses the luma bytes `00 00 01` to test H.264 emulation prevention; the third frame is a reference non-IDR I_PCM picture with `frame_num=1`; the fourth
+is a reference non-IDR CAVLC I_16x16 DC picture with `frame_num=2` and zero
+residual. The remaining 56 frames are gray IDR padding. All pictures use
+Constrained Baseline H.264 Level 2.0, with four-byte MP4 NAL lengths. The audio
+track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must
 support PCM in MP4, not only AAC.
 

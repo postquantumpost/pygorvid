@@ -83,9 +83,12 @@ The current `--generate` output is documented in the root [README](./README.md):
 60 64x64 frames at 60 fps, with 48 kHz stereo silence, in an MP4. Frame 1 is
 the flat-gray I_PCM anchor. Frame 2 has luma samples `00 00 01` at the
 upper-left and all its other samples remain 128 to force emulation prevention
-without changing the coding path. Frame 3 is a reference non-IDR I_PCM picture with `frame_num=1`, followed by
-gray IDR padding through frame 60; the padded duration is at least one second.
-All current pictures are Constrained Baseline I_PCM. The plan changes the
+without changing the coding path. Frame 3 is a reference non-IDR I_PCM picture with `frame_num=1`. Frame 4 is a
+reference non-IDR CAVLC I_16x16 DC picture with `frame_num=2` and zero
+residual; its flat 8-bit luma prediction is 128 because the first macroblock
+has no available intra reference. Gray IDR padding follows through frame 60;
+the padded duration is at least one second. All current pictures are
+Constrained Baseline I_PCM or I_16x16 DC. The plan changes the
 eventual core video sequence to Progressive High, 8-bit 4:2:0, progressive,
 so CAVLC, CABAC, B pictures, and 8x8 transform tools can be introduced
 without changing profile halfway through the core sequence. Frame 1 remains

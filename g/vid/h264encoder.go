@@ -93,7 +93,28 @@ func (e H264Encoder) EncodeGreyFrame(idrPicID uint16) []byte {
 }
 
 func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
+	if frameIndex == 3 {
+		return e.encodeIntra16x16DCFrame()
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
+}
+
+func (e H264Encoder) encodeIntra16x16DCFrame() []byte {
+	w := h264BitWriter{}
+	for _, value := range []uint32{0, 2, 0} {
+		w.ue(value)
+	}
+	w.bits(2, 4)
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+	for mb := 0; mb < 16; mb++ {
+		w.ue(3)
+		w.ue(0)
+		w.ue(0)
+		w.bits(1, 1)
+	}
+	return prependH264NALSize(w.nal(0x21))
 }
 
 func (e H264Encoder) encodePCMFrame(idrPicID uint16, emulationPreventionTest bool) []byte {
@@ -134,7 +155,10 @@ func (e H264Encoder) encodePCMFrame(idrPicID uint16, emulationPreventionTest boo
 	if nonIDRReference {
 		header = 0x21
 	}
-	nal := w.nal(header)
+	return prependH264NALSize(w.nal(header))
+}
+
+func prependH264NALSize(nal []byte) []byte {
 	result := make([]byte, 4, 4+len(nal))
 	binary.BigEndian.PutUint32(result, uint32(len(nal)))
 	return append(result, nal...)

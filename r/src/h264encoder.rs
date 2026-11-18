@@ -90,7 +90,31 @@ impl H264Encoder {
     }
 
     pub fn encode_generated_frame(&self, frame_index: u16) -> Vec<u8> {
+        if frame_index == 3 {
+            return self.encode_intra16x16_dc_frame();
+        }
         self.encode_pcm_frame(frame_index, frame_index == 1)
+    }
+
+    fn encode_intra16x16_dc_frame(&self) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        for value in [0, 2, 0] {
+            writer.ue(value);
+        }
+        writer.bits(2, 4);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+        for _ in 0..16 {
+            writer.ue(3);
+            writer.ue(0);
+            writer.ue(0);
+            writer.bits(1, 1);
+        }
+        let nal = writer.nal(0x21);
+        let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
+        sample.extend(nal);
+        sample
     }
 
     fn encode_pcm_frame(&self, idr_pic_id: u16, emulation_prevention_test: bool) -> Vec<u8> {

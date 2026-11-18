@@ -83,7 +83,8 @@ std::uint32_t slice_type(const std::vector<std::uint8_t>& nal) {
         throw std::runtime_error("H.264 slice NAL is truncated");
     }
     const std::vector<std::uint8_t> ebsp(nal.begin() + 1, nal.end());
-    pygorvid::BitReader reader(pygorvid::ebsp_to_rbsp(ebsp));
+    const auto rbsp = pygorvid::ebsp_to_rbsp(ebsp);
+    pygorvid::BitReader reader(rbsp);
     (void)reader.read_ue();
     return reader.read_ue();
 }

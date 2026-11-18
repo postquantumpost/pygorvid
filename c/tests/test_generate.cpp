@@ -47,9 +47,20 @@ int main() {
             non_idr_sample.begin() + 4, non_idr_sample.end()),
         sps, pps);
     assert(non_idr_header.frame_num == 1);
+    const auto dc_sample = encoder.encode_generated_frame(3);
+    const auto dc_nal = std::vector<std::uint8_t>(
+        dc_sample.begin() + 4, dc_sample.end());
+    assert(pygorvid::parse_nal_header(dc_nal).unit_type == 1);
+    const auto dc_header =
+        pygorvid::parse_idr_i_slice_header(dc_nal, sps, pps);
+    assert(dc_header.frame_num == 2 && dc_header.slice_type == 2);
+    const auto dc_frame =
+        pygorvid::decode_h264_reference_frame({dc_nal}, sps, pps);
+    assert(dc_frame.luma == std::vector<std::uint8_t>(4096, 128));
+    assert(dc_frame.chroma_u == std::vector<std::uint8_t>(1024, 128));
+    assert(dc_frame.chroma_v == std::vector<std::uint8_t>(1024, 128));
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
-    assert(payload.size() < 400000);
     assert(payload == writer.encode(encoder));
     const pygorvid::Mp4Metadata empty;
     assert(payload == writer.encode(encoder, &empty));

@@ -91,6 +91,30 @@ std::vector<std::uint8_t> H264Encoder::encode_grey_frame(std::uint16_t idr_pic_i
 }
 
 std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t frame_index) const {
+    if (frame_index == 3) {
+        BitWriter writer;
+        for (const auto value : {0u, 2u, 0u}) {
+            writer.ue(value);
+        }
+        writer.bits(2, 4);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(3);
+            writer.ue(0);
+            writer.ue(0);
+            writer.bits(1, 1);
+        }
+        const auto nal = writer.nal(0x21);
+        const auto size = static_cast<std::uint32_t>(nal.size());
+        std::vector<std::uint8_t> sample;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            sample.push_back(static_cast<std::uint8_t>(size >> shift));
+        }
+        sample.insert(sample.end(), nal.begin(), nal.end());
+        return sample;
+    }
     return encode_pcm_frame(frame_index, frame_index == 1);
 }
 
