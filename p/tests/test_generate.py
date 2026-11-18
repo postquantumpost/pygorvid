@@ -29,10 +29,10 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
     try:
         assert reader.sample_count == 60
         decoder = H264Decoder(reader, threads=1)
-        for index in (0, 1, 2, 3, 59):
+        for index in (0, 1, 2, 3, 4, 59):
             sample = reader.sample_at(index)
             assert (sample.dts_ticks, sample.pts_ticks, sample.duration_ticks) == (index, index, 1)
-            assert sample.is_sync == (index not in (2, 3))
+            assert sample.is_sync == (index not in (2, 3, 4))
             if index == 1:
                 assert b"\x00\x00\x03\x01" in sample.data
             if index == 2:
@@ -46,13 +46,25 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
                 )
                 assert (header.frame_num, header.slice_type) == (2, 2)
                 assert not header.idr and header.nal_ref_idc == 1
+            if index == 4:
+                header = parse_slice_header(
+                    sample.data[4:],
+                    parse_sps(H264Encoder().sequence_parameter_set()),
+                    parse_pps(H264Encoder().picture_parameter_set()),
+                )
+                assert (header.frame_num, header.slice_type) == (3, 2)
+                assert not header.idr and header.nal_ref_idc == 1
             frame = decoder.decode_frame(index)
             assert (frame.width, frame.height) == (64, 64)
             expected_luma = bytearray([128] * 4096)
             if index == 1:
                 expected_luma[:3] = bytes((0, 0, 1))
-            assert bytes(frame.y) == expected_luma
-            assert bytes(frame.u) == bytes(frame.v) == bytes([128]) * 1024
+            if index == 4:
+                assert set(frame.y) == {127, 129}
+                assert set(frame.u) == set(frame.v) == {126, 130}
+            else:
+                assert bytes(frame.y) == expected_luma
+                assert bytes(frame.u) == bytes(frame.v) == bytes([128]) * 1024
     finally:
         reader.close()
     assert list(tmp_path.iterdir()) == [output]

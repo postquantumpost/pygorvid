@@ -59,6 +59,13 @@ int main() {
     assert(dc_frame.luma == std::vector<std::uint8_t>(4096, 128));
     assert(dc_frame.chroma_u == std::vector<std::uint8_t>(1024, 128));
     assert(dc_frame.chroma_v == std::vector<std::uint8_t>(1024, 128));
+    const auto modes_sample = encoder.encode_generated_frame(4);
+    const auto modes_nal = std::vector<std::uint8_t>(
+        modes_sample.begin() + 4, modes_sample.end());
+    const auto modes_header =
+        pygorvid::parse_idr_i_slice_header(modes_nal, sps, pps);
+    assert(modes_header.frame_num == 3);
+    assert(pygorvid::parse_nal_header(modes_nal).unit_type == 1);
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));

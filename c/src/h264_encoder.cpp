@@ -1,5 +1,6 @@
 #include "pygorvid/h264_encoder.hpp"
 
+#include <array>
 #include <cstddef>
 
 namespace pygorvid {
@@ -105,6 +106,41 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
             writer.ue(0);
             writer.ue(0);
             writer.bits(1, 1);
+        }
+        const auto nal = writer.nal(0x21);
+        const auto size = static_cast<std::uint32_t>(nal.size());
+        std::vector<std::uint8_t> sample;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            sample.push_back(static_cast<std::uint8_t>(size >> shift));
+        }
+        sample.insert(sample.end(), nal.begin(), nal.end());
+        return sample;
+    }
+    if (frame_index == 4) {
+        BitWriter writer;
+        for (const auto value : {0u, 2u, 0u}) {
+            writer.ue(value);
+        }
+        writer.bits(3, 4);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+        const std::array<std::uint32_t, 16> luma_modes{
+            2, 2, 2, 2, 0, 3, 2, 1, 0, 0, 1, 2, 0, 3, 2, 1};
+        const std::array<std::uint32_t, 16> chroma_modes{
+            0, 1, 1, 1, 2, 3, 0, 1, 2, 2, 3, 0, 2, 3, 2, 1};
+        for (std::size_t index = 0; index < luma_modes.size(); ++index) {
+            writer.ue(1 + luma_modes[index] + (index == 0 ? 8 : 0));
+            writer.ue(chroma_modes[index]);
+            writer.ue(0);
+            if (index == 0) {
+                writer.bits(0b01000011, 8);
+                writer.bits(0b10000, 5);
+                writer.bits(0b10000, 5);
+                writer.bits(0xff, 8);
+            } else {
+                writer.bits(1, 1);
+            }
         }
         const auto nal = writer.nal(0x21);
         const auto size = static_cast<std::uint32_t>(nal.size());

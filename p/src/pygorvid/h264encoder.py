@@ -70,6 +70,8 @@ class H264Encoder:
             raise ValueError("H.264 IDR picture ID must be between 0 and 65535")
         if frame_index == 3:
             return self._encode_intra16x16_dc_frame()
+        if frame_index == 4:
+            return self._encode_intra16x16_prediction_modes_frame()
         return self._encode_pcm_frame(frame_index, frame_index == 1)
 
     def _encode_intra16x16_dc_frame(self) -> bytes:
@@ -85,6 +87,32 @@ class H264Encoder:
             writer.ue(0)
             writer.ue(0)
             writer.bits(1, 1)
+        nal = writer.nal(0x21)
+        return len(nal).to_bytes(4, "big") + nal
+
+    def _encode_intra16x16_prediction_modes_frame(self) -> bytes:
+        writer = _BitWriter()
+        for value in (0, 2, 0):
+            writer.ue(value)
+        writer.bits(3, 4)
+        writer.bits(0, 1)
+        writer.ue(0)
+        writer.ue(1)
+        luma_modes = (2, 2, 2, 2, 0, 3, 2, 1, 0, 0, 1, 2, 0, 3, 2, 1)
+        chroma_modes = (0, 1, 1, 1, 2, 3, 0, 1, 2, 2, 3, 0, 2, 3, 2, 1)
+        for index, (luma_mode, chroma_mode) in enumerate(
+            zip(luma_modes, chroma_modes)
+        ):
+            writer.ue(1 + luma_mode + (8 if index == 0 else 0))
+            writer.ue(chroma_mode)
+            writer.ue(0)
+            if index == 0:
+                writer.bits(0b01000011, 8)
+                writer.bits(0b10000, 5)
+                writer.bits(0b10000, 5)
+                writer.bits(0xFF, 8)
+            else:
+                writer.bits(1, 1)
         nal = writer.nal(0x21)
         return len(nal).to_bytes(4, "big") + nal
 

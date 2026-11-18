@@ -13,7 +13,7 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::uint32_t kVideoFrameRate = 60;
 constexpr std::uint32_t kMinimumVideoFrameCount = kVideoFrameRate;
-constexpr std::uint32_t kGeneratedFeatureFrameCount = 4;
+constexpr std::uint32_t kGeneratedFeatureFrameCount = 5;
 constexpr std::uint32_t kAudioSampleRate = 48000;
 
 Bytes u32s(std::initializer_list<std::uint32_t> values) {
@@ -381,7 +381,7 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
     const auto offset = static_cast<std::uint32_t>(ftyp.size()) + 8;
     std::vector<std::uint32_t> sync_samples;
     for (std::uint32_t sample = 1; sample <= frame_count; ++sample) {
-        if (sample != 3 && sample != 4) {
+        if (sample != 3 && sample != 4 && sample != 5) {
             sync_samples.push_back(sample);
         }
     }

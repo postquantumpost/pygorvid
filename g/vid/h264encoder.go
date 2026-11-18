@@ -96,6 +96,9 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 3 {
 		return e.encodeIntra16x16DCFrame()
 	}
+	if frameIndex == 4 {
+		return e.encodeIntra16x16PredictionModesFrame()
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
 }
 
@@ -113,6 +116,37 @@ func (e H264Encoder) encodeIntra16x16DCFrame() []byte {
 		w.ue(0)
 		w.ue(0)
 		w.bits(1, 1)
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func (e H264Encoder) encodeIntra16x16PredictionModesFrame() []byte {
+	w := h264BitWriter{}
+	for _, value := range []uint32{0, 2, 0} {
+		w.ue(value)
+	}
+	w.bits(3, 4)
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+	lumaModes := [...]uint32{2, 2, 2, 2, 0, 3, 2, 1, 0, 0, 1, 2, 0, 3, 2, 1}
+	chromaModes := [...]uint32{0, 1, 1, 1, 2, 3, 0, 1, 2, 2, 3, 0, 2, 3, 2, 1}
+	for index := range lumaModes {
+		extra := uint32(0)
+		if index == 0 {
+			extra = 8
+		}
+		w.ue(1 + lumaModes[index] + extra)
+		w.ue(chromaModes[index])
+		w.ue(0)
+		if index == 0 {
+			w.bits(0b01000011, 8)
+			w.bits(0b10000, 5)
+			w.bits(0b10000, 5)
+			w.bits(0xff, 8)
+		} else {
+			w.bits(1, 1)
+		}
 	}
 	return prependH264NALSize(w.nal(0x21))
 }

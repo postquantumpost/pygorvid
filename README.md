@@ -141,7 +141,10 @@ output is exactly one second: 60 64x64 frames at 60 fps, with 48,000 stereo
 audio sample pairs at 48 kHz containing silence. Frame 1 is flat gray; frame 2
 uses the luma bytes `00 00 01` to test H.264 emulation prevention; the third frame is a reference non-IDR I_PCM picture with `frame_num=1`; the fourth
 is a reference non-IDR CAVLC I_16x16 DC picture with `frame_num=2` and zero
-residual. The remaining 56 frames are gray IDR padding. All pictures use
+residual. Frame 5 exercises I_16x16 vertical, horizontal, DC, and plane
+prediction together with all 4:2:0 chroma prediction modes; a compact CAVLC
+residual seeds observable luma and chroma reference edges. The remaining 55
+frames are gray IDR padding. All pictures use
 Constrained Baseline H.264 Level 2.0, with four-byte MP4 NAL lengths. The audio
 track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must
