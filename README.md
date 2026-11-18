@@ -144,7 +144,9 @@ is a reference non-IDR CAVLC I_16x16 DC picture with `frame_num=2` and zero
 residual. Frame 5 exercises I_16x16 vertical, horizontal, DC, and plane
 prediction together with all 4:2:0 chroma prediction modes; a compact CAVLC
 residual seeds observable luma and chroma reference edges. The remaining 55
-frames are gray IDR padding. All pictures use
+is followed by frame 6, an Intra_4x4 DC picture that sets every
+`prev_intra4x4_pred_mode_flag`. The remaining 54 frames are gray IDR padding.
+All pictures use
 Constrained Baseline H.264 Level 2.0, with four-byte MP4 NAL lengths. The audio
 track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must

@@ -89,8 +89,11 @@ residual; its flat 8-bit luma prediction is 128 because the first macroblock
 has no available intra reference. Frame 5 uses CAVLC I_16x16 with all
 vertical, horizontal, DC, and plane luma modes plus all four 4:2:0 chroma
 modes. Compact luma and chroma DC residuals seed observable reference edges.
+Frame 6 is a reference non-IDR Intra_4x4 DC picture: every macroblock signals
+all sixteen `prev_intra4x4_pred_mode_flag` bits and zero coded-block pattern.
 Gray IDR padding follows through frame 60; the padded duration is at least one
-second. All current pictures are Constrained Baseline I_PCM or I_16x16. The plan changes the
+second. All current pictures are Constrained Baseline I_PCM, I_16x16, or
+Intra_4x4. The plan changes the
 eventual core video sequence to Progressive High, 8-bit 4:2:0, progressive,
 so CAVLC, CABAC, B pictures, and 8x8 transform tools can be introduced
 without changing profile halfway through the core sequence. Frame 1 remains

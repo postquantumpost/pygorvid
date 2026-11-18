@@ -99,6 +99,9 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 4 {
 		return e.encodeIntra16x16PredictionModesFrame()
 	}
+	if frameIndex == 5 {
+		return e.encodeIntra4x4DCFrame()
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
 }
 
@@ -107,6 +110,7 @@ func (e H264Encoder) encodeIntra16x16DCFrame() []byte {
 	for _, value := range []uint32{0, 2, 0} {
 		w.ue(value)
 	}
+
 	w.bits(2, 4)
 	w.bits(0, 1)
 	w.ue(0)
@@ -116,6 +120,26 @@ func (e H264Encoder) encodeIntra16x16DCFrame() []byte {
 		w.ue(0)
 		w.ue(0)
 		w.bits(1, 1)
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func (e H264Encoder) encodeIntra4x4DCFrame() []byte {
+	w := h264BitWriter{}
+	for _, value := range []uint32{0, 2, 0} {
+		w.ue(value)
+	}
+	w.bits(4, 4)
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+	for mb := 0; mb < 16; mb++ {
+		w.ue(0)
+		for block := 0; block < 16; block++ {
+			w.bits(1, 1)
+		}
+		w.ue(0)
+		w.ue(3)
 	}
 	return prependH264NALSize(w.nal(0x21))
 }

@@ -66,6 +66,15 @@ int main() {
         pygorvid::parse_idr_i_slice_header(modes_nal, sps, pps);
     assert(modes_header.frame_num == 3);
     assert(pygorvid::parse_nal_header(modes_nal).unit_type == 1);
+    const auto intra4_sample = encoder.encode_generated_frame(5);
+    const auto intra4_nal = std::vector<std::uint8_t>(
+        intra4_sample.begin() + 4, intra4_sample.end());
+    const auto intra4_header =
+        pygorvid::parse_idr_i_slice_header(intra4_nal, sps, pps);
+    assert(intra4_header.frame_num == 4);
+    const auto intra4_frame =
+        pygorvid::decode_h264_reference_frame({intra4_nal}, sps, pps);
+    assert(intra4_frame.luma == std::vector<std::uint8_t>(4096, 128));
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));

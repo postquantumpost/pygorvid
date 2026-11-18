@@ -6,7 +6,7 @@ from .h264encoder import H264Encoder
 
 _VIDEO_FRAME_RATE = 60
 _MIN_VIDEO_FRAME_COUNT = _VIDEO_FRAME_RATE
-_GENERATED_FEATURE_FRAME_COUNT = 5
+_GENERATED_FEATURE_FRAME_COUNT = 6
 _AUDIO_SAMPLE_RATE = 48000
 
 
@@ -222,7 +222,7 @@ class Mp4Writer:
             1, visual, sizes, frame_count, _VIDEO_FRAME_RATE, video_duration_ms,
             video_offset, True,
             tuple(index + 1 for index in range(frame_count)
-                  if index not in (2, 3, 4)),
+                  if index not in (2, 3, 4, 5)),
         )
         audio_sizes = _full_box(b"stsz", _u32(4, audio_sample_count))
         audio_track = _track(

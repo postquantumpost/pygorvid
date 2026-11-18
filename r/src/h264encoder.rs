@@ -96,6 +96,9 @@ impl H264Encoder {
         if frame_index == 4 {
             return self.encode_intra16x16_prediction_modes_frame();
         }
+        if frame_index == 5 {
+            return self.encode_intra4x4_dc_frame();
+        }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
 
@@ -145,6 +148,29 @@ impl H264Encoder {
             } else {
                 writer.bits(1, 1);
             }
+        }
+        let nal = writer.nal(0x21);
+        let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
+        sample.extend(nal);
+        sample
+    }
+
+    fn encode_intra4x4_dc_frame(&self) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        for value in [0, 2, 0] {
+            writer.ue(value);
+        }
+        writer.bits(4, 4);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+        for _ in 0..16 {
+            writer.ue(0);
+            for _ in 0..16 {
+                writer.bits(1, 1);
+            }
+            writer.ue(0);
+            writer.ue(3);
         }
         let nal = writer.nal(0x21);
         let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
