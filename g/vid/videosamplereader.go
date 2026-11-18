@@ -361,6 +361,15 @@ func (r *VideoSampleReader) HEVCConfiguration() *HEVCConfiguration {
 	return &configuration
 }
 
+func (r *VideoSampleReader) AV1Configuration() *AV1Configuration {
+	if r.configuration.AV1 == nil {
+		return nil
+	}
+	configuration := *r.configuration.AV1
+	configuration.ConfigOBUs = cloneNALUnits(r.configuration.AV1.ConfigOBUs)
+	return &configuration
+}
+
 func (r *VideoSampleReader) SampleCount() int { return len(r.samples) }
 
 // FirstSyncSampleIndex returns the first sync sample in decode order, if one exists.
@@ -467,8 +476,10 @@ func (r *VideoSampleReader) sampleAtIndex(index int) (CompressedSample, error) {
 	if n != len(data) {
 		return CompressedSample{}, io.ErrUnexpectedEOF
 	}
-	if err := validateLengthPrefixedNALs(data, r.configuration.nalLengthSize()); err != nil {
-		return CompressedSample{}, fmt.Errorf("sample %d: %w", index, err)
+	if r.configuration.Codec == CodecH264 || r.configuration.Codec == CodecHEVC {
+		if err := validateLengthPrefixedNALs(data, r.configuration.nalLengthSize()); err != nil {
+			return CompressedSample{}, fmt.Errorf("sample %d: %w", index, err)
+		}
 	}
 	return CompressedSample{
 		Index:         uint64(index),

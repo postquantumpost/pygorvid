@@ -506,6 +506,13 @@ and parameter-set arrays. HEVC decoding is not implemented. In particular,
 `samples/PXL_20261014_223017213.mp4` is HEVC Main 10, not H.264, and cannot yet
 be decoded by `--readall` or frame extraction.
 
+The MP4 readers also recognize AV1 `av01` sample entries and parse `av1C`
+configuration records. All four languages expose an `AV1Decoder` object, but
+AV1 decoding is not implemented yet; decoder creation reports
+`NOT_IMPLEMENTED` (or the equivalent C++ runtime error) instead of treating the
+file as malformed. AV1 samples retain their compressed OBUs and are not passed
+through the H.264/HEVC length-prefixed NAL validator.
+
 ### Codec Source Isolation
 
 The Rust, Go, and Python codec implementations use the same source organization.

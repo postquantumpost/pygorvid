@@ -91,6 +91,9 @@ pub trait Mp4Box {
     fn hevc_configuration(&self) -> Option<&HevcConfiguration> {
         None
     }
+    fn av1_configuration(&self) -> Option<&crate::Av1Configuration> {
+        None
+    }
     fn sample_size_table(&self) -> Option<(u32, u32, &[u32])> {
         None
     }
@@ -714,6 +717,7 @@ fn new_box(header: BoxHeader) -> Box<dyn Mp4Box> {
         b"mdat" => Box::new(MdatBox { header }),
         b"avc1" | b"avcC" => crate::h264_mp4::new_box(header),
         b"hvc1" | b"hev1" | b"hvcC" => crate::hevc_mp4::new_box(header),
+        b"av01" | b"av1C" => crate::av1_mp4::new_box(header),
         b"stsd" => Box::new(StsdBox {
             header,
             sample_rate: 0,

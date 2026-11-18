@@ -5,6 +5,7 @@
 #include "pygorvid/pygorvid.hpp"
 #include "pygorvid/png.hpp"
 #include "pygorvid/video_samples.hpp"
+#include "pygorvid/av1.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -146,6 +147,10 @@ std::size_t decode_video(
     pygorvid::VideoSampleReader sample_reader;
     if (!sample_reader.open(input_path)) {
         throw std::runtime_error(sample_reader.error_info());
+    }
+    if (sample_reader.codec() == pygorvid::VideoCodec::AV1) {
+        pygorvid::AV1Decoder decoder;
+        decoder.check_available();
     }
 #ifdef PYGORVID_SLIDESHOW
     if (slideshow) {

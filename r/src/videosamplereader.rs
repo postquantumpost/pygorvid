@@ -204,6 +204,13 @@ impl VideoSampleReader {
         }
     }
 
+    pub fn av1_configuration(&self) -> Option<&crate::Av1Configuration> {
+        match &self.configuration {
+            CodecConfiguration::Av1(config) => Some(config),
+            _ => None,
+        }
+    }
+
     pub fn sample_count(&self) -> usize {
         self.samples.len()
     }
@@ -255,8 +262,10 @@ impl VideoSampleReader {
         file.seek(SeekFrom::Start(location.offset))?;
         let mut data = vec![0u8; location.size as usize];
         file.read_exact(&mut data)?;
-        validate_length_prefixed_nals(&data, usize::from(self.configuration.nal_length_size()))
-            .map_err(|error| invalid(format!("sample {index}: {error}")))?;
+        if self.codec() == VideoCodec::H264 || self.codec() == VideoCodec::Hevc {
+            validate_length_prefixed_nals(&data, usize::from(self.configuration.nal_length_size()))
+                .map_err(|error| invalid(format!("sample {index}: {error}")))?;
+        }
         Ok(CompressedSample {
             index: index as u64,
             data,

@@ -9,6 +9,11 @@
 
 namespace pygorvid {
 
+enum class VideoCodec {
+    H264,
+    AV1,
+};
+
 struct H264SampleConfiguration {
     std::uint8_t profile_idc = 0;
     std::uint8_t profile_compatibility = 0;
@@ -16,6 +21,18 @@ struct H264SampleConfiguration {
     std::uint8_t nal_length_size = 0;
     std::vector<std::vector<std::uint8_t>> sequence_parameter_sets;
     std::vector<std::vector<std::uint8_t>> picture_parameter_sets;
+};
+
+struct AV1SampleConfiguration {
+    std::uint8_t profile = 0;
+    std::uint8_t level = 0;
+    std::uint8_t tier = 0;
+    std::uint8_t bit_depth = 0;
+    bool monochrome = false;
+    bool chroma_subsampling_x = false;
+    bool chroma_subsampling_y = false;
+    std::uint8_t chroma_sample_position = 0;
+    std::vector<std::uint8_t> config_obus;
 };
 
 struct CompressedVideoSample {
@@ -42,6 +59,8 @@ public:
     std::size_t presentation_sample_index(std::size_t index) const;
     std::uint32_t timescale() const noexcept;
     const H264SampleConfiguration& configuration() const noexcept;
+    const AV1SampleConfiguration& av1_configuration() const noexcept;
+    VideoCodec codec() const noexcept;
     CompressedVideoSample sample_at(std::size_t index);
     bool read_next(CompressedVideoSample& sample);
 
@@ -60,6 +79,8 @@ private:
     std::string error_;
     std::uint32_t timescale_ = 0;
     H264SampleConfiguration configuration_;
+    AV1SampleConfiguration av1_configuration_;
+    VideoCodec codec_ = VideoCodec::H264;
     std::vector<SampleLocation> samples_;
     std::size_t next_index_ = 0;
 };

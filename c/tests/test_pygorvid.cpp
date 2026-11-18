@@ -5,6 +5,7 @@
 #include "pygorvid/jpeg.hpp"
 #include "pygorvid/png.hpp"
 #include "pygorvid/video_samples.hpp"
+#include "pygorvid/av1.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2403,12 +2404,47 @@ void test_video_sample_reader() {
     reader.close();
     assert(!reader.is_open());
 
+    auto av1_codec_data = make_sample_test_mp4();
+    const auto avc1_entry = std::search(
+        av1_codec_data.begin(), av1_codec_data.end(),
+        std::begin("avc1"), std::end("avc1") - 1);
+    const auto avcc_entry = std::search(
+        av1_codec_data.begin(), av1_codec_data.end(),
+        std::begin("avcC"), std::end("avcC") - 1);
+    assert(avc1_entry != av1_codec_data.end());
+    assert(avcc_entry != av1_codec_data.end());
+    std::copy(std::begin("av01"), std::end("av01") - 1, avc1_entry);
+    std::copy(std::begin("av1C"), std::end("av1C") - 1, avcc_entry);
+    const std::vector<std::uint8_t> av1_configuration{
+        0x81, 0x13, 0x0c, 0x00};
+    std::copy(av1_configuration.begin(), av1_configuration.end(),
+              avcc_entry + 4);
+    std::ofstream av1_codec_output(test_file, std::ios::binary |
+                                                  std::ios::trunc);
+    av1_codec_output.write(reinterpret_cast<const char*>(av1_codec_data.data()),
+                           static_cast<std::streamsize>(av1_codec_data.size()));
+    av1_codec_output.close();
+    assert(av1_codec_output.good());
+    assert(reader.open(test_file.string()));
+    assert(reader.codec() == pygorvid::VideoCodec::AV1);
+    assert(reader.av1_configuration().profile == 0);
+    assert(reader.av1_configuration().level == 19);
+    assert(reader.av1_configuration().bit_depth == 8);
+    bool av1_unimplemented = false;
+    try {
+        pygorvid::AV1Decoder decoder;
+        decoder.check_available();
+    } catch (const std::runtime_error&) {
+        av1_unimplemented = true;
+    }
+    assert(av1_unimplemented);
+
     auto unsupported_codec_data = make_sample_test_mp4();
-    const auto avc1 = std::search(unsupported_codec_data.begin(),
-                                  unsupported_codec_data.end(),
-                                  std::begin("avc1"), std::end("avc1") - 1);
-    assert(avc1 != unsupported_codec_data.end());
-    std::copy(std::begin("av01"), std::end("av01") - 1, avc1);
+    const auto unsupported_entry = std::search(
+        unsupported_codec_data.begin(), unsupported_codec_data.end(),
+        std::begin("avc1"), std::end("avc1") - 1);
+    assert(unsupported_entry != unsupported_codec_data.end());
+    std::copy(std::begin("vp09"), std::end("vp09") - 1, unsupported_entry);
     std::ofstream unsupported_codec_output(test_file, std::ios::binary |
                                                         std::ios::trunc);
     unsupported_codec_output.write(
@@ -2418,7 +2454,7 @@ void test_video_sample_reader() {
     assert(unsupported_codec_output.good());
     assert(!reader.open(test_file.string()));
     assert(reader.error_info() ==
-           "unsupported video sample entry 'av01'; H.264 avc1 is required");
+           "unsupported video sample entry 'vp09'; H.264 avc1 or AV1 av01 is required");
 
     std::filesystem::remove(test_file);
     std::filesystem::remove(test_directory);

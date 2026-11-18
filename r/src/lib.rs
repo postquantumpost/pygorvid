@@ -1,5 +1,7 @@
 //! Video container detection without ffmpeg.
 
+mod av1_decoder;
+mod av1_mp4;
 mod basicinfo;
 mod bitreader;
 #[path = "h264_cabac.rs"]
@@ -35,6 +37,8 @@ mod sps;
 mod videosamplereader;
 mod vidfile;
 
+pub use av1_decoder::Av1Decoder;
+pub use av1_mp4::Av1Configuration;
 pub use basicinfo::{BasicAudioStreamInfo, BasicInfo, BasicVideoStreamInfo};
 pub use bitreader::BitReader;
 pub use cabac::{

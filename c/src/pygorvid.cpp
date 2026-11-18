@@ -1,6 +1,7 @@
 #include "pygorvid/pygorvid.hpp"
 #include "pygorvid/h264.hpp"
 #include "pygorvid/video_samples.hpp"
+#include "pygorvid/av1.hpp"
 
 #include <algorithm>
 #include <array>
@@ -297,6 +298,7 @@ H264SampleConfiguration parse_avc_configuration(std::ifstream& file,
     if (data.size() < 7 || data[0] != 1) {
         throw std::runtime_error("invalid or truncated avcC configuration");
     }
+
     if ((data[4] & 0xfcU) != 0xfcU || (data[5] & 0xe0U) != 0xe0U) {
         throw std::runtime_error("avcC reserved bits are invalid");
     }
@@ -378,6 +380,32 @@ H264SampleConfiguration parse_avc_configuration(std::ifstream& file,
     return H264SampleConfiguration{
         data[1], data[2], data[3], nal_length_size,
         std::move(sequence_parameter_sets), std::move(picture_parameter_sets)};
+}
+
+AV1SampleConfiguration parse_av1_configuration(std::ifstream& file,
+                                                const Box& box) {
+    const auto data = read_box_payload(file, box);
+    if (data.size() < 4 || data[0] != 0x81U) {
+        throw std::runtime_error(
+            "invalid or truncated AV1DecoderConfigurationRecord");
+    }
+    if ((data[3] & 0xe0U) != 0) {
+        throw std::runtime_error("av1C reserved bits are invalid");
+    }
+    AV1SampleConfiguration result;
+    result.profile = static_cast<std::uint8_t>(data[1] >> 5U);
+    result.level = static_cast<std::uint8_t>(data[1] & 0x1fU);
+    result.tier = static_cast<std::uint8_t>((data[2] >> 7U) & 1U);
+    const bool high_bitdepth = (data[2] & 0x40U) != 0;
+    const bool twelve_bit = (data[2] & 0x20U) != 0;
+    result.bit_depth = twelve_bit ? 12 : high_bitdepth ? 10 : 8;
+    result.monochrome = (data[2] & 0x10U) != 0;
+    result.chroma_subsampling_x = (data[2] & 0x08U) != 0;
+    result.chroma_subsampling_y = (data[2] & 0x04U) != 0;
+    result.chroma_sample_position =
+        static_cast<std::uint8_t>(data[2] & 0x03U);
+    result.config_obus.assign(data.begin() + 4, data.end());
+    return result;
 }
 
 void require_full_box_version_zero(std::ifstream& file, const Box& box,
@@ -714,10 +742,11 @@ bool VideoSampleReader::open(const std::string& path) {
             throw std::runtime_error(
                 "video track must contain one sample description");
         }
-        if (sample_entries.front().type != "avc1") {
+        if (sample_entries.front().type != "avc1" &&
+            sample_entries.front().type != "av01") {
             throw std::runtime_error("unsupported video sample entry '" +
                                      sample_entries.front().type +
-                                     "'; H.264 avc1 is required");
+                                     "'; H.264 avc1 or AV1 av01 is required");
         }
         const auto& sample_entry = sample_entries.front();
         if (sample_entry.end - sample_entry.payload < 78) {
@@ -725,17 +754,29 @@ bool VideoSampleReader::open(const std::string& path) {
         }
         const auto sample_entry_children =
             read_boxes(file_, sample_entry.payload + 78, sample_entry.end, 1);
-        std::vector<const Box*> avcc_boxes;
+        std::vector<const Box*> configuration_boxes;
         for (const auto& child : sample_entry_children) {
-            if (child.type == "avcC") {
-                avcc_boxes.push_back(&child);
+            if ((sample_entry.type == "avc1" && child.type == "avcC") ||
+                (sample_entry.type == "av01" && child.type == "av1C")) {
+                configuration_boxes.push_back(&child);
             }
         }
-        if (avcc_boxes.size() != 1) {
-            throw std::runtime_error(
-                "avc1 sample entry must contain one avcC box");
+        if (configuration_boxes.size() != 1) {
+            throw std::runtime_error(sample_entry.type +
+                                     " sample entry must contain one " +
+                                     (sample_entry.type == "avc1" ? "avcC"
+                                                                  : "av1C") +
+                                     " box");
         }
-        configuration_ = parse_avc_configuration(file_, *avcc_boxes.front());
+        if (sample_entry.type == "avc1") {
+            configuration_ =
+                parse_avc_configuration(file_, *configuration_boxes.front());
+            codec_ = VideoCodec::H264;
+        } else {
+            av1_configuration_ =
+                parse_av1_configuration(file_, *configuration_boxes.front());
+            codec_ = VideoCodec::AV1;
+        }
 
         const auto& sample_size_box =
             one_track_box({"mdia", "minf", "stbl", "stsz"}, "stsz");
@@ -1069,6 +1110,8 @@ void VideoSampleReader::close() noexcept {
     path_.clear();
     timescale_ = 0;
     configuration_ = {};
+    av1_configuration_ = {};
+    codec_ = VideoCodec::H264;
     samples_.clear();
     next_index_ = 0;
 }
@@ -1117,6 +1160,15 @@ const H264SampleConfiguration& VideoSampleReader::configuration() const noexcept
     return configuration_;
 }
 
+const AV1SampleConfiguration&
+VideoSampleReader::av1_configuration() const noexcept {
+    return av1_configuration_;
+}
+
+VideoCodec VideoSampleReader::codec() const noexcept {
+    return codec_;
+}
+
 CompressedVideoSample VideoSampleReader::sample_at(std::size_t index) {
     if (!is_open()) {
         throw std::runtime_error("sample reader is closed");
@@ -1137,17 +1189,29 @@ CompressedVideoSample VideoSampleReader::sample_at(std::size_t index) {
     if (!file_) {
         throw std::runtime_error("cannot read compressed video sample");
     }
-    const auto nals =
-        split_length_prefixed_nals(data, configuration_.nal_length_size);
-    if (nals.empty()) {
-        throw std::runtime_error("compressed video sample contains no NAL units");
-    }
-    for (const auto& nal : nals) {
-        (void)parse_nal_header(nal);
+    if (codec_ == VideoCodec::H264) {
+        const auto nals =
+            split_length_prefixed_nals(data, configuration_.nal_length_size);
+        if (nals.empty()) {
+            throw std::runtime_error(
+                "compressed video sample contains no NAL units");
+        }
+        for (const auto& nal : nals) {
+            (void)parse_nal_header(nal);
+        }
     }
     return CompressedVideoSample{index, std::move(data), location.dts_ticks,
                                  location.pts_ticks, location.duration_ticks,
                                  location.is_sync};
+}
+
+void AV1Decoder::check_available() const {
+    throw std::runtime_error("AV1 decoding is not implemented");
+}
+
+Yuv420Frame AV1Decoder::decode_frame(std::uint64_t) const {
+    check_available();
+    return {};
 }
 
 bool VideoSampleReader::read_next(CompressedVideoSample& sample) {

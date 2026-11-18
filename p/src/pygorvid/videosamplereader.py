@@ -18,9 +18,10 @@ from .mp4boxes import (
     read_boxes,
 )
 from .codec_sample import NALUnitError, split_length_prefixed_nals
-from .codec import read_codec_configuration
+from .codec import VideoCodec, read_codec_configuration
 from .h264_mp4 import AVCConfiguration
 from .hevc_mp4 import HEVCConfiguration
+from .av1_mp4 import AV1Configuration
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,9 @@ class VideoSampleReader:
         self._closed = True
         self._samples: List[_SampleLocation] = []
         self._next_index = 0
-        self.configuration: Optional[Union[AVCConfiguration, HEVCConfiguration]] = None
+        self.configuration: Optional[
+            Union[AVCConfiguration, HEVCConfiguration, AV1Configuration]
+        ] = None
         try:
             self._file = self.path.open("rb")
             self._closed = False
@@ -275,7 +278,8 @@ class VideoSampleReader:
         if self.configuration is None:
             raise Mp4FormatError("AVC configuration is unavailable")
         try:
-            _validate_length_prefixed_nals(data, self.configuration.nal_length_size)
+            if self.codec == VideoCodec.H264 or self.codec == VideoCodec.HEVC:
+                _validate_length_prefixed_nals(data, self.configuration.nal_length_size)
         except Mp4FormatError as error:
             raise Mp4FormatError(f"sample {index}: {error}") from error
         return CompressedSample(

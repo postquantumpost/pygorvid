@@ -1,19 +1,22 @@
 use std::fmt;
 
 use crate::{
-    AvcConfiguration, H264Decoder, HevcConfiguration, HevcDecoder, VideoSampleReader, Yuv420Frame,
+    Av1Configuration, Av1Decoder, AvcConfiguration, H264Decoder, HevcConfiguration, HevcDecoder,
+    VideoSampleReader, Yuv420Frame,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
     Hevc,
+    Av1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodecConfiguration {
     H264(AvcConfiguration),
     Hevc(HevcConfiguration),
+    Av1(Av1Configuration),
 }
 
 impl CodecConfiguration {
@@ -21,6 +24,7 @@ impl CodecConfiguration {
         match self {
             Self::H264(_) => VideoCodec::H264,
             Self::Hevc(_) => VideoCodec::Hevc,
+            Self::Av1(_) => VideoCodec::Av1,
         }
     }
 
@@ -28,6 +32,7 @@ impl CodecConfiguration {
         match self {
             Self::H264(config) => config.nal_length_size,
             Self::Hevc(config) => config.nal_length_size,
+            Self::Av1(_) => 0,
         }
     }
 }
@@ -40,6 +45,7 @@ pub(crate) fn sample_configuration(
         b"hvc1" | b"hev1" => {
             crate::hevc_mp4::sample_configuration(entry).map(CodecConfiguration::Hevc)
         }
+        b"av01" => crate::av1_mp4::sample_configuration(entry).map(CodecConfiguration::Av1),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "unsupported video sample entry",
@@ -83,6 +89,7 @@ impl std::error::Error for CodecError {}
 pub enum VideoDecoder {
     H264(H264Decoder),
     Hevc(HevcDecoder),
+    Av1(Av1Decoder),
 }
 
 impl VideoDecoder {
@@ -95,6 +102,13 @@ impl VideoDecoder {
                     .check_available()
                     .map_err(crate::DecodeError::Codec)?;
                 Ok(Self::Hevc(decoder))
+            }
+            VideoCodec::Av1 => {
+                let decoder = Av1Decoder::new();
+                decoder
+                    .check_available()
+                    .map_err(crate::DecodeError::Codec)?;
+                Ok(Self::Av1(decoder))
             }
         }
     }
@@ -127,6 +141,9 @@ impl VideoDecoder {
         match self {
             Self::H264(decoder) => decoder.decode_frame(index),
             Self::Hevc(decoder) => decoder
+                .decode_frame(index)
+                .map_err(crate::DecodeError::Codec),
+            Self::Av1(decoder) => decoder
                 .decode_frame(index)
                 .map_err(crate::DecodeError::Codec),
         }

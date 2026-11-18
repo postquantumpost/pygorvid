@@ -562,6 +562,8 @@ var boxRegistry = map[string]func(boxHeader) box{
 	"hvc1": newHEVCBox,
 	"hev1": newHEVCBox,
 	"hvcC": newHEVCBox,
+	"av01": newAV1Box,
+	"av1C": newAV1Box,
 	"stsz": func(h boxHeader) box { return &stszBox{boxBase: boxBase{h}} },
 	"stsc": func(h boxHeader) box { return &stscBox{boxBase: boxBase{h}} },
 	"stco": func(h boxHeader) box { return &stcoBox{boxBase: boxBase{h}} },

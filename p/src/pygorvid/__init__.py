@@ -3,6 +3,8 @@ from .codec import CodecError, CodecErrorCode, VideoCodec, create_decoder
 from .codec_frame import Yuv420Frame
 from .hevc_decoder import HEVCDecoder
 from .hevc_mp4 import HEVCConfiguration
+from .av1_decoder import AV1Decoder
+from .av1_mp4 import AV1Configuration
 from .bitreader import BitReader, BitstreamError
 from .cabac import (
     CABACArithmeticDecoder,
@@ -235,6 +237,8 @@ __all__ = [
     "create_decoder",
     "HEVCDecoder",
     "HEVCConfiguration",
+    "AV1Decoder",
+    "AV1Configuration",
     "detect_format",
     "probe_file",
     "BasicInfo",

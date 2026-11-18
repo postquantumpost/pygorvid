@@ -10,6 +10,7 @@ type VideoCodec string
 const (
 	CodecH264 VideoCodec = "h264"
 	CodecHEVC VideoCodec = "hevc"
+	CodecAV1  VideoCodec = "av1"
 )
 
 type CodecErrorCode string
@@ -32,11 +33,15 @@ type CodecConfiguration struct {
 	Codec VideoCodec
 	AVC   *AVCConfiguration
 	HEVC  *HEVCConfiguration
+	AV1   *AV1Configuration
 }
 
 func (config CodecConfiguration) nalLengthSize() uint8 {
 	if config.HEVC != nil {
 		return config.HEVC.NALLengthSize
+	}
+	if config.AV1 != nil {
+		return 0
 	}
 	return config.AVC.NALLengthSize
 }
@@ -49,6 +54,9 @@ func readCodecConfiguration(entry box, timescale uint32) (CodecConfiguration, er
 	case "hvc1", "hev1":
 		config, err := readHEVCSampleConfiguration(entry, timescale)
 		return CodecConfiguration{Codec: CodecHEVC, HEVC: config}, err
+	case "av01":
+		config, err := readAV1SampleConfiguration(entry, timescale)
+		return CodecConfiguration{Codec: CodecAV1, AV1: config}, err
 	default:
 		return CodecConfiguration{}, errors.New("unsupported video sample entry")
 	}
@@ -66,6 +74,13 @@ func NewVideoDecoder(reader *VideoSampleReader) (VideoDecoder, error) {
 	}
 	if reader.Codec() == CodecHEVC {
 		decoder := NewHEVCDecoder(reader)
+		if err := decoder.CheckAvailable(); err != nil {
+			return nil, err
+		}
+		return decoder, nil
+	}
+	if reader.Codec() == CodecAV1 {
+		decoder := NewAV1Decoder(reader)
 		if err := decoder.CheckAvailable(); err != nil {
 			return nil, err
 		}

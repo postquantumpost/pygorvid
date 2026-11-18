@@ -7,6 +7,7 @@ import os
 class VideoCodec(str, Enum):
     H264 = "h264"
     HEVC = "hevc"
+    AV1 = "av1"
 
 
 class CodecErrorCode(str, Enum):
@@ -33,6 +34,8 @@ def read_codec_configuration(entry, timescale):
         from .h264_mp4 import read_sample_configuration
     elif entry.header.type in {"hvc1", "hev1"}:
         from .hevc_mp4 import read_sample_configuration
+    elif entry.header.type == "av01":
+        from .av1_mp4 import read_sample_configuration
     else:
         from .mp4boxes import Mp4FormatError
         raise Mp4FormatError("unsupported video sample entry")
@@ -43,6 +46,11 @@ def create_decoder(reader, **options):
     if reader.codec == VideoCodec.HEVC:
         from .hevc_decoder import HEVCDecoder
         decoder = HEVCDecoder(reader, **options)
+        decoder.check_available()
+        return decoder
+    if reader.codec == VideoCodec.AV1:
+        from .av1_decoder import AV1Decoder
+        decoder = AV1Decoder(reader, **options)
         decoder.check_available()
         return decoder
     from .h264_decoder import H264Decoder

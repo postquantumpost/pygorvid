@@ -353,6 +353,9 @@ def _new_box(header: BoxHeader) -> Box:
     if header.type in {"hvc1", "hev1", "hvcC"}:
         from .hevc_mp4 import HevcSampleEntryBox, HvcCBox
         return (HvcCBox if header.type == "hvcC" else HevcSampleEntryBox)(header)
+    if header.type in {"av01", "av1C"}:
+        from .av1_mp4 import Av1CBox, Av1SampleEntryBox
+        return (Av1CBox if header.type == "av1C" else Av1SampleEntryBox)(header)
     return _REGISTRY.get(header.type, UnknownBox)(header)
 
 
