@@ -54,7 +54,7 @@ pub fn ebsp_to_rbsp(ebsp: &[u8]) -> io::Result<Vec<u8>> {
     for (index, value) in ebsp.iter().copied().enumerate() {
         if zero_count == 2 {
             if value == 0x03 {
-                if index + 1 == ebsp.len() || ebsp[index + 1] > 0x03 {
+                if index + 1 < ebsp.len() && ebsp[index + 1] > 0x03 {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
                         "malformed emulation-prevention sequence",

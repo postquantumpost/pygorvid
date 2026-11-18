@@ -70,7 +70,7 @@ func EBSPToRBSP(ebsp []byte) ([]byte, error) {
 	for index, value := range ebsp {
 		if zeroCount == 2 {
 			if value == 0x03 {
-				if index+1 == len(ebsp) || ebsp[index+1] > 0x03 {
+				if index+1 < len(ebsp) && ebsp[index+1] > 0x03 {
 					return nil, ErrMalformedEBSP
 				}
 				zeroCount = 0

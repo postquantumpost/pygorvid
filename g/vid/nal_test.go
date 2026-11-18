@@ -49,6 +49,11 @@ func TestEBSPToRBSPValidEscapes(t *testing.T) {
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("multiple escapes = %v, %v; want %v, nil", got, err, want)
 	}
+	got, err = EBSPToRBSP([]byte{0x67, 0, 0, 3})
+	want = []byte{0x67, 0, 0}
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("terminal CABAC zero word = %v, %v; want %v, nil", got, err, want)
+	}
 }
 
 func TestEBSPToRBSPRejectsMalformedEscapes(t *testing.T) {
@@ -56,7 +61,6 @@ func TestEBSPToRBSPRejectsMalformedEscapes(t *testing.T) {
 		{0, 0, 0},
 		{0, 0, 1},
 		{0, 0, 2},
-		{0, 0, 3},
 		{0, 0, 3, 4},
 	} {
 		if _, err := EBSPToRBSP(ebsp); !errors.Is(err, ErrMalformedEBSP) {

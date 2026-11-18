@@ -628,9 +628,11 @@ void test_h264_nal_utilities() {
 
     assert((pygorvid::ebsp_to_rbsp({0, 0, 3, 0}) ==
             std::vector<std::uint8_t>{0, 0, 0}));
+    assert((pygorvid::ebsp_to_rbsp({0, 0, 3}) ==
+            std::vector<std::uint8_t>{0, 0}));
     bool bad_escape_rejected = false;
     try {
-        (void)pygorvid::ebsp_to_rbsp({0, 0, 3});
+        (void)pygorvid::ebsp_to_rbsp({0, 0, 3, 4});
     } catch (const std::runtime_error&) {
         bad_escape_rejected = true;
     }

@@ -192,7 +192,7 @@ std::vector<std::uint8_t> ebsp_to_rbsp(const std::vector<std::uint8_t>& ebsp) {
         const auto value = ebsp[index];
         if (zero_count == 2) {
             if (value == 0x03) {
-                if (index + 1 == ebsp.size() || ebsp[index + 1] > 0x03) {
+                if (index + 1 < ebsp.size() && ebsp[index + 1] > 0x03) {
                     invalid("malformed emulation-prevention sequence");
                 }
                 zero_count = 0;
@@ -601,9 +601,6 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
     if (normalized_slice_type != 0 && normalized_slice_type != 1) {
         invalid("inter slice parsing supports P and B slices only");
     }
-    if (normalized_slice_type == 0 && pps.weighted_pred) {
-        invalid("P-slice parsing does not support weighted prediction");
-    }
     result.slice_type = normalized_slice_type;
     result.picture_parameter_set_id =
         read_ue(reader, "P slice", "pic_parameter_set_id");
@@ -715,8 +712,76 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
             "ref_pic_list_modification_l1",
             result.ref_pic_list_modifications_l1);
     }
-    if (normalized_slice_type == 1 && pps.weighted_bipred_idc != 0) {
-        invalid("B decoding does not support weighted biprediction");
+    if ((normalized_slice_type == 0 && pps.weighted_pred) ||
+        (normalized_slice_type == 1 && pps.weighted_bipred_idc == 1)) {
+        PredictionWeightTable table;
+        const auto luma_denominator =
+            read_ue(reader, "pred_weight_table", "luma_log2_weight_denom");
+        const auto chroma_denominator =
+            sps.chroma_format_idc == 0
+                ? std::uint32_t{0}
+                : read_ue(reader, "pred_weight_table",
+                          "chroma_log2_weight_denom");
+        if (luma_denominator > 7 || chroma_denominator > 7) {
+            invalid("prediction weight log2 denominator exceeds 7");
+        }
+        table.denominators = {
+            static_cast<std::uint8_t>(luma_denominator),
+            static_cast<std::uint8_t>(chroma_denominator),
+            static_cast<std::uint8_t>(chroma_denominator)};
+        const std::array<std::uint32_t, 2> maxima{
+            result.num_ref_idx_l0_active_minus1,
+            result.num_ref_idx_l1_active_minus1};
+        const auto list_count = normalized_slice_type == 1 ? 2U : 1U;
+        for (std::size_t list_index = 0; list_index < list_count;
+             ++list_index) {
+            for (std::uint32_t reference = 0;
+                 reference <= maxima[list_index]; ++reference) {
+                PredictionWeight weight;
+                weight.weights = {
+                    1 << luma_denominator,
+                    1 << chroma_denominator,
+                    1 << chroma_denominator};
+                if (read_flag(reader, "pred_weight_table",
+                              "luma_weight_flag")) {
+                    const auto value =
+                        read_se(reader, "pred_weight_table", "luma_weight");
+                    const auto offset =
+                        read_se(reader, "pred_weight_table", "luma_offset");
+                    if (value < -128 || value > 127 ||
+                        offset < -128 || offset > 127) {
+                        invalid("prediction weight or offset exceeds [-128,127]");
+                    }
+                    weight.weights[0] = static_cast<std::int32_t>(value);
+                    weight.offsets[0] = static_cast<std::int32_t>(offset);
+                }
+                if (sps.chroma_format_idc != 0 &&
+                    read_flag(reader, "pred_weight_table",
+                              "chroma_weight_flag")) {
+                    for (std::size_t component = 1; component < 3;
+                         ++component) {
+                        const auto value = read_se(
+                            reader, "pred_weight_table", "chroma_weight");
+                        const auto offset = read_se(
+                            reader, "pred_weight_table", "chroma_offset");
+                        if (value < -128 || value > 127 ||
+                            offset < -128 || offset > 127) {
+                            invalid(
+                                "prediction weight or offset exceeds [-128,127]");
+                        }
+                        weight.weights[component] =
+                            static_cast<std::int32_t>(value);
+                        weight.offsets[component] =
+                            static_cast<std::int32_t>(offset);
+                    }
+                }
+                table.lists[list_index].push_back(weight);
+            }
+        }
+        result.prediction_weight_table = std::move(table);
+    } else if (normalized_slice_type == 1 &&
+               pps.weighted_bipred_idc == 2) {
+        invalid("B decoding does not support implicit weighted biprediction");
     }
     if (header.reference_idc != 0 &&
         read_flag(reader, "P slice",

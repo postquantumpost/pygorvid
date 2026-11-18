@@ -101,6 +101,16 @@ struct MemoryManagementOperation {
     std::vector<std::uint32_t> operands;
 };
 
+struct PredictionWeight {
+    std::array<std::int32_t, 3> weights{1, 1, 1};
+    std::array<std::int32_t, 3> offsets{0, 0, 0};
+};
+
+struct PredictionWeightTable {
+    std::array<std::uint8_t, 3> denominators{0, 0, 0};
+    std::array<std::vector<PredictionWeight>, 2> lists;
+};
+
 struct PSliceHeader {
     std::uint32_t first_macroblock_in_slice = 0;
     std::uint8_t slice_type = 0;
@@ -116,6 +126,7 @@ struct PSliceHeader {
     std::uint32_t num_ref_idx_l1_active_minus1 = 0;
     std::vector<ReferenceListModification> ref_pic_list_modifications_l0;
     std::vector<ReferenceListModification> ref_pic_list_modifications_l1;
+    std::optional<PredictionWeightTable> prediction_weight_table;
     bool adaptive_ref_pic_marking_mode = false;
     std::vector<MemoryManagementOperation> memory_management_operations;
     std::uint8_t cabac_init_idc = 0;

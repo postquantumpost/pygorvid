@@ -46,7 +46,7 @@ def ebsp_to_rbsp(ebsp: bytes) -> bytes:
     for index, value in enumerate(ebsp):
         if zero_count == 2:
             if value == 0x03:
-                if index + 1 == len(ebsp) or ebsp[index + 1] > 0x03:
+                if index + 1 < len(ebsp) and ebsp[index + 1] > 0x03:
                     raise NALUnitError("malformed emulation-prevention sequence")
                 zero_count = 0
                 continue

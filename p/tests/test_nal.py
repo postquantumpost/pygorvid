@@ -54,11 +54,12 @@ def test_ebsp_to_rbsp_handles_repeated_escapes_and_unescaped_bytes():
     encoded = bytes((0x67, 0, 0, 3, 0, 0, 3, 0, 1, 0x80))
     assert ebsp_to_rbsp(encoded) == bytes((0x67, 0, 0, 0, 0, 0, 1, 0x80))
     assert ebsp_to_rbsp(bytes((0x67, 0x12, 0x34))) == bytes((0x67, 0x12, 0x34))
+    assert ebsp_to_rbsp(bytes((0x67, 0, 0, 3))) == bytes((0x67, 0, 0))
 
 
 @pytest.mark.parametrize(
     "encoded",
-    [bytes((0, 0, value)) for value in range(3)] + [bytes((0, 0, 3)), bytes((0, 0, 3, 4))],
+    [bytes((0, 0, value)) for value in range(3)] + [bytes((0, 0, 3, 4))],
 )
 def test_ebsp_to_rbsp_rejects_malformed_sequences(encoded):
     with pytest.raises(NALUnitError, match="emulation-prevention"):

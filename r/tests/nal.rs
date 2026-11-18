@@ -81,6 +81,7 @@ fn removes_valid_emulation_prevention_bytes() {
         ebsp_to_rbsp(&[0x67, 0x12, 0x34]).unwrap(),
         [0x67, 0x12, 0x34]
     );
+    assert_eq!(ebsp_to_rbsp(&[0x67, 0, 0, 3]).unwrap(), [0x67, 0, 0]);
 }
 
 #[test]
@@ -89,7 +90,6 @@ fn rejects_malformed_emulation_prevention_sequences() {
         &[0, 0, 0][..],
         &[0, 0, 1][..],
         &[0, 0, 2][..],
-        &[0, 0, 3][..],
         &[0, 0, 3, 4][..],
     ] {
         let error = ebsp_to_rbsp(encoded).unwrap_err();

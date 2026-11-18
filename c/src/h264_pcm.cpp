@@ -4072,7 +4072,8 @@ Yuv420Frame decode_p_frame_with_lists(
             const MacroblockMotionVectors* motion_vectors_l1 = nullptr,
             const std::array<std::uint8_t, 16>* prediction_flags = nullptr,
             const std::array<std::array<std::int32_t, 16>, 2>*
-                reference_indices = nullptr) {
+                reference_indices = nullptr,
+            const PredictionWeightTable* weight_table = nullptr) {
         const auto macroblock_x = static_cast<std::uint32_t>(
             macroblock_address % macroblock_width);
         const auto macroblock_y = static_cast<std::uint32_t>(
@@ -4143,6 +4144,21 @@ Yuv420Frame decode_p_frame_with_lists(
                     const auto flags = prediction_flags == nullptr
                         ? std::uint8_t{1}
                         : (*prediction_flags)[motion_index];
+                    const auto active_reference =
+                        [&](std::size_t list_index) {
+                        const auto index =
+                            reference_indices == nullptr
+                                ? std::size_t{0}
+                                : static_cast<std::size_t>(std::max(
+                                      0, (*reference_indices)[list_index]
+                                             [motion_index]));
+                        if (weight_table != nullptr &&
+                            index >= weight_table->lists[list_index].size()) {
+                            throw std::runtime_error(
+                                "prediction weight reference is unavailable");
+                        }
+                        return index;
+                    };
                     const auto sample_l0 =
                         (flags & 1) != 0
                             ? sample_with_motion(
@@ -4157,13 +4173,63 @@ Yuv420Frame decode_p_frame_with_lists(
                                       : (*motion_vectors_l1)[motion_index])
                             : std::uint8_t{0};
                     std::uint8_t prediction = sample_l0;
-                    if ((flags & 3) == 2) {
+                    if ((flags & 3) == 2 && weight_table == nullptr) {
                         prediction = sample_l1;
-                    } else if ((flags & 3) == 3) {
+                    } else if ((flags & 3) == 3 && weight_table == nullptr) {
                         prediction = static_cast<std::uint8_t>(
                             (static_cast<std::uint32_t>(sample_l0) +
                              sample_l1 + 1) >>
                             1);
+                    } else if ((flags & 3) == 1 && weight_table != nullptr) {
+                        const auto& weight =
+                            weight_table->lists[0][active_reference(0)];
+                        const auto rounding =
+                            weight_table->denominators[plane_index] == 0
+                                ? 0
+                                : 1 << (weight_table->denominators[plane_index] -
+                                        1);
+                        const auto value =
+                            ((sample_l0 *
+                                  weight.weights[plane_index] +
+                              rounding) >>
+                             weight_table->denominators[plane_index]) +
+                            weight.offsets[plane_index];
+                        prediction = static_cast<std::uint8_t>(
+                            std::max(0, std::min(255, value)));
+                    } else if ((flags & 3) == 2 && weight_table != nullptr) {
+                        const auto& weight =
+                            weight_table->lists[1][active_reference(1)];
+                        const auto rounding =
+                            weight_table->denominators[plane_index] == 0
+                                ? 0
+                                : 1 << (weight_table->denominators[plane_index] -
+                                        1);
+                        const auto value =
+                            ((sample_l1 *
+                                  weight.weights[plane_index] +
+                              rounding) >>
+                             weight_table->denominators[plane_index]) +
+                            weight.offsets[plane_index];
+                        prediction = static_cast<std::uint8_t>(
+                            std::max(0, std::min(255, value)));
+                    } else if ((flags & 3) == 3 && weight_table != nullptr) {
+                        const auto& l0 =
+                            weight_table->lists[0][active_reference(0)];
+                        const auto& l1 =
+                            weight_table->lists[1][active_reference(1)];
+                        const auto denominator =
+                            weight_table->denominators[plane_index];
+                        const auto value =
+                            ((sample_l0 * l0.weights[plane_index] +
+                              sample_l1 * l1.weights[plane_index] +
+                              (1 << denominator)) >>
+                             (denominator + 1)) +
+                            ((l0.offsets[plane_index] +
+                                  l1.offsets[plane_index] +
+                                  1) >>
+                             1);
+                        prediction = static_cast<std::uint8_t>(
+                            std::max(0, std::min(255, value)));
                     }
                     destination[static_cast<std::size_t>(destination_y) *
                                     plane_width +
@@ -4265,14 +4331,21 @@ Yuv420Frame decode_p_frame_with_lists(
                     reconstruct_macroblock(address, macroblock_motion,
                                            &macroblock_motion_l1,
                                            &prediction_flags,
-                                           &reference_indices);
+                                           &reference_indices,
+                                           slice_header.prediction_weight_table
+                                               ? &*slice_header.prediction_weight_table
+                                               : nullptr);
                     macroblock_b_direct[address] = 1;
                 } else {
                     const auto skip_motion =
                         derive_skip_motion_vector(address, slice_id);
                     macroblock_motion.fill(skip_motion);
                     prediction_flags.fill(1);
-                    reconstruct_macroblock(address, macroblock_motion);
+                    reconstruct_macroblock(
+                        address, macroblock_motion, nullptr, nullptr, nullptr,
+                        slice_header.prediction_weight_table
+                            ? &*slice_header.prediction_weight_table
+                            : nullptr);
                 }
                 decoded_macroblocks[address] = 1;
                 macroblock_skipped[address] = 1;
@@ -5747,7 +5820,10 @@ Yuv420Frame decode_p_frame_with_lists(
                 macroblock_address, motion,
                 b_slice ? &motion_l1 : nullptr,
                 b_slice ? &prediction_flags : nullptr,
-                &macroblock_reference_indices[macroblock_address]);
+                &macroblock_reference_indices[macroblock_address],
+                slice_header.prediction_weight_table
+                    ? &*slice_header.prediction_weight_table
+                    : nullptr);
             if (transform_8x8) {
                 for (std::uint32_t block_index = 0; block_index < 4;
                      ++block_index) {
