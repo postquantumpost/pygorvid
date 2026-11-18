@@ -268,20 +268,32 @@ class VideoSampleReader:
             or not 0 <= index < len(self._samples)
         ):
             raise IndexError("sample index is out of range")
+        presentation_index = self.presentation_index_for_sample_index(index)
         if self._closed or self._file is None:
-            raise ValueError("sample reader is closed")
+            raise ValueError(
+                f"presentation frame {presentation_index} (sample {index}): "
+                "sample reader is closed"
+            )
         location = self._samples[index]
         self._file.seek(location.offset)
         data = self._file.read(location.size)
         if len(data) != location.size:
-            raise Mp4FormatError("truncated MP4 sample data")
+            raise Mp4FormatError(
+                f"presentation frame {presentation_index} (sample {index}): "
+                "truncated MP4 sample data"
+            )
         if self.configuration is None:
-            raise Mp4FormatError("AVC configuration is unavailable")
+            raise Mp4FormatError(
+                f"presentation frame {presentation_index} (sample {index}): "
+                "AVC configuration is unavailable"
+            )
         try:
             if self.codec == VideoCodec.H264 or self.codec == VideoCodec.HEVC:
                 _validate_length_prefixed_nals(data, self.configuration.nal_length_size)
         except Mp4FormatError as error:
-            raise Mp4FormatError(f"sample {index}: {error}") from error
+            raise Mp4FormatError(
+                f"presentation frame {presentation_index} (sample {index}): {error}"
+            ) from error
         return CompressedSample(
             index=index,
             data=data,

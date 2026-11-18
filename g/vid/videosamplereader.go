@@ -458,27 +458,62 @@ func (r *VideoSampleReader) NextSample() (sample CompressedSample, ok bool, err 
 }
 
 func (r *VideoSampleReader) sampleAtIndex(index int) (CompressedSample, error) {
-	if r == nil || r.file == nil {
+	if r == nil {
 		return CompressedSample{}, errors.New("sample reader is closed")
 	}
 	if index < 0 || index >= len(r.samples) {
 		return CompressedSample{}, errors.New("sample index is out of range")
 	}
 	location := r.samples[index]
+	presentationIndex := 0
+	displayOrder := make([]int, len(r.samples))
+	for position := range displayOrder {
+		displayOrder[position] = position
+	}
+	sort.SliceStable(displayOrder, func(left, right int) bool {
+		if r.samples[displayOrder[left]].ptsTicks != r.samples[displayOrder[right]].ptsTicks {
+			return r.samples[displayOrder[left]].ptsTicks < r.samples[displayOrder[right]].ptsTicks
+		}
+		return displayOrder[left] < displayOrder[right]
+	})
+	for position, sampleIndex := range displayOrder {
+		if sampleIndex == index {
+			presentationIndex = position
+			break
+		}
+	}
+	if r.file == nil {
+		return CompressedSample{}, fmt.Errorf(
+			"presentation frame %d (sample %d): sample reader is closed",
+			presentationIndex, index,
+		)
+	}
 	if location.offset > math.MaxInt64 {
-		return CompressedSample{}, errors.New("sample offset exceeds seek range")
+		return CompressedSample{}, fmt.Errorf(
+			"presentation frame %d (sample %d): sample offset exceeds seek range",
+			presentationIndex, index,
+		)
 	}
 	data := make([]byte, location.size)
 	n, err := r.file.ReadAt(data, int64(location.offset))
 	if err != nil && !(err == io.EOF && n == len(data)) {
-		return CompressedSample{}, fmt.Errorf("read sample %d: %w", index, err)
+		return CompressedSample{}, fmt.Errorf(
+			"presentation frame %d (sample %d): read sample: %w",
+			presentationIndex, index, err,
+		)
 	}
 	if n != len(data) {
-		return CompressedSample{}, io.ErrUnexpectedEOF
+		return CompressedSample{}, fmt.Errorf(
+			"presentation frame %d (sample %d): %w",
+			presentationIndex, index, io.ErrUnexpectedEOF,
+		)
 	}
 	if r.configuration.Codec == CodecH264 || r.configuration.Codec == CodecHEVC {
 		if err := validateLengthPrefixedNALs(data, r.configuration.nalLengthSize()); err != nil {
-			return CompressedSample{}, fmt.Errorf("sample %d: %w", index, err)
+			return CompressedSample{}, fmt.Errorf(
+				"presentation frame %d (sample %d): %w",
+				presentationIndex, index, err,
+			)
 		}
 	}
 	return CompressedSample{

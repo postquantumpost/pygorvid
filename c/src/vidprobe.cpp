@@ -123,10 +123,10 @@ std::size_t decode_video(
 #else
     std::unique_ptr<Slideshow> window;
     std::map<std::size_t, std::pair<pygorvid::Yuv420Frame, std::uint32_t>> pending;
-    std::vector<std::size_t> display_indices;
     std::size_t displayed_count = 0;
     auto deadline = std::chrono::steady_clock::now();
 #endif
+    std::vector<std::size_t> display_indices;
     if (output_path) {
         std::error_code path_error;
         const auto normalized_input =
@@ -166,12 +166,13 @@ std::size_t decode_video(
 #ifdef PYGORVID_SLIDESHOW
     if (slideshow) {
         window = std::make_unique<Slideshow>(input_path);
-        display_indices.resize(sample_reader.sample_count());
-        const auto presentation_order = sample_reader.presentation_sample_indices();
-        for (std::size_t index = 0; index < presentation_order.size(); ++index)
-            display_indices[presentation_order[index]] = index;
     }
 #endif
+    display_indices.resize(sample_reader.sample_count());
+    const auto presentation_order = sample_reader.presentation_sample_indices();
+    for (std::size_t index = 0; index < presentation_order.size(); ++index) {
+        display_indices[presentation_order[index]] = index;
+    }
     if (frame_index && *frame_index >= sample_reader.sample_count()) {
         throw std::out_of_range("requested frame index exceeds the sample count");
     }
@@ -502,7 +503,7 @@ std::size_t decode_video(
         }
         auto decoded = pygorvid::decode_h264_reference_frame(
             slices, selected_sps_info, selected_pps_info, reference_list_l0,
-            reference_list_l1);
+            reference_list_l1, display_indices[sample_index]);
 #ifdef PYGORVID_SLIDESHOW
         if (window) {
             pending.emplace(display_indices[sample_index], std::make_pair(decoded, sample.duration_ticks));

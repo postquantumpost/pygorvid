@@ -220,7 +220,9 @@ def test_h264_decoder_requires_avc_configuration_for_uncached_decode():
         {"sample_count": 1, "presentation_sample_index": lambda self, index: 0},
     )()
     decoder = H264Decoder(reader)
-    with pytest.raises(DecoderError, match="AVC configuration"):
+    with pytest.raises(
+        DecoderError, match=r"presentation frame 0: .*AVC configuration"
+    ):
         decoder.decode_frame(0)
 
 

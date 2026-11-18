@@ -350,7 +350,14 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
     const auto frame_count = std::max(kMinimumVideoFrameCount, kGeneratedFeatureFrameCount);
     auto sizes = u32s({0, frame_count});
     for (std::uint16_t index = 0; index < frame_count; ++index) {
-        const auto sample = encoder.encode_generated_frame(index);
+        std::vector<std::uint8_t> sample;
+        try {
+            sample = encoder.encode_generated_frame(index);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(
+                "presentation frame " + std::to_string(index) + ": " +
+                error.what());
+        }
         const auto size = u32s({static_cast<std::uint32_t>(sample.size())});
         sizes.insert(sizes.end(), size.begin(), size.end());
         video.insert(video.end(), sample.begin(), sample.end());

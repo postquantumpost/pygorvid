@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -546,6 +547,8 @@ func TestH264DecoderContractMarksFrameDecodeAsUnimplemented(t *testing.T) {
 	decoder := NewH264Decoder(&VideoSampleReader{samples: []sampleLocation{{}}})
 	if _, err := decoder.DecodeFrame(0); !errors.Is(err, ErrDecoderNotImplemented) {
 		t.Fatalf("DecodeFrame() err = %v; want %v", err, ErrDecoderNotImplemented)
+	} else if !strings.Contains(err.Error(), "presentation frame 0") {
+		t.Fatalf("DecodeFrame() err = %v; want presentation frame context", err)
 	}
 }
 

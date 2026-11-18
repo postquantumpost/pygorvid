@@ -2123,6 +2123,20 @@ impl H264Decoder {
     }
 
     pub fn decode_frame(&mut self, index: u64) -> Result<Yuv420Frame, DecodeError> {
+        let frame_available = self
+            .sample_reader
+            .as_ref()
+            .is_some_and(|reader| (index as usize) < reader.sample_count());
+        self.decode_frame_inner(index).map_err(|error| {
+            if frame_available {
+                DecodeError::DecodeFailure(format!("presentation frame {index}: {error}"))
+            } else {
+                error
+            }
+        })
+    }
+
+    fn decode_frame_inner(&mut self, index: u64) -> Result<Yuv420Frame, DecodeError> {
         if self.unsupported_feature {
             return Err(DecodeError::UnsupportedFeature);
         }

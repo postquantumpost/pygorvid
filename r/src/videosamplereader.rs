@@ -256,15 +256,36 @@ impl VideoSampleReader {
             .samples
             .get(index)
             .ok_or_else(|| invalid("sample index is out of range"))?;
+        let presentation_index = self.presentation_index_for_sample_index(index)?;
         let file = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "sample reader is closed")
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!(
+                    "presentation frame {presentation_index} (sample {index}): sample reader is closed"
+                ),
+            )
         })?;
-        file.seek(SeekFrom::Start(location.offset))?;
+        file.seek(SeekFrom::Start(location.offset))
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("presentation frame {presentation_index} (sample {index}): {error}"),
+                )
+            })?;
         let mut data = vec![0u8; location.size as usize];
-        file.read_exact(&mut data)?;
+        file.read_exact(&mut data).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("presentation frame {presentation_index} (sample {index}): {error}"),
+            )
+        })?;
         if self.codec() == VideoCodec::H264 || self.codec() == VideoCodec::Hevc {
             validate_length_prefixed_nals(&data, usize::from(self.configuration.nal_length_size()))
-                .map_err(|error| invalid(format!("sample {index}: {error}")))?;
+                .map_err(|error| {
+                    invalid(format!(
+                        "presentation frame {presentation_index} (sample {index}): {error}"
+                    ))
+                })?;
         }
         Ok(CompressedSample {
             index: index as u64,

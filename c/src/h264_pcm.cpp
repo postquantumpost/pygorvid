@@ -5996,7 +5996,7 @@ Yuv420Frame decode_idr_i_sample(const std::vector<std::uint8_t>& sample,
     return decode_idr_i_frame(slices, sps, pps);
 }
 
-Yuv420Frame decode_h264_reference_frame(
+Yuv420Frame decode_h264_reference_frame_impl(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
@@ -6034,6 +6034,25 @@ Yuv420Frame decode_h264_reference_frame(
     }
     throw std::runtime_error(
         "H.264 frame decoding supports I and restricted P/B pictures only");
+}
+
+Yuv420Frame decode_h264_reference_frame(
+    const std::vector<std::vector<std::uint8_t>>& slice_nals,
+    const SpsInfo& sps, const PpsInfo& pps,
+    const std::vector<const Yuv420Frame*>& reference_frames_l0,
+    const std::vector<const Yuv420Frame*>& reference_frames_l1,
+    std::optional<std::size_t> presentation_frame) {
+    try {
+        return decode_h264_reference_frame_impl(
+            slice_nals, sps, pps, reference_frames_l0, reference_frames_l1);
+    } catch (const std::exception& error) {
+        if (!presentation_frame) {
+            throw;
+        }
+        throw std::runtime_error(
+            "presentation frame " + std::to_string(*presentation_frame) +
+            ": " + error.what());
+    }
 }
 
 Yuv420Frame decode_h264_reference_frame(

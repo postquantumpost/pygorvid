@@ -360,7 +360,8 @@ func TestVideoSampleReaderRejectsTruncatedNALUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	if _, ok, err := reader.NextSample(); ok || err == nil || err.Error() != "sample 0: NAL unit is truncated" {
+	if _, ok, err := reader.NextSample(); ok || err == nil ||
+		err.Error() != "presentation frame 0 (sample 0): NAL unit is truncated" {
 		t.Fatalf("NextSample() = ok %v, err %v; want truncated NAL error", ok, err)
 	}
 	if reader.nextIndex != 0 {

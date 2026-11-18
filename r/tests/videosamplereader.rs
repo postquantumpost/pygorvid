@@ -418,7 +418,7 @@ fn rejects_truncated_nal_unit_without_advancing_reader() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error
         .to_string()
-        .contains("sample 0: NAL unit is truncated"));
+        .contains("presentation frame 0 (sample 0): NAL unit is truncated"));
     assert!(reader
         .next_sample()
         .unwrap_err()

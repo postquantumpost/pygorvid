@@ -193,7 +193,14 @@ class Mp4Writer:
         metadata_box = _metadata_box(metadata)
         compatibility_box = _compatibility_metadata_box(metadata)
         frame_count = max(_MIN_VIDEO_FRAME_COUNT, _GENERATED_FEATURE_FRAME_COUNT)
-        samples = [encoder.encode_generated_frame(index) for index in range(frame_count)]
+        samples = []
+        for index in range(frame_count):
+            try:
+                samples.append(encoder.encode_generated_frame(index))
+            except (ValueError, OverflowError, RuntimeError) as error:
+                raise type(error)(
+                    f"presentation frame {index}: {error}"
+                ) from error
         # IDR IDs can change the sample size, so retain individual sizes.
         video = b"".join(samples)
         audio_sample_count = max(_AUDIO_SAMPLE_RATE, frame_count * _AUDIO_SAMPLE_RATE // _VIDEO_FRAME_RATE)

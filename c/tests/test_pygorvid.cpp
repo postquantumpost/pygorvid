@@ -637,6 +637,17 @@ void test_h264_nal_utilities() {
         bad_escape_rejected = true;
     }
     assert(bad_escape_rejected);
+    bool frame_context_added = false;
+    try {
+        (void)pygorvid::decode_h264_reference_frame(
+            {}, pygorvid::SpsInfo{}, pygorvid::PpsInfo{}, {}, {},
+            std::size_t{62});
+    } catch (const std::runtime_error& error) {
+        frame_context_added =
+            std::string(error.what()).find("presentation frame 62") !=
+            std::string::npos;
+    }
+    assert(frame_context_added);
 
     for (const auto length_size : {1U, 2U, 4U}) {
         std::vector<std::uint8_t> sample;

@@ -1170,16 +1170,25 @@ VideoCodec VideoSampleReader::codec() const noexcept {
 }
 
 CompressedVideoSample VideoSampleReader::sample_at(std::size_t index) {
-    if (!is_open()) {
-        throw std::runtime_error("sample reader is closed");
-    }
     if (index >= samples_.size()) {
         throw std::out_of_range("video sample index is out of range");
+    }
+    const auto display_order = presentation_sample_indices();
+    const auto presentation_index = static_cast<std::size_t>(
+        std::find(display_order.begin(), display_order.end(), index) -
+        display_order.begin());
+    if (!is_open()) {
+        throw std::runtime_error(
+            "presentation frame " + std::to_string(presentation_index) +
+            " (sample " + std::to_string(index) + "): sample reader is closed");
     }
     const auto& location = samples_[index];
     if (location.size >
         static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max())) {
-        throw std::runtime_error("video sample exceeds supported read size");
+        throw std::runtime_error(
+            "presentation frame " + std::to_string(presentation_index) +
+            " (sample " + std::to_string(index) +
+            "): video sample exceeds supported read size");
     }
     std::vector<std::uint8_t> data(location.size);
     file_.clear();
@@ -1187,17 +1196,26 @@ CompressedVideoSample VideoSampleReader::sample_at(std::size_t index) {
     file_.read(reinterpret_cast<char*>(data.data()),
                static_cast<std::streamsize>(data.size()));
     if (!file_) {
-        throw std::runtime_error("cannot read compressed video sample");
+        throw std::runtime_error(
+            "presentation frame " + std::to_string(presentation_index) +
+            " (sample " + std::to_string(index) +
+            "): cannot read compressed video sample");
     }
     if (codec_ == VideoCodec::H264) {
-        const auto nals =
-            split_length_prefixed_nals(data, configuration_.nal_length_size);
-        if (nals.empty()) {
+        try {
+            const auto nals =
+                split_length_prefixed_nals(data, configuration_.nal_length_size);
+            if (nals.empty()) {
+                throw std::runtime_error(
+                    "compressed video sample contains no NAL units");
+            }
+            for (const auto& nal : nals) {
+                (void)parse_nal_header(nal);
+            }
+        } catch (const std::exception& error) {
             throw std::runtime_error(
-                "compressed video sample contains no NAL units");
-        }
-        for (const auto& nal : nals) {
-            (void)parse_nal_header(nal);
+                "presentation frame " + std::to_string(presentation_index) +
+                " (sample " + std::to_string(index) + "): " + error.what());
         }
     }
     return CompressedVideoSample{index, std::move(data), location.dts_ticks,

@@ -15,3 +15,6 @@ run offline later.
 When fixing bugs or implementing features in one language, refer to the other
 language implementations if they are working.  Port implementations missing
 in one language from the other languages as needed.
+
+For the video file reader and writer objects, codecs, have the error messages show
+the presentation frame number, if available, and if it applies to the operation.

@@ -1375,6 +1375,21 @@ class H264Decoder:
         return list0[: active_l0 + 1], list1[: active_l1 + 1] if header.slice_type % 5 == 1 else []
 
     def decode_frame(self, index: int) -> Yuv420Frame:
+        sample_count = getattr(self.sample_reader, "sample_count", None)
+        frame_available = (
+            isinstance(index, int)
+            and not isinstance(index, bool)
+            and isinstance(sample_count, int)
+            and 0 <= index < sample_count
+        )
+        try:
+            return self._decode_frame(index)
+        except DecoderError as error:
+            if not frame_available or str(error).startswith(f"presentation frame {index}"):
+                raise
+            raise DecoderError(f"presentation frame {index}: {error}") from error
+
+    def _decode_frame(self, index: int) -> Yuv420Frame:
         if self.sample_reader is None:
             raise DecoderError("H.264 decoder requires a sample reader")
         if self.unsupported_feature:
@@ -1561,7 +1576,9 @@ class H264Decoder:
                 self._report_frame_progress(display_index, sample_index, 100)
             except (ValueError, IndexError) as error:
                 raise DecoderError(
-                    f"sample {first_slice.sample_index}: picture reconstruction failed: {error}"
+                    f"presentation frame {display_index} "
+                    f"(sample {first_slice.sample_index}): "
+                    f"picture reconstruction failed: {error}"
                 ) from error
 
             self._cache_decoded_frame(display_index, frame)

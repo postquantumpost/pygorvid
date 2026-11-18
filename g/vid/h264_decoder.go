@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 var ErrDecoderMissingSampleReader = errors.New("H.264 decoder requires a sample reader")
@@ -159,6 +160,11 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 		return Yuv420Frame{}, ErrDecoderMissingSampleReader
 	}
 	if decoder.unsupportedFeature {
+		if index < uint64(decoder.sampleCount) {
+			return Yuv420Frame{}, fmt.Errorf(
+				"presentation frame %d: %w", index, ErrDecoderUnsupportedFeature,
+			)
+		}
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 	}
 	if index >= uint64(decoder.sampleCount) {
@@ -174,15 +180,21 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 		if stored, ok := decoder.referencePictureBuffer.Get(uint32(index)); ok {
 			y, err := stored.Frame.LumaPlaneBytes()
 			if err != nil {
-				return Yuv420Frame{}, err
+				return Yuv420Frame{}, fmt.Errorf(
+					"presentation frame %d: %w", index, err,
+				)
 			}
 			u, err := stored.Frame.UPlaneBytes()
 			if err != nil {
-				return Yuv420Frame{}, err
+				return Yuv420Frame{}, fmt.Errorf(
+					"presentation frame %d: %w", index, err,
+				)
 			}
 			v, err := stored.Frame.VPlaneBytes()
 			if err != nil {
-				return Yuv420Frame{}, err
+				return Yuv420Frame{}, fmt.Errorf(
+					"presentation frame %d: %w", index, err,
+				)
 			}
 			chromaWidth := stored.Frame.Width/2 + stored.Frame.Width%2
 			frame := Yuv420Frame{
@@ -195,9 +207,17 @@ func (decoder *H264Decoder) DecodeFrame(index uint64) (Yuv420Frame, error) {
 		}
 	}
 	if decoder.sampleReader.path == "" {
-		return Yuv420Frame{}, ErrDecoderNotImplemented
+		return Yuv420Frame{}, fmt.Errorf(
+			"presentation frame %d: %w", index, ErrDecoderNotImplemented,
+		)
 	}
-	return decoder.decodeNativeDependencies(index)
+	frame, err := decoder.decodeNativeDependencies(index)
+	if err != nil && !strings.Contains(err.Error(), "presentation frame ") &&
+		!errors.Is(err, ErrDecoderMissingSampleReader) &&
+		!errors.Is(err, ErrDecoderFrameIndexOutOfRange) {
+		return Yuv420Frame{}, fmt.Errorf("presentation frame %d: %w", index, err)
+	}
+	return frame, err
 }
 
 // DecodeFirstSyncFrame decodes the first sync sample before any non-reference or re-ordered frames.

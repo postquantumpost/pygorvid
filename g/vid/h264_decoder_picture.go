@@ -204,9 +204,13 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 		if int64(sample.Index) <= decoder.nativeLastSample {
 			continue
 		}
+		displayIndex := displayIndices[sample.Index]
 		slices, err := decoder.nativeSlices(sample)
 		if err != nil {
-			return Yuv420Frame{}, err
+			return Yuv420Frame{}, fmt.Errorf(
+				"presentation frame %d (sample %d): %w",
+				displayIndex, sample.Index, err,
+			)
 		}
 		first := slices[0]
 		for _, slice := range slices {
@@ -229,12 +233,14 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 			coded, err = decoder.decodeNativeInterSample(sample, poc)
 		}
 		if err != nil {
-			return Yuv420Frame{}, fmt.Errorf("sample %d: %w", sample.Index, err)
+			return Yuv420Frame{}, fmt.Errorf(
+				"presentation frame %d (sample %d): %w",
+				displayIndex, sample.Index, err,
+			)
 		}
 		if err := deblockNativePictureThreads(&coded, decoder.nativeBlocks, decoder.threads); err != nil {
 			return Yuv420Frame{}, err
 		}
-		displayIndex := displayIndices[sample.Index]
 		frame := cropNativeFrame(coded, first.sps)
 		if first.header.NALRefIDC != 0 {
 			if err := decoder.markNativeReference(first, uint32(displayIndex), poc, coded); err != nil {

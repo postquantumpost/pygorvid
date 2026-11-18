@@ -221,7 +221,10 @@ def test_video_sample_reader_rejects_truncated_nal_unit(tmp_path):
     path.write_bytes(corrupted)
 
     reader = VideoSampleReader(path)
-    with pytest.raises(Mp4FormatError, match="sample 0: NAL unit is truncated"):
+    with pytest.raises(
+        Mp4FormatError,
+        match=r"presentation frame 0 \(sample 0\): NAL unit is truncated",
+    ):
         reader.next_sample()
     assert reader._next_index == 0
     reader.close()
