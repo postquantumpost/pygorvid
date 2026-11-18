@@ -943,7 +943,8 @@ void predict_intra16x16(Yuv420Frame& frame, std::uint32_t macroblock_x,
     if (mode == 0) {
         if (!top_available) {
             throw std::runtime_error(
-                "I16x16 vertical mode has no top reference samples");
+                "I16x16 vertical mode has no top reference samples (macroblock " +
+                std::to_string(macroblock_x) + "," + std::to_string(macroblock_y) + ")");
         }
         for (std::uint32_t row = 0; row < 16; ++row) {
             std::copy(top.begin(), top.end(),
@@ -1680,6 +1681,843 @@ void predict_chroma8x8(std::vector<std::uint8_t>& plane,
 
 namespace {
 
+template <typename Flags, typename TransformFlags, typename DcFlags, typename NeighborCoded>
+void decode_intra_nxn(
+    BitReader& reader, std::optional<CabacArithmeticDecoder>& cabac_decoder,
+    std::vector<CabacContextModel>& cabac_contexts, const SpsInfo& sps,
+    const PpsInfo& pps, Yuv420Frame& frame, std::size_t macroblock_address,
+    std::size_t slice_id, std::uint32_t macroblock_width,
+    const Flags& decoded_macroblocks, TransformFlags& macroblock_transform_8x8,
+    DcFlags& macroblock_chroma_dc_coded_cb, DcFlags& macroblock_chroma_dc_coded_cr,
+    std::vector<std::uint8_t>& macroblock_chroma_mode,
+    std::vector<std::uint8_t>& macroblock_luma_cbp,
+    std::vector<std::uint8_t>& macroblock_chroma_cbp,
+    std::size_t luma_block_width, std::uint32_t chroma_block_width,
+    std::vector<std::uint8_t>& luma_total_coefficients,
+    std::vector<std::uint8_t>& luma_coded_block_flags,
+    std::vector<std::uint8_t>& intra4x4_modes,
+    std::vector<std::uint8_t>& intra4x4_mode_valid,
+    std::vector<std::uint8_t>& intra4x4_reconstructed,
+    std::array<std::vector<std::uint8_t>, 2>& chroma_total_coefficients,
+    const std::vector<std::size_t>& macroblock_slice_ids,
+    std::int32_t& previous_qpy, std::int32_t& previous_mb_qp_delta,
+    const NeighborCoded& luma_neighbor_coded,
+    const std::vector<std::uint8_t>* inter_slice_intra_flags = nullptr,
+    std::array<std::vector<std::uint8_t>, 2>* chroma_coded_flags = nullptr) {
+    const auto macroblock_x = static_cast<std::uint32_t>(macroblock_address % macroblock_width);
+    const auto macroblock_y = static_cast<std::uint32_t>(macroblock_address / macroblock_width);
+    const bool left_available = macroblock_x != 0;
+    const bool top_available = macroblock_y != 0;
+    const auto left_address = left_available ? macroblock_address - 1 : macroblock_address;
+    const auto top_address = top_available ? macroblock_address - macroblock_width : macroblock_address;
+    bool transform_8x8 = false;
+    if (pps.transform_8x8_mode) {
+        const bool left_transform =
+            left_available &&
+            decoded_macroblocks[left_address] &&
+            macroblock_slice_ids[left_address] == slice_id &&
+            macroblock_transform_8x8[left_address];
+        const bool top_transform =
+            top_available &&
+            decoded_macroblocks[top_address] &&
+            macroblock_slice_ids[top_address] == slice_id &&
+            macroblock_transform_8x8[top_address];
+        const auto transform_context =
+            399 + static_cast<std::size_t>(left_transform) +
+            static_cast<std::size_t>(top_transform);
+        transform_8x8 = cabac_decoder
+            ? cabac_decoder->decode_bin(
+                  cabac_contexts[transform_context])
+            : reader.read_bit();
+        macroblock_transform_8x8[macroblock_address] =
+            transform_8x8;
+    }
+    if (transform_8x8 && !cabac_decoder) {
+        throw std::runtime_error(
+            "CAVLC Intra_8x8 residual decoding is not supported");
+    }
+    std::array<std::uint8_t, 16> modes{};
+    std::array<std::uint8_t, 4> modes_8x8{};
+    if (transform_8x8) {
+        for (std::uint32_t block_index = 0; block_index < 4;
+             ++block_index) {
+            const auto block_x = macroblock_x * 4 +
+                                 (block_index % 2) * 2;
+            const auto block_y = macroblock_y * 4 +
+                                 (block_index / 2) * 2;
+            const auto neighbor_mode =
+                [&](std::uint32_t neighbor_x,
+                    std::uint32_t neighbor_y,
+                    bool neighbor_exists)
+                    -> std::optional<std::uint8_t> {
+                if (!neighbor_exists) {
+                    return std::nullopt;
+                }
+                const auto neighbor_index =
+                    static_cast<std::size_t>(neighbor_y) *
+                        luma_block_width +
+                    neighbor_x;
+                const auto neighbor_macroblock =
+                    static_cast<std::size_t>(neighbor_y / 4) *
+                        macroblock_width +
+                    neighbor_x / 4;
+                const bool available =
+                    neighbor_macroblock == macroblock_address
+                        ? intra4x4_mode_valid[neighbor_index] != 0
+                        : decoded_macroblocks[neighbor_macroblock] &&
+                              macroblock_slice_ids[neighbor_macroblock] ==
+                                  slice_id;
+                if (!available) {
+                    return std::nullopt;
+                }
+                if (inter_slice_intra_flags && neighbor_macroblock != macroblock_address &&
+                    !(*inter_slice_intra_flags)[neighbor_macroblock]) {
+                    return std::uint8_t{2};
+                }
+                return intra4x4_modes[neighbor_index];
+            };
+            const auto left_mode = neighbor_mode(
+                block_x == 0 ? 0 : block_x - 1, block_y,
+                block_x != 0);
+            const auto top_mode = neighbor_mode(
+                block_x, block_y == 0 ? 0 : block_y - 1,
+                block_y != 0);
+            const auto predicted_mode =
+                left_mode && top_mode
+                    ? std::min(*left_mode, *top_mode)
+                    : std::uint8_t{2};
+            const auto mode =
+                cabac_decoder->decode_intra4x4_pred_mode(
+                    predicted_mode, cabac_contexts);
+            modes_8x8[block_index] = mode;
+            for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
+                for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
+                    const auto grid_index =
+                        static_cast<std::size_t>(block_y + sub_y) *
+                            luma_block_width +
+                        block_x + sub_x;
+                    intra4x4_modes[grid_index] = mode;
+                    intra4x4_mode_valid[grid_index] = true;
+                }
+            }
+        }
+    } else {
+        for (std::uint32_t block_index = 0; block_index < 16;
+             ++block_index) {
+            const auto position = luma_block_position(block_index);
+            const auto block_x = macroblock_x * 4 + position[0];
+            const auto block_y = macroblock_y * 4 + position[1];
+            const auto block_grid_index =
+                static_cast<std::size_t>(block_y) * luma_block_width +
+                block_x;
+            const auto neighbor_mode =
+                [&](std::uint32_t neighbor_x,
+                    std::uint32_t neighbor_y,
+                    bool neighbor_exists)
+                    -> std::optional<std::uint8_t> {
+                if (!neighbor_exists) {
+                    return std::nullopt;
+                }
+                const auto neighbor_index =
+                    static_cast<std::size_t>(neighbor_y) *
+                        luma_block_width +
+                    neighbor_x;
+                const auto neighbor_macroblock =
+                    static_cast<std::size_t>(neighbor_y / 4) *
+                        macroblock_width +
+                    neighbor_x / 4;
+                const bool available =
+                    neighbor_macroblock == macroblock_address
+                        ? intra4x4_mode_valid[neighbor_index] != 0
+                        : decoded_macroblocks[neighbor_macroblock] &&
+                              macroblock_slice_ids[neighbor_macroblock] ==
+                                  slice_id;
+                if (!available) {
+                    return std::nullopt;
+                }
+                if (inter_slice_intra_flags && neighbor_macroblock != macroblock_address &&
+                    !(*inter_slice_intra_flags)[neighbor_macroblock]) {
+                    return std::uint8_t{2};
+                }
+                return intra4x4_modes[neighbor_index];
+            };
+            const auto left_mode = neighbor_mode(
+                block_x == 0 ? 0 : block_x - 1, block_y,
+                block_x != 0);
+            const auto top_mode = neighbor_mode(
+                block_x, block_y == 0 ? 0 : block_y - 1,
+                block_y != 0);
+            const auto predicted_mode =
+                left_mode && top_mode
+                    ? std::min(*left_mode, *top_mode)
+                    : std::uint8_t{2};
+            std::uint8_t mode = predicted_mode;
+            if (cabac_decoder) {
+                mode = cabac_decoder->decode_intra4x4_pred_mode(
+                    predicted_mode, cabac_contexts);
+            } else {
+                const auto previous_mode_flag = reader.read_bit();
+                if (!previous_mode_flag) {
+                    const auto remainder = reader.read_bits(3);
+                    mode = static_cast<std::uint8_t>(
+                        remainder < predicted_mode ? remainder
+                                                   : remainder + 1);
+                }
+            }
+            modes[block_index] = mode;
+            intra4x4_modes[block_grid_index] = mode;
+            intra4x4_mode_valid[block_grid_index] = true;
+        }
+    }
+    const bool chroma_left_nonzero =
+        left_available && decoded_macroblocks[left_address] &&
+        macroblock_slice_ids[left_address] == slice_id &&
+        macroblock_chroma_mode[left_address] != 0;
+    const bool chroma_top_nonzero =
+        top_available && decoded_macroblocks[top_address] &&
+        macroblock_slice_ids[top_address] == slice_id &&
+        macroblock_chroma_mode[top_address] != 0;
+    const auto chroma_mode = cabac_decoder
+        ? cabac_decoder->decode_intra_chroma_pred_mode(
+              chroma_left_nonzero, chroma_top_nonzero,
+              cabac_contexts)
+        : reader.read_ue();
+    if (chroma_mode > 3) {
+        throw std::runtime_error(
+            "intra_chroma_pred_mode exceeds 3");
+    }
+    static constexpr std::array<std::uint8_t, 48> intra_cbp{{
+        47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14,
+        39, 43, 45, 46, 16, 3, 5, 10, 12, 19, 21, 26,
+        28, 35, 37, 42, 44, 1, 2, 4, 8, 17, 18, 20,
+        24, 6, 9, 22, 25, 32, 33, 34, 36, 40, 38, 41,
+    }};
+    std::uint8_t luma_cbp = 0;
+    std::uint8_t chroma_cbp = 0;
+    if (cabac_decoder) {
+        const auto left_luma_cbp =
+            left_available && decoded_macroblocks[left_address] &&
+                    macroblock_slice_ids[left_address] == slice_id
+                ? macroblock_luma_cbp[left_address]
+                : 15;
+        const auto top_luma_cbp =
+            top_available && decoded_macroblocks[top_address] &&
+                    macroblock_slice_ids[top_address] == slice_id
+                ? macroblock_luma_cbp[top_address]
+                : 15;
+        const auto left_chroma_cbp =
+            left_available && decoded_macroblocks[left_address] &&
+                    macroblock_slice_ids[left_address] == slice_id
+                ? macroblock_chroma_cbp[left_address]
+                : 0;
+        const auto top_chroma_cbp =
+            top_available && decoded_macroblocks[top_address] &&
+                    macroblock_slice_ids[top_address] == slice_id
+                ? macroblock_chroma_cbp[top_address]
+                : 0;
+        luma_cbp = cabac_decoder->decode_luma_coded_block_pattern(
+            left_luma_cbp, top_luma_cbp, cabac_contexts);
+        chroma_cbp =
+            cabac_decoder->decode_chroma_coded_block_pattern(
+                left_chroma_cbp, top_chroma_cbp, cabac_contexts);
+    } else {
+        const auto cbp_code = reader.read_ue();
+        if (cbp_code >= intra_cbp.size()) {
+            throw std::runtime_error(
+                "I4x4 coded_block_pattern code exceeds 47");
+        }
+        const auto coded_block_pattern = intra_cbp[cbp_code];
+        luma_cbp = coded_block_pattern & 0x0f;
+        chroma_cbp = (coded_block_pattern >> 4) & 0x03;
+    }
+    const auto coded_block_pattern =
+        static_cast<std::uint8_t>(luma_cbp | (chroma_cbp << 4));
+    macroblock_chroma_mode[macroblock_address] =
+        static_cast<std::uint8_t>(chroma_mode);
+    macroblock_luma_cbp[macroblock_address] = luma_cbp;
+    macroblock_chroma_cbp[macroblock_address] = chroma_cbp;
+    std::array<CavlcResidualBlock, 16> luma_blocks;
+    std::array<std::array<std::int32_t, 64>, 4>
+        luma8x8_levels{};
+    std::array<CavlcResidualBlock, 2> chroma_dc_blocks{};
+    std::array<std::array<CavlcResidualBlock, 4>, 2>
+        chroma_ac_blocks;
+    for (auto& block : luma_blocks) {
+        block.coefficients.resize(16, 0);
+    }
+    for (auto& plane_blocks : chroma_ac_blocks) {
+        for (auto& block : plane_blocks) {
+            block.coefficients.resize(15, 0);
+        }
+    }
+    if (coded_block_pattern != 0) {
+        const auto macroblock_qp_delta = cabac_decoder
+            ? cabac_decoder->decode_mb_qp_delta(
+                  previous_mb_qp_delta, cabac_contexts)
+            : reader.read_se();
+        if (macroblock_qp_delta < -26 ||
+            macroblock_qp_delta > 25) {
+            throw std::runtime_error(
+                "mb_qp_delta is outside the 8-bit H.264 range");
+        }
+        previous_qpy = static_cast<std::int32_t>(
+            (previous_qpy + macroblock_qp_delta + 52) % 52);
+        previous_mb_qp_delta =
+            static_cast<std::int32_t>(macroblock_qp_delta);
+    } else {
+        previous_mb_qp_delta = 0;
+    }
+
+    const auto luma_neighbor_count =
+        [&](std::uint32_t neighbor_x,
+            std::uint32_t neighbor_y,
+            bool neighbor_exists) -> std::optional<std::uint8_t> {
+        if (!neighbor_exists) {
+            return std::nullopt;
+        }
+        const auto neighbor_macroblock =
+            static_cast<std::size_t>(neighbor_y / 4) *
+                macroblock_width +
+            neighbor_x / 4;
+        if (neighbor_macroblock != macroblock_address &&
+            (!decoded_macroblocks[neighbor_macroblock] ||
+             macroblock_slice_ids[neighbor_macroblock] !=
+                 slice_id)) {
+            return std::nullopt;
+        }
+        return luma_total_coefficients[
+            static_cast<std::size_t>(neighbor_y) *
+                luma_block_width +
+            neighbor_x];
+    };
+    bool any_luma_coefficients = false;
+    if (transform_8x8) {
+        static constexpr std::array<std::size_t, 64> scan{{
+            0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4,
+            5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7,
+            14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22,
+            15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39,
+            46, 53, 60, 61, 54, 47, 55, 62, 63,
+        }};
+        for (std::uint32_t block_index = 0; block_index < 4;
+             ++block_index) {
+            if ((luma_cbp & (1U << block_index)) == 0) {
+                continue;
+            }
+            const auto scan_levels =
+                cabac_decoder->decode_luma8x8_residual_block(
+                    cabac_contexts);
+            for (std::size_t scan_index = 0;
+                 scan_index < scan.size(); ++scan_index) {
+                luma8x8_levels[block_index][scan[scan_index]] =
+                    scan_levels[scan_index];
+            }
+            for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
+                for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
+                    std::uint8_t total = 0;
+                    for (std::uint32_t row = sub_y * 4;
+                         row < sub_y * 4 + 4; ++row) {
+                        for (std::uint32_t column = sub_x * 4;
+                             column < sub_x * 4 + 4; ++column) {
+                            total +=
+                                luma8x8_levels[block_index]
+                                    [row * 8 + column] != 0;
+                        }
+                    }
+                    const auto grid_x =
+                        macroblock_x * 4 +
+                        (block_index % 2) * 2 + sub_x;
+                    const auto grid_y =
+                        macroblock_y * 4 +
+                        (block_index / 2) * 2 + sub_y;
+                    luma_total_coefficients[
+                        static_cast<std::size_t>(grid_y) *
+                            luma_block_width +
+                        grid_x] = total;
+                    luma_coded_block_flags[
+                        static_cast<std::size_t>(grid_y) *
+                            luma_block_width +
+                        grid_x] = 1;
+                    any_luma_coefficients |= total != 0;
+                }
+            }
+        }
+    } else {
+        for (std::uint32_t block_index = 0; block_index < 16;
+             ++block_index) {
+            const auto position = luma_block_position(block_index);
+            const auto block_x = macroblock_x * 4 + position[0];
+            const auto block_y = macroblock_y * 4 + position[1];
+            const auto block_grid_index =
+                static_cast<std::size_t>(block_y) * luma_block_width +
+                block_x;
+            if ((luma_cbp & (1U << (block_index / 4))) == 0) {
+                luma_total_coefficients[block_grid_index] = 0;
+                luma_coded_block_flags[block_grid_index] = 0;
+                continue;
+            }
+            const auto left_count = luma_neighbor_count(
+                block_x == 0 ? 0 : block_x - 1, block_y,
+                block_x != 0);
+            const auto top_count = luma_neighbor_count(
+                block_x, block_y == 0 ? 0 : block_y - 1,
+                block_y != 0);
+            const auto nc = left_count && top_count
+                ? (static_cast<std::int32_t>(*left_count) +
+                   static_cast<std::int32_t>(*top_count) + 1) /
+                      2
+                : left_count
+                    ? static_cast<std::int32_t>(*left_count)
+                    : top_count
+                        ? static_cast<std::int32_t>(*top_count)
+                        : 0;
+            auto& block = luma_blocks[block_index];
+            if (cabac_decoder) {
+                const auto decoded =
+                    cabac_decoder->decode_residual_block(
+                        2,
+                        luma_neighbor_coded(
+                            block_x == 0 ? 0 : block_x - 1,
+                            block_y, block_x != 0),
+                        luma_neighbor_coded(
+                            block_x, block_y == 0 ? 0 : block_y - 1,
+                            block_y != 0),
+                        cabac_contexts);
+                block.coefficients.assign(decoded.levels.begin(),
+                                          decoded.levels.end());
+                block.total_coeff = static_cast<std::uint8_t>(
+                    std::count_if(
+                        decoded.levels.begin(),
+                        decoded.levels.end(),
+                        [](std::int32_t level) {
+                            return level != 0;
+                        }));
+                luma_coded_block_flags[block_grid_index] =
+                    decoded.coded;
+            } else {
+                block = decode_cavlc_residual_block(reader, nc, 16);
+                luma_coded_block_flags[block_grid_index] =
+                    block.total_coeff != 0;
+            }
+            luma_total_coefficients[block_grid_index] =
+                block.total_coeff;
+            any_luma_coefficients |= block.total_coeff != 0;
+        }
+    }
+
+    const auto qpc_cb =
+        chroma_qp(previous_qpy, pps.chroma_qp_index_offset);
+    const auto qpc_cr = chroma_qp(
+        previous_qpy, pps.second_chroma_qp_index_offset);
+    bool any_chroma_coefficients = false;
+    if (chroma_cbp != 0) {
+        for (std::size_t plane_index = 0; plane_index < 2;
+             ++plane_index) {
+            auto& block = chroma_dc_blocks[plane_index];
+            if (cabac_decoder) {
+                const auto& dc_flags =
+                    plane_index == 0
+                        ? macroblock_chroma_dc_coded_cb
+                        : macroblock_chroma_dc_coded_cr;
+                const bool left_coded =
+                    !left_available ||
+                    !decoded_macroblocks[left_address] ||
+                    macroblock_slice_ids[left_address] != slice_id
+                        ? true
+                        : dc_flags[left_address];
+                const bool top_coded =
+                    !top_available ||
+                    !decoded_macroblocks[top_address] ||
+                    macroblock_slice_ids[top_address] != slice_id
+                        ? true
+                        : dc_flags[top_address];
+                const auto decoded =
+                    cabac_decoder->decode_residual_block(
+                        3, left_coded, top_coded, cabac_contexts);
+                block.coefficients.assign(
+                    decoded.levels.begin(),
+                    decoded.levels.begin() + 4);
+                block.total_coeff = static_cast<std::uint8_t>(
+                    std::count_if(
+                        block.coefficients.begin(),
+                        block.coefficients.end(),
+                        [](std::int32_t level) {
+                            return level != 0;
+                        }));
+                if (plane_index == 0) {
+                    macroblock_chroma_dc_coded_cb[macroblock_address] =
+                        decoded.coded;
+                } else {
+                    macroblock_chroma_dc_coded_cr[macroblock_address] =
+                        decoded.coded;
+                }
+            } else {
+                block = decode_cavlc_residual_block(reader, -1, 4);
+            }
+            any_chroma_coefficients |= block.total_coeff != 0;
+        }
+    }
+    if (chroma_cbp == 2) {
+        for (std::size_t plane_index = 0; plane_index < 2;
+             ++plane_index) {
+            for (std::uint32_t block_index = 0; block_index < 4;
+                 ++block_index) {
+                const auto block_x =
+                    macroblock_x * 2 + block_index % 2;
+                const auto block_y =
+                    macroblock_y * 2 + block_index / 2;
+                const auto block_grid_index =
+                    static_cast<std::size_t>(block_y) *
+                        chroma_block_width +
+                    block_x;
+                const auto neighbor_count =
+                    [&](std::uint32_t neighbor_x,
+                        std::uint32_t neighbor_y,
+                        bool neighbor_exists)
+                        -> std::optional<std::uint8_t> {
+                    if (!neighbor_exists) {
+                        return std::nullopt;
+                    }
+                    const auto neighbor_macroblock =
+                        static_cast<std::size_t>(neighbor_y / 2) *
+                            macroblock_width +
+                        neighbor_x / 2;
+                    if (neighbor_macroblock != macroblock_address &&
+                        (!decoded_macroblocks[neighbor_macroblock] ||
+                         macroblock_slice_ids[neighbor_macroblock] !=
+                             slice_id)) {
+                        return std::nullopt;
+                    }
+                    return chroma_total_coefficients[plane_index][
+                        static_cast<std::size_t>(neighbor_y) *
+                            chroma_block_width +
+                        neighbor_x];
+                };
+                const auto left_count = neighbor_count(
+                    block_x == 0 ? 0 : block_x - 1, block_y,
+                    block_x != 0);
+                const auto top_count = neighbor_count(
+                    block_x, block_y == 0 ? 0 : block_y - 1,
+                    block_y != 0);
+                const auto nc = left_count && top_count
+                    ? (static_cast<std::int32_t>(*left_count) +
+                       static_cast<std::int32_t>(*top_count) + 1) /
+                          2
+                    : left_count
+                        ? static_cast<std::int32_t>(*left_count)
+                        : top_count
+                            ? static_cast<std::int32_t>(*top_count)
+                            : 0;
+                auto& block =
+                    chroma_ac_blocks[plane_index][block_index];
+                if (cabac_decoder) {
+                    const auto coded_neighbor = [&](bool available, std::uint32_t x,
+                                                    std::uint32_t y, std::uint8_t count) {
+                        if (!available) return true;
+                        if (!chroma_coded_flags) return count != 0;
+                        return (*chroma_coded_flags)[plane_index][
+                                   static_cast<std::size_t>(y) * chroma_block_width + x] != 0;
+                    };
+                    const auto decoded =
+                        cabac_decoder->decode_residual_block(
+                            4, coded_neighbor(left_count.has_value(), block_x == 0 ? 0 : block_x - 1,
+                                              block_y, left_count.value_or(0)),
+                            coded_neighbor(top_count.has_value(), block_x, block_y == 0 ? 0 : block_y - 1,
+                                           top_count.value_or(0)),
+                            cabac_contexts);
+                    block.coefficients.assign(
+                        decoded.levels.begin(),
+                        decoded.levels.begin() + 15);
+                    block.total_coeff =
+                        static_cast<std::uint8_t>(std::count_if(
+                            block.coefficients.begin(),
+                            block.coefficients.end(),
+                            [](std::int32_t level) {
+                                return level != 0;
+                            }));
+                    if (chroma_coded_flags) {
+                        (*chroma_coded_flags)[plane_index][block_grid_index] = decoded.coded;
+                    }
+                } else {
+                    block = decode_cavlc_residual_block(reader, nc, 15);
+                    if (chroma_coded_flags) {
+                        (*chroma_coded_flags)[plane_index][block_grid_index] = block.total_coeff != 0;
+                    }
+                }
+                chroma_total_coefficients[plane_index]
+                                         [block_grid_index] =
+                    block.total_coeff;
+                any_chroma_coefficients |= block.total_coeff != 0;
+            }
+        }
+    }
+    if (any_luma_coefficients &&
+        ((transform_8x8 &&
+          sps.seq_intra_luma_8x8_scaling_list_present) ||
+         (!transform_8x8 &&
+          sps.seq_intra_luma_4x4_scaling_list_present) ||
+         pps.pic_scaling_matrix_present)) {
+        throw std::runtime_error(
+            "intra luma residuals with custom scaling matrices are not supported");
+    }
+    if (any_chroma_coefficients &&
+        (sps.seq_intra_chroma_4x4_scaling_list_present ||
+         pps.pic_scaling_matrix_present)) {
+        throw std::runtime_error(
+            "I4x4 chroma residuals with custom scaling matrices are not supported");
+    }
+    std::array<std::array<std::int64_t, 16>, 16>
+        luma_residual_blocks{};
+    std::array<std::array<std::int64_t, 64>, 4>
+        luma8x8_residual_blocks{};
+    if (transform_8x8) {
+        for (std::uint32_t block_index = 0; block_index < 4;
+             ++block_index) {
+            const auto scaled = inverse_scale_luma8x8(
+                luma8x8_levels[block_index], previous_qpy);
+            luma8x8_residual_blocks[block_index] =
+                inverse_transform_luma8x8(scaled);
+        }
+    } else {
+        for (std::uint32_t block_index = 0; block_index < 16;
+             ++block_index) {
+            luma_residual_blocks[block_index] =
+                inverse_transform_luma4x4(
+                    inverse_scale_intra4x4(luma_blocks[block_index],
+                                           previous_qpy));
+        }
+    }
+    std::array<std::array<std::int64_t, 4>, 2>
+        chroma_dc_residuals{};
+    if (chroma_cbp != 0) {
+        chroma_dc_residuals[0] =
+            reconstruct_intra16x16_chroma_dc(chroma_dc_blocks[0],
+                                            qpc_cb);
+        chroma_dc_residuals[1] =
+            reconstruct_intra16x16_chroma_dc(chroma_dc_blocks[1],
+                                            qpc_cr);
+    }
+    std::array<std::array<std::array<std::int64_t, 16>, 4>, 2>
+        chroma_residual_blocks{};
+    for (std::size_t plane_index = 0; plane_index < 2;
+         ++plane_index) {
+        const auto& dc = chroma_dc_residuals[plane_index];
+        for (std::uint32_t block_index = 0; block_index < 4;
+             ++block_index) {
+            const auto qp = plane_index == 0 ? qpc_cb : qpc_cr;
+            chroma_residual_blocks[plane_index][block_index] =
+                inverse_transform_luma4x4(
+                    inverse_scale_intra4x4_ac(
+                        chroma_ac_blocks[plane_index][block_index],
+                        qp, dc[block_index]));
+        }
+    }
+
+    const auto sample_available =
+        [&](std::uint32_t sample_x,
+            std::uint32_t sample_y) -> bool {
+        if (sample_x >= sps.coded_width ||
+            sample_y >= sps.coded_height) {
+            return false;
+        }
+        const auto block_x = sample_x / 4;
+        const auto block_y = sample_y / 4;
+        const auto block_grid_index =
+            static_cast<std::size_t>(block_y) * luma_block_width +
+            block_x;
+        const auto neighbor_macroblock =
+            static_cast<std::size_t>(block_y / 4) *
+                macroblock_width +
+            block_x / 4;
+        if (neighbor_macroblock == macroblock_address) {
+            return intra4x4_reconstructed[block_grid_index];
+        }
+        return decoded_macroblocks[neighbor_macroblock] &&
+               macroblock_slice_ids[neighbor_macroblock] == slice_id;
+    };
+    if (transform_8x8) {
+        for (std::uint32_t block_index = 0; block_index < 4;
+             ++block_index) {
+            const auto origin_x =
+                macroblock_x * 16 + (block_index % 2) * 8;
+            const auto origin_y =
+                macroblock_y * 16 + (block_index / 2) * 8;
+            std::array<std::uint8_t, 16> top{};
+            std::array<std::uint8_t, 16> left{};
+            bool top_available = true;
+            bool left_available = true;
+            for (std::uint32_t index = 0; index < 16; ++index) {
+                if (origin_y != 0 &&
+                    sample_available(origin_x + index,
+                                     origin_y - 1)) {
+                    top[index] = frame.luma[
+                        static_cast<std::size_t>(origin_y - 1) *
+                            frame.width +
+                        origin_x + index];
+                } else if (index < 8) {
+                    top_available = false;
+                } else {
+                    top[index] = index == 8 ? top[7] : top[index - 1];
+                }
+            }
+            for (std::uint32_t index = 0; index < 8; ++index) {
+                if (origin_x != 0 &&
+                    sample_available(origin_x - 1,
+                                     origin_y + index)) {
+                    left[index] = frame.luma[
+                        static_cast<std::size_t>(origin_y + index) *
+                            frame.width +
+                        origin_x - 1];
+                } else {
+                    left_available = false;
+                }
+            }
+            bool top_left_available = false;
+            std::uint8_t top_left = 128;
+            if (origin_x != 0 && origin_y != 0 &&
+                sample_available(origin_x - 1, origin_y - 1)) {
+                top_left_available = true;
+                top_left = frame.luma[
+                    static_cast<std::size_t>(origin_y - 1) *
+                        frame.width +
+                    origin_x - 1];
+            }
+            const auto prediction = predict_intra8x8(
+                modes_8x8[block_index], top, top_available, left,
+                left_available, top_left, top_left_available);
+            for (std::uint32_t row = 0; row < 8; ++row) {
+                for (std::uint32_t column = 0; column < 8;
+                     ++column) {
+                    const auto residual_index = row * 8 + column;
+                    auto& sample = frame.luma[
+                        static_cast<std::size_t>(origin_y + row) *
+                            frame.width +
+                        origin_x + column];
+                    sample = static_cast<std::uint8_t>(
+                        std::clamp<std::int64_t>(
+                            static_cast<std::int64_t>(
+                                prediction[residual_index]) +
+                                luma8x8_residual_blocks[block_index]
+                                    [residual_index],
+                            0, 255));
+                }
+            }
+            for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
+                for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
+                    const auto grid_index =
+                        static_cast<std::size_t>(
+                            origin_y / 4 + sub_y) *
+                            luma_block_width +
+                        origin_x / 4 + sub_x;
+                    intra4x4_reconstructed[grid_index] = true;
+                }
+            }
+        }
+    } else for (std::uint32_t block_index = 0; block_index < 16;
+         ++block_index) {
+        const auto position = luma_block_position(block_index);
+        const auto origin_x = macroblock_x * 16 + position[0] * 4;
+        const auto origin_y = macroblock_y * 16 + position[1] * 4;
+        std::array<std::uint8_t, 8> top{};
+        std::array<std::uint8_t, 4> left{};
+        bool top_available = true;
+        bool left_available = true;
+        for (std::uint32_t index = 0; index < 8; ++index) {
+            if (origin_y == 0 ||
+                !sample_available(origin_x + index, origin_y - 1)) {
+                top_available &= index >= 4;
+                continue;
+            }
+            top[index] = frame.luma[
+                static_cast<std::size_t>(origin_y - 1) * frame.width +
+                origin_x + index];
+        }
+        for (std::uint32_t index = 0; index < 4; ++index) {
+            if (origin_x == 0 ||
+                !sample_available(origin_x - 1, origin_y + index)) {
+                left_available = false;
+                continue;
+            }
+            left[index] = frame.luma[
+                static_cast<std::size_t>(origin_y + index) *
+                    frame.width +
+                origin_x - 1];
+        }
+        for (std::uint32_t index = 4; index < 8; ++index) {
+            if (origin_y == 0 ||
+                !sample_available(origin_x + index, origin_y - 1)) {
+                top[index] = top[3];
+            }
+        }
+        if (modes[block_index] == 1 && !left_available) {
+            throw std::runtime_error(
+                "I4x4 horizontal mode has no left reference samples "
+                "(macroblock " +
+                std::to_string(macroblock_address) + ", block " +
+                std::to_string(block_index) + ", position " +
+                std::to_string(position[0]) + "," +
+                std::to_string(position[1]) + ")");
+        }
+        if (modes[block_index] == 7 && !top_available) {
+            throw std::runtime_error(
+                "I4x4 vertical-left mode has no top references "
+                "(macroblock " +
+                std::to_string(macroblock_address) + ", block " +
+                std::to_string(block_index) + ", position " +
+                std::to_string(position[0]) + "," +
+                std::to_string(position[1]) + ")");
+        }
+        bool top_left_available = false;
+        std::uint8_t top_left = 128;
+        if (origin_x > 0 && origin_y > 0 &&
+            sample_available(origin_x - 1, origin_y - 1)) {
+            top_left_available = true;
+            top_left = frame.luma[
+                static_cast<std::size_t>(origin_y - 1) *
+                    frame.width +
+                origin_x - 1];
+        }
+        const auto prediction = predict_intra4x4(
+            modes[block_index], top, top_available, left,
+            left_available, top_left, top_left_available);
+        for (std::uint32_t row = 0; row < 4; ++row) {
+            for (std::uint32_t column = 0; column < 4; ++column) {
+                const auto residual_index = row * 4 + column;
+                auto& sample = frame.luma[
+                    static_cast<std::size_t>(origin_y + row) *
+                        frame.width +
+                    origin_x + column];
+                sample = static_cast<std::uint8_t>(
+                    std::clamp<std::int64_t>(
+                        static_cast<std::int64_t>(
+                            prediction[residual_index]) +
+                            luma_residual_blocks[block_index]
+                                                [residual_index],
+                        0, 255));
+            }
+        }
+        const auto block_grid_index =
+            static_cast<std::size_t>(origin_y / 4) *
+                luma_block_width +
+            origin_x / 4;
+        intra4x4_mode_valid[block_grid_index] = true;
+        intra4x4_reconstructed[block_grid_index] = true;
+    }
+    predict_chroma8x8(frame.chroma_u, frame.width / 2,
+                      macroblock_x, macroblock_y,
+                      static_cast<std::uint8_t>(chroma_mode));
+    predict_chroma8x8(frame.chroma_v, frame.width / 2,
+                      macroblock_x, macroblock_y,
+                      static_cast<std::uint8_t>(chroma_mode));
+    add_intra16x16_chroma_residual(
+        frame.chroma_u, frame.width / 2, macroblock_x, macroblock_y,
+        chroma_residual_blocks[0]);
+    add_intra16x16_chroma_residual(
+        frame.chroma_v, frame.width / 2, macroblock_x, macroblock_y,
+        chroma_residual_blocks[1]);
+
+}
+
 Yuv420Frame decode_idr_i_frame_impl(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps, bool pcm_only) {
@@ -1925,788 +2763,17 @@ Yuv420Frame decode_idr_i_frame_impl(
                     }
                 }
             } else if (intra4x4_macroblock) {
-                bool transform_8x8 = false;
-                if (pps.transform_8x8_mode) {
-                    const bool left_transform =
-                        left_available &&
-                        decoded_macroblocks[left_address] &&
-                        macroblock_slice_ids[left_address] == slice_id &&
-                        macroblock_transform_8x8[left_address];
-                    const bool top_transform =
-                        top_available &&
-                        decoded_macroblocks[top_address] &&
-                        macroblock_slice_ids[top_address] == slice_id &&
-                        macroblock_transform_8x8[top_address];
-                    const auto transform_context =
-                        399 + static_cast<std::size_t>(left_transform) +
-                        static_cast<std::size_t>(top_transform);
-                    transform_8x8 = cabac_decoder
-                        ? cabac_decoder->decode_bin(
-                              cabac_contexts[transform_context])
-                        : reader.read_bit();
-                    macroblock_transform_8x8[macroblock_address] =
-                        transform_8x8;
-                }
-                if (transform_8x8 && !cabac_decoder) {
-                    throw std::runtime_error(
-                        "CAVLC Intra_8x8 residual decoding is not supported");
-                }
-                std::array<std::uint8_t, 16> modes{};
-                std::array<std::uint8_t, 4> modes_8x8{};
-                if (transform_8x8) {
-                    for (std::uint32_t block_index = 0; block_index < 4;
-                         ++block_index) {
-                        const auto block_x = macroblock_x * 4 +
-                                             (block_index % 2) * 2;
-                        const auto block_y = macroblock_y * 4 +
-                                             (block_index / 2) * 2;
-                        const auto neighbor_mode =
-                            [&](std::uint32_t neighbor_x,
-                                std::uint32_t neighbor_y,
-                                bool neighbor_exists)
-                                -> std::optional<std::uint8_t> {
-                            if (!neighbor_exists) {
-                                return std::nullopt;
-                            }
-                            const auto neighbor_index =
-                                static_cast<std::size_t>(neighbor_y) *
-                                    luma_block_width +
-                                neighbor_x;
-                            const auto neighbor_macroblock =
-                                static_cast<std::size_t>(neighbor_y / 4) *
-                                    macroblock_width +
-                                neighbor_x / 4;
-                            const bool available =
-                                neighbor_macroblock == macroblock_address
-                                    ? intra4x4_mode_valid[neighbor_index] != 0
-                                    : decoded_macroblocks[neighbor_macroblock] &&
-                                          macroblock_slice_ids[neighbor_macroblock] ==
-                                              slice_id;
-                            if (!available) {
-                                return std::nullopt;
-                            }
-                            return intra4x4_modes[neighbor_index];
-                        };
-                        const auto left_mode = neighbor_mode(
-                            block_x == 0 ? 0 : block_x - 1, block_y,
-                            block_x != 0);
-                        const auto top_mode = neighbor_mode(
-                            block_x, block_y == 0 ? 0 : block_y - 1,
-                            block_y != 0);
-                        const auto predicted_mode =
-                            left_mode && top_mode
-                                ? std::min(*left_mode, *top_mode)
-                                : std::uint8_t{2};
-                        const auto mode =
-                            cabac_decoder->decode_intra4x4_pred_mode(
-                                predicted_mode, cabac_contexts);
-                        modes_8x8[block_index] = mode;
-                        for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
-                            for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
-                                const auto grid_index =
-                                    static_cast<std::size_t>(block_y + sub_y) *
-                                        luma_block_width +
-                                    block_x + sub_x;
-                                intra4x4_modes[grid_index] = mode;
-                                intra4x4_mode_valid[grid_index] = true;
-                            }
-                        }
-                    }
-                } else {
-                    for (std::uint32_t block_index = 0; block_index < 16;
-                         ++block_index) {
-                        const auto position = luma_block_position(block_index);
-                        const auto block_x = macroblock_x * 4 + position[0];
-                        const auto block_y = macroblock_y * 4 + position[1];
-                        const auto block_grid_index =
-                            static_cast<std::size_t>(block_y) * luma_block_width +
-                            block_x;
-                        const auto neighbor_mode =
-                            [&](std::uint32_t neighbor_x,
-                                std::uint32_t neighbor_y,
-                                bool neighbor_exists)
-                                -> std::optional<std::uint8_t> {
-                            if (!neighbor_exists) {
-                                return std::nullopt;
-                            }
-                            const auto neighbor_index =
-                                static_cast<std::size_t>(neighbor_y) *
-                                    luma_block_width +
-                                neighbor_x;
-                            const auto neighbor_macroblock =
-                                static_cast<std::size_t>(neighbor_y / 4) *
-                                    macroblock_width +
-                                neighbor_x / 4;
-                            const bool available =
-                                neighbor_macroblock == macroblock_address
-                                    ? intra4x4_mode_valid[neighbor_index] != 0
-                                    : decoded_macroblocks[neighbor_macroblock] &&
-                                          macroblock_slice_ids[neighbor_macroblock] ==
-                                              slice_id;
-                            if (!available) {
-                                return std::nullopt;
-                            }
-                            return intra4x4_modes[neighbor_index];
-                        };
-                        const auto left_mode = neighbor_mode(
-                            block_x == 0 ? 0 : block_x - 1, block_y,
-                            block_x != 0);
-                        const auto top_mode = neighbor_mode(
-                            block_x, block_y == 0 ? 0 : block_y - 1,
-                            block_y != 0);
-                        const auto predicted_mode =
-                            left_mode && top_mode
-                                ? std::min(*left_mode, *top_mode)
-                                : std::uint8_t{2};
-                        std::uint8_t mode = predicted_mode;
-                        if (cabac_decoder) {
-                            mode = cabac_decoder->decode_intra4x4_pred_mode(
-                                predicted_mode, cabac_contexts);
-                        } else {
-                            const auto previous_mode_flag = reader.read_bit();
-                            if (!previous_mode_flag) {
-                                const auto remainder = reader.read_bits(3);
-                                mode = static_cast<std::uint8_t>(
-                                    remainder < predicted_mode ? remainder
-                                                               : remainder + 1);
-                            }
-                        }
-                        modes[block_index] = mode;
-                        intra4x4_modes[block_grid_index] = mode;
-                        intra4x4_mode_valid[block_grid_index] = true;
-                    }
-                }
-                const bool chroma_left_nonzero =
-                    left_available && decoded_macroblocks[left_address] &&
-                    macroblock_slice_ids[left_address] == slice_id &&
-                    macroblock_chroma_mode[left_address] != 0;
-                const bool chroma_top_nonzero =
-                    top_available && decoded_macroblocks[top_address] &&
-                    macroblock_slice_ids[top_address] == slice_id &&
-                    macroblock_chroma_mode[top_address] != 0;
-                const auto chroma_mode = cabac_decoder
-                    ? cabac_decoder->decode_intra_chroma_pred_mode(
-                          chroma_left_nonzero, chroma_top_nonzero,
-                          cabac_contexts)
-                    : reader.read_ue();
-                if (chroma_mode > 3) {
-                    throw std::runtime_error(
-                        "intra_chroma_pred_mode exceeds 3");
-                }
-                static constexpr std::array<std::uint8_t, 48> intra_cbp{{
-                    47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14,
-                    39, 43, 45, 46, 16, 3, 5, 10, 12, 19, 21, 26,
-                    28, 35, 37, 42, 44, 1, 2, 4, 8, 17, 18, 20,
-                    24, 6, 9, 22, 25, 32, 33, 34, 36, 40, 38, 41,
-                }};
-                std::uint8_t luma_cbp = 0;
-                std::uint8_t chroma_cbp = 0;
-                if (cabac_decoder) {
-                    const auto left_luma_cbp =
-                        left_available && decoded_macroblocks[left_address] &&
-                                macroblock_slice_ids[left_address] == slice_id
-                            ? macroblock_luma_cbp[left_address]
-                            : 15;
-                    const auto top_luma_cbp =
-                        top_available && decoded_macroblocks[top_address] &&
-                                macroblock_slice_ids[top_address] == slice_id
-                            ? macroblock_luma_cbp[top_address]
-                            : 15;
-                    const auto left_chroma_cbp =
-                        left_available && decoded_macroblocks[left_address] &&
-                                macroblock_slice_ids[left_address] == slice_id
-                            ? macroblock_chroma_cbp[left_address]
-                            : 0;
-                    const auto top_chroma_cbp =
-                        top_available && decoded_macroblocks[top_address] &&
-                                macroblock_slice_ids[top_address] == slice_id
-                            ? macroblock_chroma_cbp[top_address]
-                            : 0;
-                    luma_cbp = cabac_decoder->decode_luma_coded_block_pattern(
-                        left_luma_cbp, top_luma_cbp, cabac_contexts);
-                    chroma_cbp =
-                        cabac_decoder->decode_chroma_coded_block_pattern(
-                            left_chroma_cbp, top_chroma_cbp, cabac_contexts);
-                } else {
-                    const auto cbp_code = reader.read_ue();
-                    if (cbp_code >= intra_cbp.size()) {
-                        throw std::runtime_error(
-                            "I4x4 coded_block_pattern code exceeds 47");
-                    }
-                    const auto coded_block_pattern = intra_cbp[cbp_code];
-                    luma_cbp = coded_block_pattern & 0x0f;
-                    chroma_cbp = (coded_block_pattern >> 4) & 0x03;
-                }
-                const auto coded_block_pattern =
-                    static_cast<std::uint8_t>(luma_cbp | (chroma_cbp << 4));
-                macroblock_chroma_mode[macroblock_address] =
-                    static_cast<std::uint8_t>(chroma_mode);
-                macroblock_luma_cbp[macroblock_address] = luma_cbp;
-                macroblock_chroma_cbp[macroblock_address] = chroma_cbp;
-                std::array<CavlcResidualBlock, 16> luma_blocks;
-                std::array<std::array<std::int32_t, 64>, 4>
-                    luma8x8_levels{};
-                std::array<CavlcResidualBlock, 2> chroma_dc_blocks{};
-                std::array<std::array<CavlcResidualBlock, 4>, 2>
-                    chroma_ac_blocks;
-                for (auto& block : luma_blocks) {
-                    block.coefficients.resize(16, 0);
-                }
-                for (auto& plane_blocks : chroma_ac_blocks) {
-                    for (auto& block : plane_blocks) {
-                        block.coefficients.resize(15, 0);
-                    }
-                }
-                if (coded_block_pattern != 0) {
-                    const auto macroblock_qp_delta = cabac_decoder
-                        ? cabac_decoder->decode_mb_qp_delta(
-                              previous_mb_qp_delta, cabac_contexts)
-                        : reader.read_se();
-                    if (macroblock_qp_delta < -26 ||
-                        macroblock_qp_delta > 25) {
-                        throw std::runtime_error(
-                            "mb_qp_delta is outside the 8-bit H.264 range");
-                    }
-                    previous_qpy = static_cast<std::int32_t>(
-                        (previous_qpy + macroblock_qp_delta + 52) % 52);
-                    previous_mb_qp_delta =
-                        static_cast<std::int32_t>(macroblock_qp_delta);
-                } else {
-                    previous_mb_qp_delta = 0;
-                }
-
-                const auto luma_neighbor_count =
-                    [&](std::uint32_t neighbor_x,
-                        std::uint32_t neighbor_y,
-                        bool neighbor_exists) -> std::optional<std::uint8_t> {
-                    if (!neighbor_exists) {
-                        return std::nullopt;
-                    }
-                    const auto neighbor_macroblock =
-                        static_cast<std::size_t>(neighbor_y / 4) *
-                            macroblock_width +
-                        neighbor_x / 4;
-                    if (neighbor_macroblock != macroblock_address &&
-                        (!decoded_macroblocks[neighbor_macroblock] ||
-                         macroblock_slice_ids[neighbor_macroblock] !=
-                             slice_id)) {
-                        return std::nullopt;
-                    }
-                    return luma_total_coefficients[
-                        static_cast<std::size_t>(neighbor_y) *
-                            luma_block_width +
-                        neighbor_x];
-                };
-                bool any_luma_coefficients = false;
-                if (transform_8x8) {
-                    static constexpr std::array<std::size_t, 64> scan{{
-                        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4,
-                        5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7,
-                        14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22,
-                        15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39,
-                        46, 53, 60, 61, 54, 47, 55, 62, 63,
-                    }};
-                    for (std::uint32_t block_index = 0; block_index < 4;
-                         ++block_index) {
-                        if ((luma_cbp & (1U << block_index)) == 0) {
-                            continue;
-                        }
-                        const auto scan_levels =
-                            cabac_decoder->decode_luma8x8_residual_block(
-                                cabac_contexts);
-                        for (std::size_t scan_index = 0;
-                             scan_index < scan.size(); ++scan_index) {
-                            luma8x8_levels[block_index][scan[scan_index]] =
-                                scan_levels[scan_index];
-                        }
-                        for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
-                            for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
-                                std::uint8_t total = 0;
-                                for (std::uint32_t row = sub_y * 4;
-                                     row < sub_y * 4 + 4; ++row) {
-                                    for (std::uint32_t column = sub_x * 4;
-                                         column < sub_x * 4 + 4; ++column) {
-                                        total +=
-                                            luma8x8_levels[block_index]
-                                                [row * 8 + column] != 0;
-                                    }
-                                }
-                                const auto grid_x =
-                                    macroblock_x * 4 +
-                                    (block_index % 2) * 2 + sub_x;
-                                const auto grid_y =
-                                    macroblock_y * 4 +
-                                    (block_index / 2) * 2 + sub_y;
-                                luma_total_coefficients[
-                                    static_cast<std::size_t>(grid_y) *
-                                        luma_block_width +
-                                    grid_x] = total;
-                                luma_coded_block_flags[
-                                    static_cast<std::size_t>(grid_y) *
-                                        luma_block_width +
-                                    grid_x] = 1;
-                                any_luma_coefficients |= total != 0;
-                            }
-                        }
-                    }
-                } else {
-                    for (std::uint32_t block_index = 0; block_index < 16;
-                         ++block_index) {
-                        const auto position = luma_block_position(block_index);
-                        const auto block_x = macroblock_x * 4 + position[0];
-                        const auto block_y = macroblock_y * 4 + position[1];
-                        const auto block_grid_index =
-                            static_cast<std::size_t>(block_y) * luma_block_width +
-                            block_x;
-                        if ((luma_cbp & (1U << (block_index / 4))) == 0) {
-                            luma_total_coefficients[block_grid_index] = 0;
-                            luma_coded_block_flags[block_grid_index] = 0;
-                            continue;
-                        }
-                        const auto left_count = luma_neighbor_count(
-                            block_x == 0 ? 0 : block_x - 1, block_y,
-                            block_x != 0);
-                        const auto top_count = luma_neighbor_count(
-                            block_x, block_y == 0 ? 0 : block_y - 1,
-                            block_y != 0);
-                        const auto nc = left_count && top_count
-                            ? (static_cast<std::int32_t>(*left_count) +
-                               static_cast<std::int32_t>(*top_count) + 1) /
-                                  2
-                            : left_count
-                                ? static_cast<std::int32_t>(*left_count)
-                                : top_count
-                                    ? static_cast<std::int32_t>(*top_count)
-                                    : 0;
-                        auto& block = luma_blocks[block_index];
-                        if (cabac_decoder) {
-                            const auto decoded =
-                                cabac_decoder->decode_residual_block(
-                                    2,
-                                    luma_neighbor_coded(
-                                        block_x == 0 ? 0 : block_x - 1,
-                                        block_y, block_x != 0),
-                                    luma_neighbor_coded(
-                                        block_x, block_y == 0 ? 0 : block_y - 1,
-                                        block_y != 0),
-                                    cabac_contexts);
-                            block.coefficients.assign(decoded.levels.begin(),
-                                                      decoded.levels.end());
-                            block.total_coeff = static_cast<std::uint8_t>(
-                                std::count_if(
-                                    decoded.levels.begin(),
-                                    decoded.levels.end(),
-                                    [](std::int32_t level) {
-                                        return level != 0;
-                                    }));
-                            luma_coded_block_flags[block_grid_index] =
-                                decoded.coded;
-                        } else {
-                            block = decode_cavlc_residual_block(reader, nc, 16);
-                            luma_coded_block_flags[block_grid_index] =
-                                block.total_coeff != 0;
-                        }
-                        luma_total_coefficients[block_grid_index] =
-                            block.total_coeff;
-                        any_luma_coefficients |= block.total_coeff != 0;
-                    }
-                }
-
-                const auto qpc_cb =
-                    chroma_qp(previous_qpy, pps.chroma_qp_index_offset);
-                const auto qpc_cr = chroma_qp(
-                    previous_qpy, pps.second_chroma_qp_index_offset);
-                bool any_chroma_coefficients = false;
-                if (chroma_cbp != 0) {
-                    for (std::size_t plane_index = 0; plane_index < 2;
-                         ++plane_index) {
-                        auto& block = chroma_dc_blocks[plane_index];
-                        if (cabac_decoder) {
-                            const auto& dc_flags =
-                                plane_index == 0
-                                    ? macroblock_chroma_dc_coded_cb
-                                    : macroblock_chroma_dc_coded_cr;
-                            const bool left_coded =
-                                !left_available ||
-                                !decoded_macroblocks[left_address] ||
-                                macroblock_slice_ids[left_address] != slice_id
-                                    ? true
-                                    : dc_flags[left_address];
-                            const bool top_coded =
-                                !top_available ||
-                                !decoded_macroblocks[top_address] ||
-                                macroblock_slice_ids[top_address] != slice_id
-                                    ? true
-                                    : dc_flags[top_address];
-                            const auto decoded =
-                                cabac_decoder->decode_residual_block(
-                                    3, left_coded, top_coded, cabac_contexts);
-                            block.coefficients.assign(
-                                decoded.levels.begin(),
-                                decoded.levels.begin() + 4);
-                            block.total_coeff = static_cast<std::uint8_t>(
-                                std::count_if(
-                                    block.coefficients.begin(),
-                                    block.coefficients.end(),
-                                    [](std::int32_t level) {
-                                        return level != 0;
-                                    }));
-                            if (plane_index == 0) {
-                                macroblock_chroma_dc_coded_cb[macroblock_address] =
-                                    decoded.coded;
-                            } else {
-                                macroblock_chroma_dc_coded_cr[macroblock_address] =
-                                    decoded.coded;
-                            }
-                        } else {
-                            block = decode_cavlc_residual_block(reader, -1, 4);
-                        }
-                        any_chroma_coefficients |= block.total_coeff != 0;
-                    }
-                }
-                if (chroma_cbp == 2) {
-                    for (std::size_t plane_index = 0; plane_index < 2;
-                         ++plane_index) {
-                        for (std::uint32_t block_index = 0; block_index < 4;
-                             ++block_index) {
-                            const auto block_x =
-                                macroblock_x * 2 + block_index % 2;
-                            const auto block_y =
-                                macroblock_y * 2 + block_index / 2;
-                            const auto block_grid_index =
-                                static_cast<std::size_t>(block_y) *
-                                    chroma_block_width +
-                                block_x;
-                            const auto neighbor_count =
-                                [&](std::uint32_t neighbor_x,
-                                    std::uint32_t neighbor_y,
-                                    bool neighbor_exists)
-                                    -> std::optional<std::uint8_t> {
-                                if (!neighbor_exists) {
-                                    return std::nullopt;
-                                }
-                                const auto neighbor_macroblock =
-                                    static_cast<std::size_t>(neighbor_y / 2) *
-                                        macroblock_width +
-                                    neighbor_x / 2;
-                                if (neighbor_macroblock != macroblock_address &&
-                                    (!decoded_macroblocks[neighbor_macroblock] ||
-                                     macroblock_slice_ids[neighbor_macroblock] !=
-                                         slice_id)) {
-                                    return std::nullopt;
-                                }
-                                return chroma_total_coefficients[plane_index][
-                                    static_cast<std::size_t>(neighbor_y) *
-                                        chroma_block_width +
-                                    neighbor_x];
-                            };
-                            const auto left_count = neighbor_count(
-                                block_x == 0 ? 0 : block_x - 1, block_y,
-                                block_x != 0);
-                            const auto top_count = neighbor_count(
-                                block_x, block_y == 0 ? 0 : block_y - 1,
-                                block_y != 0);
-                            const auto nc = left_count && top_count
-                                ? (static_cast<std::int32_t>(*left_count) +
-                                   static_cast<std::int32_t>(*top_count) + 1) /
-                                      2
-                                : left_count
-                                    ? static_cast<std::int32_t>(*left_count)
-                                    : top_count
-                                        ? static_cast<std::int32_t>(*top_count)
-                                        : 0;
-                            auto& block =
-                                chroma_ac_blocks[plane_index][block_index];
-                            if (cabac_decoder) {
-                                const auto decoded =
-                                    cabac_decoder->decode_residual_block(
-                                        4, !left_count || *left_count != 0,
-                                        !top_count || *top_count != 0,
-                                        cabac_contexts);
-                                block.coefficients.assign(
-                                    decoded.levels.begin(),
-                                    decoded.levels.begin() + 15);
-                                block.total_coeff =
-                                    static_cast<std::uint8_t>(std::count_if(
-                                        block.coefficients.begin(),
-                                        block.coefficients.end(),
-                                        [](std::int32_t level) {
-                                            return level != 0;
-                                        }));
-                            } else {
-                                block = decode_cavlc_residual_block(reader, nc, 15);
-                            }
-                            chroma_total_coefficients[plane_index]
-                                                     [block_grid_index] =
-                                block.total_coeff;
-                            any_chroma_coefficients |= block.total_coeff != 0;
-                        }
-                    }
-                }
-                if (any_luma_coefficients &&
-                    ((transform_8x8 &&
-                      sps.seq_intra_luma_8x8_scaling_list_present) ||
-                     (!transform_8x8 &&
-                      sps.seq_intra_luma_4x4_scaling_list_present) ||
-                     pps.pic_scaling_matrix_present)) {
-                    throw std::runtime_error(
-                        "intra luma residuals with custom scaling matrices are not supported");
-                }
-                if (any_chroma_coefficients &&
-                    (sps.seq_intra_chroma_4x4_scaling_list_present ||
-                     pps.pic_scaling_matrix_present)) {
-                    throw std::runtime_error(
-                        "I4x4 chroma residuals with custom scaling matrices are not supported");
-                }
-                std::array<std::array<std::int64_t, 16>, 16>
-                    luma_residual_blocks{};
-                std::array<std::array<std::int64_t, 64>, 4>
-                    luma8x8_residual_blocks{};
-                if (transform_8x8) {
-                    for (std::uint32_t block_index = 0; block_index < 4;
-                         ++block_index) {
-                        const auto scaled = inverse_scale_luma8x8(
-                            luma8x8_levels[block_index], previous_qpy);
-                        luma8x8_residual_blocks[block_index] =
-                            inverse_transform_luma8x8(scaled);
-                    }
-                } else {
-                    for (std::uint32_t block_index = 0; block_index < 16;
-                         ++block_index) {
-                        luma_residual_blocks[block_index] =
-                            inverse_transform_luma4x4(
-                                inverse_scale_intra4x4(luma_blocks[block_index],
-                                                       previous_qpy));
-                    }
-                }
-                std::array<std::array<std::int64_t, 4>, 2>
-                    chroma_dc_residuals{};
-                if (chroma_cbp != 0) {
-                    chroma_dc_residuals[0] =
-                        reconstruct_intra16x16_chroma_dc(chroma_dc_blocks[0],
-                                                        qpc_cb);
-                    chroma_dc_residuals[1] =
-                        reconstruct_intra16x16_chroma_dc(chroma_dc_blocks[1],
-                                                        qpc_cr);
-                }
-                std::array<std::array<std::array<std::int64_t, 16>, 4>, 2>
-                    chroma_residual_blocks{};
-                for (std::size_t plane_index = 0; plane_index < 2;
-                     ++plane_index) {
-                    const auto& dc = chroma_dc_residuals[plane_index];
-                    for (std::uint32_t block_index = 0; block_index < 4;
-                         ++block_index) {
-                        const auto qp = plane_index == 0 ? qpc_cb : qpc_cr;
-                        chroma_residual_blocks[plane_index][block_index] =
-                            inverse_transform_luma4x4(
-                                inverse_scale_intra4x4_ac(
-                                    chroma_ac_blocks[plane_index][block_index],
-                                    qp, dc[block_index]));
-                    }
-                }
-
-                const auto sample_available =
-                    [&](std::uint32_t sample_x,
-                        std::uint32_t sample_y) -> bool {
-                    if (sample_x >= sps.coded_width ||
-                        sample_y >= sps.coded_height) {
-                        return false;
-                    }
-                    const auto block_x = sample_x / 4;
-                    const auto block_y = sample_y / 4;
-                    const auto block_grid_index =
-                        static_cast<std::size_t>(block_y) * luma_block_width +
-                        block_x;
-                    const auto neighbor_macroblock =
-                        static_cast<std::size_t>(block_y / 4) *
-                            macroblock_width +
-                        block_x / 4;
-                    if (neighbor_macroblock == macroblock_address) {
-                        return intra4x4_reconstructed[block_grid_index];
-                    }
-                    return decoded_macroblocks[neighbor_macroblock] &&
-                           macroblock_slice_ids[neighbor_macroblock] == slice_id;
-                };
-                if (transform_8x8) {
-                    for (std::uint32_t block_index = 0; block_index < 4;
-                         ++block_index) {
-                        const auto origin_x =
-                            macroblock_x * 16 + (block_index % 2) * 8;
-                        const auto origin_y =
-                            macroblock_y * 16 + (block_index / 2) * 8;
-                        std::array<std::uint8_t, 16> top{};
-                        std::array<std::uint8_t, 16> left{};
-                        bool top_available = true;
-                        bool left_available = true;
-                        for (std::uint32_t index = 0; index < 16; ++index) {
-                            if (origin_y != 0 &&
-                                sample_available(origin_x + index,
-                                                 origin_y - 1)) {
-                                top[index] = frame.luma[
-                                    static_cast<std::size_t>(origin_y - 1) *
-                                        frame.width +
-                                    origin_x + index];
-                            } else if (index < 8) {
-                                top_available = false;
-                            } else {
-                                top[index] = index == 8 ? top[7] : top[index - 1];
-                            }
-                        }
-                        for (std::uint32_t index = 0; index < 8; ++index) {
-                            if (origin_x != 0 &&
-                                sample_available(origin_x - 1,
-                                                 origin_y + index)) {
-                                left[index] = frame.luma[
-                                    static_cast<std::size_t>(origin_y + index) *
-                                        frame.width +
-                                    origin_x - 1];
-                            } else {
-                                left_available = false;
-                            }
-                        }
-                        bool top_left_available = false;
-                        std::uint8_t top_left = 128;
-                        if (origin_x != 0 && origin_y != 0 &&
-                            sample_available(origin_x - 1, origin_y - 1)) {
-                            top_left_available = true;
-                            top_left = frame.luma[
-                                static_cast<std::size_t>(origin_y - 1) *
-                                    frame.width +
-                                origin_x - 1];
-                        }
-                        const auto prediction = predict_intra8x8(
-                            modes_8x8[block_index], top, top_available, left,
-                            left_available, top_left, top_left_available);
-                        for (std::uint32_t row = 0; row < 8; ++row) {
-                            for (std::uint32_t column = 0; column < 8;
-                                 ++column) {
-                                const auto residual_index = row * 8 + column;
-                                auto& sample = frame.luma[
-                                    static_cast<std::size_t>(origin_y + row) *
-                                        frame.width +
-                                    origin_x + column];
-                                sample = static_cast<std::uint8_t>(
-                                    std::clamp<std::int64_t>(
-                                        static_cast<std::int64_t>(
-                                            prediction[residual_index]) +
-                                            luma8x8_residual_blocks[block_index]
-                                                [residual_index],
-                                        0, 255));
-                            }
-                        }
-                        for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
-                            for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
-                                const auto grid_index =
-                                    static_cast<std::size_t>(
-                                        origin_y / 4 + sub_y) *
-                                        luma_block_width +
-                                    origin_x / 4 + sub_x;
-                                intra4x4_reconstructed[grid_index] = true;
-                            }
-                        }
-                    }
-                } else for (std::uint32_t block_index = 0; block_index < 16;
-                     ++block_index) {
-                    const auto position = luma_block_position(block_index);
-                    const auto origin_x = macroblock_x * 16 + position[0] * 4;
-                    const auto origin_y = macroblock_y * 16 + position[1] * 4;
-                    std::array<std::uint8_t, 8> top{};
-                    std::array<std::uint8_t, 4> left{};
-                    bool top_available = true;
-                    bool left_available = true;
-                    for (std::uint32_t index = 0; index < 8; ++index) {
-                        if (origin_y == 0 ||
-                            !sample_available(origin_x + index, origin_y - 1)) {
-                            top_available &= index >= 4;
-                            continue;
-                        }
-                        top[index] = frame.luma[
-                            static_cast<std::size_t>(origin_y - 1) * frame.width +
-                            origin_x + index];
-                    }
-                    for (std::uint32_t index = 0; index < 4; ++index) {
-                        if (origin_x == 0 ||
-                            !sample_available(origin_x - 1, origin_y + index)) {
-                            left_available = false;
-                            continue;
-                        }
-                        left[index] = frame.luma[
-                            static_cast<std::size_t>(origin_y + index) *
-                                frame.width +
-                            origin_x - 1];
-                    }
-                    for (std::uint32_t index = 4; index < 8; ++index) {
-                        if (origin_y == 0 ||
-                            !sample_available(origin_x + index, origin_y - 1)) {
-                            top[index] = top[3];
-                        }
-                    }
-                    if (modes[block_index] == 1 && !left_available) {
-                        throw std::runtime_error(
-                            "I4x4 horizontal mode has no left reference samples "
-                            "(macroblock " +
-                            std::to_string(macroblock_address) + ", block " +
-                            std::to_string(block_index) + ", position " +
-                            std::to_string(position[0]) + "," +
-                            std::to_string(position[1]) + ")");
-                    }
-                    if (modes[block_index] == 7 && !top_available) {
-                        throw std::runtime_error(
-                            "I4x4 vertical-left mode has no top references "
-                            "(macroblock " +
-                            std::to_string(macroblock_address) + ", block " +
-                            std::to_string(block_index) + ", position " +
-                            std::to_string(position[0]) + "," +
-                            std::to_string(position[1]) + ")");
-                    }
-                    bool top_left_available = false;
-                    std::uint8_t top_left = 128;
-                    if (origin_x > 0 && origin_y > 0 &&
-                        sample_available(origin_x - 1, origin_y - 1)) {
-                        top_left_available = true;
-                        top_left = frame.luma[
-                            static_cast<std::size_t>(origin_y - 1) *
-                                frame.width +
-                            origin_x - 1];
-                    }
-                    const auto prediction = predict_intra4x4(
-                        modes[block_index], top, top_available, left,
-                        left_available, top_left, top_left_available);
-                    for (std::uint32_t row = 0; row < 4; ++row) {
-                        for (std::uint32_t column = 0; column < 4; ++column) {
-                            const auto residual_index = row * 4 + column;
-                            auto& sample = frame.luma[
-                                static_cast<std::size_t>(origin_y + row) *
-                                    frame.width +
-                                origin_x + column];
-                            sample = static_cast<std::uint8_t>(
-                                std::clamp<std::int64_t>(
-                                    static_cast<std::int64_t>(
-                                        prediction[residual_index]) +
-                                        luma_residual_blocks[block_index]
-                                                            [residual_index],
-                                    0, 255));
-                        }
-                    }
-                    const auto block_grid_index =
-                        static_cast<std::size_t>(origin_y / 4) *
-                            luma_block_width +
-                        origin_x / 4;
-                    intra4x4_mode_valid[block_grid_index] = true;
-                    intra4x4_reconstructed[block_grid_index] = true;
-                }
-                predict_chroma8x8(frame.chroma_u, frame.width / 2,
-                                  macroblock_x, macroblock_y,
-                                  static_cast<std::uint8_t>(chroma_mode));
-                predict_chroma8x8(frame.chroma_v, frame.width / 2,
-                                  macroblock_x, macroblock_y,
-                                  static_cast<std::uint8_t>(chroma_mode));
-                add_intra16x16_chroma_residual(
-                    frame.chroma_u, frame.width / 2, macroblock_x, macroblock_y,
-                    chroma_residual_blocks[0]);
-                add_intra16x16_chroma_residual(
-                    frame.chroma_v, frame.width / 2, macroblock_x, macroblock_y,
-                    chroma_residual_blocks[1]);
+                decode_intra_nxn(
+                    reader, cabac_decoder, cabac_contexts, sps, pps, frame,
+                    macroblock_address, slice_id, macroblock_width,
+                    decoded_macroblocks, macroblock_transform_8x8,
+                    macroblock_chroma_dc_coded_cb, macroblock_chroma_dc_coded_cr,
+                    macroblock_chroma_mode, macroblock_luma_cbp, macroblock_chroma_cbp,
+                    luma_block_width, chroma_block_width, luma_total_coefficients,
+                    luma_coded_block_flags, intra4x4_modes, intra4x4_mode_valid,
+                    intra4x4_reconstructed, chroma_total_coefficients,
+                    macroblock_slice_ids, previous_qpy, previous_mb_qp_delta,
+                    luma_neighbor_coded);
             } else {
                 const auto luma_mode =
                     static_cast<std::uint8_t>((macroblock_type - 1) % 4);
@@ -3446,6 +3513,9 @@ Yuv420Frame decode_p_frame_with_lists(
         0);
     std::vector<std::uint8_t> luma_coded_block_flags(
         luma_total_coefficients.size(), 0);
+    std::vector<std::uint8_t> intra4x4_modes(luma_total_coefficients.size(), 2);
+    std::vector<std::uint8_t> intra4x4_mode_valid(luma_total_coefficients.size(), 0);
+    std::vector<std::uint8_t> intra4x4_reconstructed(luma_total_coefficients.size(), 0);
     const auto chroma_block_width = macroblock_width * 2;
     const auto chroma_block_height = macroblock_height * 2;
     std::array<std::vector<std::uint8_t>, 2> chroma_total_coefficients{{
@@ -3523,33 +3593,6 @@ Yuv420Frame decode_p_frame_with_lists(
         return left ? static_cast<std::int32_t>(*left)
                     : top ? static_cast<std::int32_t>(*top) : 0;
     };
-    const auto neighbor_motion_vector =
-        [&](std::int64_t block_x, std::int64_t block_y,
-            std::size_t current_macroblock,
-            std::size_t current_slice_id,
-            bool list1 = false) -> std::optional<MotionVector> {
-        if (block_x < 0 || block_y < 0 ||
-            block_x >= static_cast<std::int64_t>(macroblock_width) * 4 ||
-            block_y >= static_cast<std::int64_t>(macroblock_height) * 4) {
-            return std::nullopt;
-        }
-        const auto address = static_cast<std::size_t>(block_y / 4) *
-                                 macroblock_width +
-                             static_cast<std::size_t>(block_x / 4);
-        const auto block_index =
-            static_cast<std::size_t>(block_y % 4) * 4 +
-            static_cast<std::size_t>(block_x % 4);
-        if (address == current_macroblock) {
-            if (!motion_vector_valid[address][block_index]) {
-                return std::nullopt;
-            }
-        } else if (!decoded_macroblocks[address] ||
-                   macroblock_slice_ids[address] != current_slice_id) {
-            return std::nullopt;
-        }
-        return list1 ? macroblock_motion_vectors_l1[address][block_index]
-                     : macroblock_motion_vectors[address][block_index];
-    };
     const auto neighbor_uses_nonzero_reference =
         [&](std::int64_t block_x, std::int64_t block_y,
             std::size_t current_macroblock, std::size_t current_slice_id,
@@ -3615,89 +3658,6 @@ Yuv420Frame decode_p_frame_with_lists(
             ? macroblock_motion_vector_differences_l1[address][block_index]
             : macroblock_motion_vector_differences[address][block_index];
     };
-    const auto neighboring_motion_vectors =
-        [&](std::size_t macroblock_address,
-            std::size_t current_slice_id, std::int32_t part_x = 0,
-            std::int32_t part_y = 0, std::int32_t part_width = 4,
-            bool list1 = false) {
-        const auto block_x = static_cast<std::int64_t>(
-                                 macroblock_address % macroblock_width) *
-                                 4 +
-                             part_x;
-        const auto block_y = static_cast<std::int64_t>(
-                                 macroblock_address / macroblock_width) *
-                                 4 +
-                             part_y;
-        auto candidate_a = neighbor_motion_vector(
-            block_x - 1, block_y, macroblock_address, current_slice_id,
-            list1);
-        auto candidate_b = neighbor_motion_vector(
-            block_x, block_y - 1, macroblock_address, current_slice_id,
-            list1);
-        auto candidate_c = neighbor_motion_vector(
-            block_x + part_width, block_y - 1, macroblock_address,
-            current_slice_id, list1);
-        if (!candidate_c) {
-            candidate_c = neighbor_motion_vector(
-                block_x - 1, block_y - 1, macroblock_address,
-                current_slice_id, list1);
-        }
-        return std::array<std::optional<MotionVector>, 3>{
-            candidate_a, candidate_b, candidate_c};
-    };
-    const auto median_motion_vector = [](
-        std::array<std::optional<MotionVector>, 3> candidates) {
-        if (!candidates[1] && !candidates[2] && candidates[0]) {
-            candidates[1] = candidates[0];
-            candidates[2] = candidates[0];
-        }
-        const auto available_count = static_cast<unsigned>(
-            candidates[0].has_value()) +
-                                     static_cast<unsigned>(
-                                         candidates[1].has_value()) +
-                                     static_cast<unsigned>(
-                                         candidates[2].has_value());
-        if (available_count == 1) {
-            for (const auto& candidate : candidates) {
-                if (candidate) {
-                    return *candidate;
-                }
-            }
-        }
-        MotionVector predictor{};
-        for (std::size_t component = 0; component < predictor.size();
-             ++component) {
-            std::array<std::int64_t, 3> values{};
-            for (std::size_t index = 0; index < candidates.size(); ++index) {
-                if (candidates[index]) {
-                    values[index] = (*candidates[index])[component];
-                }
-            }
-            std::sort(values.begin(), values.end());
-            predictor[component] = values[1];
-        }
-        return predictor;
-    };
-    const auto derive_motion_vector_predictor =
-        [&](std::size_t macroblock_address,
-            std::size_t current_slice_id) {
-        return median_motion_vector(neighboring_motion_vectors(
-            macroblock_address, current_slice_id));
-    };
-    const auto derive_skip_motion_vector =
-        [&](std::size_t macroblock_address,
-            std::size_t current_slice_id) {
-        const auto candidates = neighboring_motion_vectors(
-            macroblock_address, current_slice_id);
-        constexpr MotionVector zero_motion{};
-        if (!candidates[0] || !candidates[1] ||
-            *candidates[0] == zero_motion ||
-            *candidates[1] == zero_motion) {
-            return zero_motion;
-        }
-        return derive_motion_vector_predictor(
-            macroblock_address, current_slice_id);
-    };
     const auto derive_partition_motion_predictor =
         [&](std::size_t macroblock_address, std::size_t current_slice_id,
             std::int32_t part_x, std::int32_t part_y,
@@ -3743,7 +3703,8 @@ Yuv420Frame decode_p_frame_with_lists(
                 ? current_prediction_flags[block_index]
                 : macroblock_prediction_flags[address][block_index];
             if ((flags & (1U << list_index)) == 0) {
-                return std::nullopt;
+                // An available intra or other-list neighbor is not unavailable.
+                return MotionVectorCandidate{-1, MotionVector{}};
             }
             return MotionVectorCandidate{
                 current
@@ -3817,6 +3778,37 @@ Yuv420Frame decode_p_frame_with_lists(
         }
         return predictor;
     };
+    const auto derive_skip_motion_vector =
+        [&](std::size_t address, std::size_t current_slice_id) {
+        constexpr MotionVector zero_motion{};
+        const auto x = address % macroblock_width;
+        const auto y = address / macroblock_width;
+        if (x == 0 || y == 0) {
+            return zero_motion;
+        }
+        const auto left = address - 1;
+        const auto top = address - macroblock_width;
+        const auto zero_or_unavailable = [&](std::size_t neighbor,
+                                             std::size_t block) {
+            if (!decoded_macroblocks[neighbor] ||
+                macroblock_slice_ids[neighbor] != current_slice_id) {
+                return true;
+            }
+            return (macroblock_prediction_flags[neighbor][block] & 1) != 0 &&
+                   macroblock_reference_indices[neighbor][0][block] == 0 &&
+                   macroblock_motion_vectors[neighbor][block] == zero_motion;
+        };
+        if (zero_or_unavailable(left, 3) || zero_or_unavailable(top, 12)) {
+            return zero_motion;
+        }
+        const std::array<std::array<std::int32_t, 16>, 2> references{};
+        const std::array<std::uint8_t, 16> flags{};
+        const std::array<std::uint8_t, 16> valid{};
+        const MacroblockMotionVectors motion{};
+        return derive_partition_motion_predictor(
+            address, current_slice_id, 0, 0, 4, 4, 0, 0, references,
+            flags, valid, motion, motion);
+    };
     struct DirectMotionCandidate {
         std::int32_t reference_index;
         MotionVector motion_vector;
@@ -3878,10 +3870,10 @@ Yuv420Frame decode_p_frame_with_lists(
             std::array<std::uint8_t, 16>& output_prediction_flags,
             MacroblockMotionVectors& output_motion,
             MacroblockMotionVectors& output_motion_l1) {
+        const bool whole_macroblock =
+            partition_width == 4 && partition_height == 4;
         const std::int32_t inference_step =
-            partition_width == 4 && partition_height == 4
-                ? 4
-                : sps.direct_8x8_inference ? 2 : 1;
+            sps.direct_8x8_inference ? 2 : 1;
         const auto minimum_nonnegative = [](std::int32_t left,
                                             std::int32_t right) {
             if (left >= 0 && right >= 0) {
@@ -3899,12 +3891,12 @@ Yuv420Frame decode_p_frame_with_lists(
                     static_cast<std::int64_t>(macroblock_address %
                                               macroblock_width) *
                         4 +
-                    group_x;
+                    (whole_macroblock ? 0 : group_x);
                 const auto block_y =
                     static_cast<std::int64_t>(macroblock_address /
                                               macroblock_width) *
                         4 +
-                    group_y;
+                    (whole_macroblock ? 0 : group_y);
                 std::array<std::array<std::optional<DirectMotionCandidate>, 4>,
                            2>
                     candidates{};
@@ -3926,7 +3918,7 @@ Yuv420Frame decode_p_frame_with_lists(
                             output_motion_l1);
                     candidates[list_index][2] =
                         neighbor_direct_motion_candidate(
-                            block_x + inference_step, block_y - 1,
+                            block_x + 4, block_y - 1,
                             macroblock_address, current_slice_id, list_index,
                             output_reference_indices,
                             output_prediction_flags, output_motion,
@@ -3973,9 +3965,13 @@ Yuv420Frame decode_p_frame_with_lists(
                     macroblock_address <
                         reference_frames_l1.front()
                             ->colocated_motion_field.size()) {
+                    const auto colocated_x = sps.direct_8x8_inference
+                        ? (group_x / 2) * 3 : group_x;
+                    const auto colocated_y = sps.direct_8x8_inference
+                        ? (group_y / 2) * 3 : group_y;
                     const auto colocated_block =
-                        static_cast<std::size_t>(group_y) * 4 +
-                        static_cast<std::size_t>(group_x);
+                        static_cast<std::size_t>(colocated_y) * 4 +
+                        static_cast<std::size_t>(colocated_x);
                     const auto& colocated =
                         reference_frames_l1.front()
                             ->colocated_motion_field[macroblock_address]
@@ -4251,14 +4247,16 @@ Yuv420Frame decode_p_frame_with_lists(
                     throw std::runtime_error(
                         "P slices contain an overlapping macroblock");
                 }
-                const auto skip_motion =
-                    derive_skip_motion_vector(address, slice_id);
                 auto macroblock_motion = MacroblockMotionVectors{};
                 auto macroblock_motion_l1 = MacroblockMotionVectors{};
                 std::array<std::uint8_t, 16> prediction_flags{};
                 std::array<std::array<std::int32_t, 16>, 2>
                     reference_indices{};
                 if (b_slice) {
+                    if (!slice_header.direct_spatial_mv_pred) {
+                        throw std::runtime_error(
+                            "B-slice temporal direct prediction is unsupported");
+                    }
                     derive_spatial_direct(
                         address, slice_id, 0, 0, 4, 4, reference_indices,
                         prediction_flags, macroblock_motion,
@@ -4269,6 +4267,8 @@ Yuv420Frame decode_p_frame_with_lists(
                                            &reference_indices);
                     macroblock_b_direct[address] = 1;
                 } else {
+                    const auto skip_motion =
+                        derive_skip_motion_vector(address, slice_id);
                     macroblock_motion.fill(skip_motion);
                     prediction_flags.fill(1);
                     reconstruct_macroblock(address, macroblock_motion);
@@ -4389,7 +4389,7 @@ Yuv420Frame decode_p_frame_with_lists(
                              b_mb_type_context_increment, cabac_contexts)
                        : cabac_decoder->decode_p_mb_type(0, cabac_contexts))
                 : reader.read_ue();
-            if (b_slice && macroblock_type > 22) {
+            if (b_slice && macroblock_type > 48) {
                 throw std::runtime_error(
                     "B macroblock type is not yet supported "
                     "(macroblock " +
@@ -4400,7 +4400,7 @@ Yuv420Frame decode_p_frame_with_lists(
                 macroblock_b_direct[macroblock_address] =
                     macroblock_type == 0;
             }
-            if (macroblock_type > 30) {
+            if (!b_slice && macroblock_type > 30) {
                 throw std::runtime_error(
                     "P decoder currently supports P_L0_16x16, P_L0_16x8, "
                     "P_L0_8x16, P_8x8, P_8x8ref0, Intra16x16, and P_SKIP only "
@@ -4436,16 +4436,57 @@ Yuv420Frame decode_p_frame_with_lists(
                 macroblock_address % macroblock_width);
             const auto macroblock_y = static_cast<std::uint32_t>(
                 macroblock_address / macroblock_width);
-            if (!b_slice && macroblock_type >= 5) {
-                if (macroblock_type > 29) {
+            if ((!b_slice && macroblock_type >= 5) ||
+                (b_slice && macroblock_type >= 23)) {
+                const auto intra_offset = b_slice ? 23U : 5U;
+                if (macroblock_type >= intra_offset + 25) {
                     throw std::runtime_error(
-                        "P-slice I_PCM macroblocks are unsupported");
+                        "inter-slice I_PCM macroblocks are unsupported");
                 }
                 const auto intra_type =
-                    static_cast<std::uint32_t>(macroblock_type - 5);
+                    static_cast<std::uint32_t>(macroblock_type - intra_offset);
                 if (intra_type == 0) {
-                    throw std::runtime_error(
-                        "P-slice Intra_NxN macroblocks are unsupported");
+                    if (pps.constrained_intra_pred) {
+                        throw std::runtime_error(
+                            "P-slice Intra_NxN constrained intra prediction is unsupported");
+                    }
+                    const auto luma_neighbor_coded =
+                        [&](std::uint32_t x, std::uint32_t y, bool exists) {
+                            if (!exists) return true;
+                            const auto address = static_cast<std::size_t>(y / 4) *
+                                                     macroblock_width + x / 4;
+                            if (address != macroblock_address &&
+                                (!decoded_macroblocks[address] ||
+                                 macroblock_slice_ids[address] != slice_id)) return true;
+                            return luma_coded_block_flags[
+                                static_cast<std::size_t>(y) * luma_block_width + x] != 0;
+                        };
+                    auto& macroblock_chroma_dc_coded_cb = macroblock_chroma_dc_coded[0];
+                    auto& macroblock_chroma_dc_coded_cr = macroblock_chroma_dc_coded[1];
+                    decode_intra_nxn(
+                    reader, cabac_decoder, cabac_contexts, sps, pps, frame,
+                    macroblock_address, slice_id, macroblock_width,
+                    decoded_macroblocks, macroblock_transform_8x8,
+                    macroblock_chroma_dc_coded_cb, macroblock_chroma_dc_coded_cr,
+                    macroblock_chroma_mode, macroblock_luma_cbp, macroblock_chroma_cbp,
+                    luma_block_width, chroma_block_width, luma_total_coefficients,
+                    luma_coded_block_flags, intra4x4_modes, intra4x4_mode_valid,
+                    intra4x4_reconstructed, chroma_total_coefficients,
+                    macroblock_slice_ids, previous_qpy, previous_mb_qp_delta,
+                    luma_neighbor_coded, &macroblock_intra16, &chroma_coded_block_flags);
+                    macroblock_intra16[macroblock_address] = 1;
+                    decoded = 1;
+                    macroblock_slice_ids[macroblock_address] = slice_id;
+                    macroblock_qpy[macroblock_address] = previous_qpy;
+                    macroblock_disable_idc[macroblock_address] =
+                        slice_header.disable_deblocking_filter_idc;
+                    macroblock_alpha_offsets[macroblock_address] =
+                        slice_header.slice_alpha_c0_offset_div2;
+                    macroblock_beta_offsets[macroblock_address] =
+                        slice_header.slice_beta_offset_div2;
+                    if (cabac_decoder && cabac_decoder->decode_terminate_bin()) break;
+                    ++macroblock_address;
+                    continue;
                 }
                 const auto intra16_type = intra_type - 1;
                 const auto luma_mode =
@@ -4454,10 +4495,6 @@ Yuv420Frame decode_p_frame_with_lists(
                     (intra16_type / 4) % 3);
                 const auto luma_cbp = static_cast<std::uint8_t>(
                     intra16_type / 12 == 0 ? 0 : 15);
-                if (chroma_cbp != 0) {
-                    throw std::runtime_error(
-                        "P-slice Intra16x16 chroma residuals are unsupported");
-                }
                 const bool left_available = macroblock_x != 0;
                 const bool top_available = macroblock_y != 0;
                 const auto left_address =
@@ -4490,21 +4527,16 @@ Yuv420Frame decode_p_frame_with_lists(
                 macroblock_intra16[macroblock_address] = 1;
                 macroblock_transform_8x8[macroblock_address] = 0;
                 auto qpy = previous_qpy;
-                if (luma_cbp != 0) {
-                    const auto qp_delta = cabac_decoder
-                        ? cabac_decoder->decode_mb_qp_delta(
-                              previous_mb_qp_delta, cabac_contexts)
-                        : reader.read_se();
-                    if (qp_delta < -26 || qp_delta > 25) {
-                        throw std::runtime_error(
-                            "P-slice Intra16x16 mb_qp_delta is outside [-26,25]");
-                    }
-                    qpy = static_cast<std::int32_t>(
-                        (qpy + qp_delta + 52) % 52);
-                    previous_mb_qp_delta = qp_delta;
-                } else {
-                    previous_mb_qp_delta = 0;
+                const auto qp_delta = cabac_decoder
+                    ? cabac_decoder->decode_mb_qp_delta(
+                          previous_mb_qp_delta, cabac_contexts)
+                    : reader.read_se();
+                if (qp_delta < -26 || qp_delta > 25) {
+                    throw std::runtime_error(
+                        "P-slice Intra16x16 mb_qp_delta is outside [-26,25]");
                 }
+                qpy = static_cast<std::int32_t>((qpy + qp_delta + 52) % 52);
+                previous_mb_qp_delta = qp_delta;
                 if (qpy < 0 || qpy > 51) {
                     throw std::runtime_error(
                         "P-slice Intra16x16 QP is outside [0,51]");
@@ -4637,6 +4669,97 @@ Yuv420Frame decode_p_frame_with_lists(
                     throw std::runtime_error(
                         "P-slice Intra16x16 custom luma scaling matrices are unsupported");
                 }
+                std::array<std::array<std::int64_t, 4>, 2> chroma_dc{};
+                std::array<std::array<CavlcResidualBlock, 4>, 2> chroma_ac;
+                for (auto& plane : chroma_ac) {
+                    for (auto& block : plane) {
+                        block.coefficients.resize(15, 0);
+                    }
+                }
+                bool any_chroma_coefficients = false;
+                const std::array<std::int32_t, 2> qpc{{
+                    chroma_qp(qpy, pps.chroma_qp_index_offset),
+                    chroma_qp(qpy, pps.second_chroma_qp_index_offset),
+                }};
+                if (chroma_cbp != 0) {
+                    for (std::size_t plane = 0; plane < 2; ++plane) {
+                        CavlcResidualBlock block;
+                        if (cabac_decoder) {
+                            const auto condition = [&](std::size_t address, bool available) {
+                                return !available || !decoded_macroblocks[address] ||
+                                               macroblock_slice_ids[address] != slice_id
+                                           ? true
+                                           : macroblock_chroma_dc_coded[plane][address] != 0;
+                            };
+                            const auto residual = cabac_decoder->decode_residual_block(
+                                3, condition(left_address, left_available),
+                                condition(top_address, top_available), cabac_contexts);
+                            block.coefficients.assign(residual.levels.begin(),
+                                                      residual.levels.begin() + 4);
+                            block.total_coeff = static_cast<std::uint8_t>(std::count_if(
+                                block.coefficients.begin(), block.coefficients.end(),
+                                [](std::int32_t level) { return level != 0; }));
+                            macroblock_chroma_dc_coded[plane][macroblock_address] =
+                                residual.coded;
+                        } else {
+                            block = decode_cavlc_residual_block(reader, -1, 4);
+                        }
+                        any_chroma_coefficients |= block.total_coeff != 0;
+                        if (block.total_coeff != 0) {
+                            chroma_dc[plane] = reconstruct_intra16x16_chroma_dc(block, qpc[plane]);
+                        }
+                    }
+                }
+                if (chroma_cbp == 2) {
+                    for (std::size_t plane = 0; plane < 2; ++plane) {
+                        for (std::uint32_t index = 0; index < 4; ++index) {
+                            const auto x = macroblock_x * 2 + index % 2;
+                            const auto y = macroblock_y * 2 + index / 2;
+                            const auto grid = static_cast<std::size_t>(y) * chroma_block_width + x;
+                            const auto neighbor = [&](std::uint32_t nx, std::uint32_t ny,
+                                                      bool exists) -> std::optional<std::size_t> {
+                                if (!exists) return std::nullopt;
+                                const auto address = static_cast<std::size_t>(ny / 2) *
+                                                         macroblock_width + nx / 2;
+                                if (address != macroblock_address &&
+                                    (!decoded_macroblocks[address] ||
+                                     macroblock_slice_ids[address] != slice_id)) {
+                                    return std::nullopt;
+                                }
+                                return static_cast<std::size_t>(ny) * chroma_block_width + nx;
+                            };
+                            const auto left = neighbor(x == 0 ? 0 : x - 1, y, x != 0);
+                            const auto top = neighbor(x, y == 0 ? 0 : y - 1, y != 0);
+                            auto& block = chroma_ac[plane][index];
+                            if (cabac_decoder) {
+                                const auto residual = cabac_decoder->decode_residual_block(
+                                    4, left ? chroma_coded_block_flags[plane][*left] != 0 : true,
+                                    top ? chroma_coded_block_flags[plane][*top] != 0 : true,
+                                    cabac_contexts);
+                                block.coefficients.assign(residual.levels.begin(),
+                                                          residual.levels.begin() + 15);
+                                block.total_coeff = static_cast<std::uint8_t>(std::count_if(
+                                    block.coefficients.begin(), block.coefficients.end(),
+                                    [](std::int32_t level) { return level != 0; }));
+                                chroma_coded_block_flags[plane][grid] = residual.coded;
+                            } else {
+                                const auto l = left ? chroma_total_coefficients[plane][*left] : 0;
+                                const auto t = top ? chroma_total_coefficients[plane][*top] : 0;
+                                const auto nc = left && top ? (l + t + 1) / 2 : left ? l : t;
+                                block = decode_cavlc_residual_block(reader, nc, 15);
+                                chroma_coded_block_flags[plane][grid] = block.total_coeff != 0;
+                            }
+                            chroma_total_coefficients[plane][grid] = block.total_coeff;
+                            any_chroma_coefficients |= block.total_coeff != 0;
+                        }
+                    }
+                }
+                if (any_chroma_coefficients &&
+                    (sps.seq_intra_chroma_4x4_scaling_list_present ||
+                     pps.pic_scaling_matrix_present)) {
+                    throw std::runtime_error(
+                        "P-slice Intra16x16 custom chroma scaling matrices are unsupported");
+                }
                 std::array<std::array<std::int64_t, 16>, 16>
                     luma_residual_blocks{};
                 for (std::uint32_t block_index = 0; block_index < 16;
@@ -4659,6 +4782,17 @@ Yuv420Frame decode_p_frame_with_lists(
                 predict_chroma8x8(
                     frame.chroma_v, frame.width / 2, macroblock_x,
                     macroblock_y, static_cast<std::uint8_t>(chroma_mode));
+                for (std::size_t plane = 0; plane < 2; ++plane) {
+                    std::array<std::array<std::int64_t, 16>, 4> residuals{};
+                    for (std::size_t index = 0; index < 4; ++index) {
+                        residuals[index] = inverse_transform_luma4x4(
+                            inverse_scale_intra4x4_ac(chroma_ac[plane][index],
+                                                      qpc[plane], chroma_dc[plane][index]));
+                    }
+                    add_intra16x16_chroma_residual(
+                        plane == 0 ? frame.chroma_u : frame.chroma_v,
+                        frame.width / 2, macroblock_x, macroblock_y, residuals);
+                }
                 decoded = 1;
                 macroblock_slice_ids[macroblock_address] = slice_id;
                 macroblock_qpy[macroblock_address] = qpy;
@@ -4942,6 +5076,10 @@ Yuv420Frame decode_p_frame_with_lists(
                  partition_index < partition_count; ++partition_index) {
                 if (!partition_direct[partition_index]) {
                     continue;
+                }
+                if (!slice_header.direct_spatial_mv_pred) {
+                    throw std::runtime_error(
+                        "B-slice temporal direct prediction is unsupported");
                 }
                 const auto& partition = partitions[partition_index];
                 derive_spatial_direct(

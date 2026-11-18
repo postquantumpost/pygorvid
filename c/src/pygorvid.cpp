@@ -710,10 +710,14 @@ bool VideoSampleReader::open(const std::string& path) {
         const auto sample_entries =
             read_boxes(file_, sample_description.payload + 8,
                        sample_description.end);
-        if (description_count != 1 || sample_entries.size() != 1 ||
-            sample_entries.front().type != "avc1") {
+        if (description_count != 1 || sample_entries.size() != 1) {
             throw std::runtime_error(
-                "only one avc1 video sample description is supported");
+                "video track must contain one sample description");
+        }
+        if (sample_entries.front().type != "avc1") {
+            throw std::runtime_error("unsupported video sample entry '" +
+                                     sample_entries.front().type +
+                                     "'; H.264 avc1 is required");
         }
         const auto& sample_entry = sample_entries.front();
         if (sample_entry.end - sample_entry.payload < 78) {

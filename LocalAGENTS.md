@@ -11,3 +11,7 @@ When working in work/pygorvid, make code changes and bug fixes in all four
 languages rust, go, python, and C++, but don't run any python tests unless it can
 be guaranteed they will run in less than 60 seconds. The python tests will be
 run offline later.
+
+When fixing bugs or implementing features in one language, refer to the other
+language implementations if they are working.  Port implementations missing
+in one language from the other languages as needed.

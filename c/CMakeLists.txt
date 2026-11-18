@@ -55,6 +55,12 @@ if(PYGORVID_BUILD_TESTS)
         -DENABLED=${PYGORVID_SLIDESHOW}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_slideshow.cmake)
     set_tests_properties(vidprobe_slideshow PROPERTIES TIMEOUT 60)
+    add_test(NAME vidprobe_cabac_intra COMMAND ${CMAKE_COMMAND}
+        -DVIDPROBE=$<TARGET_FILE:vidprobe>
+        -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cabac_intra.cmake)
+    set_tests_properties(vidprobe_cabac_intra PROPERTIES TIMEOUT 60)
 endif()
 
 install(TARGETS pygorvid vidprobe

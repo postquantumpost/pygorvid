@@ -422,6 +422,71 @@ std::vector<std::uint8_t> make_p_skip_slice(
     return nal;
 }
 
+std::vector<std::uint8_t> make_p_intra16_chroma_slice(
+    std::uint32_t chroma_cbp, const std::string& cb_dc,
+    const std::string& cr_dc, const std::array<std::string, 8>& ac_bits) {
+    BitWriter syntax;
+    syntax.ue(0);
+    syntax.ue(0);
+    syntax.ue(0);
+    syntax.bits(1, 4);
+    syntax.bits(1, 4);
+    syntax.bit(false);
+    syntax.bit(false);
+    syntax.bit(false);
+    syntax.se(0);
+    syntax.ue(1);
+    syntax.ue(0);
+    syntax.ue(5 + 3 + chroma_cbp * 4);
+    syntax.ue(0);
+    syntax.se(0);
+    syntax.bit(true);
+    if (chroma_cbp != 0) {
+        for (const auto bit : cb_dc) syntax.bit(bit == '1');
+        for (const auto bit : cr_dc) syntax.bit(bit == '1');
+    }
+    if (chroma_cbp == 2) {
+        for (const auto& block : ac_bits) {
+            for (const auto bit : block) syntax.bit(bit == '1');
+        }
+    }
+    std::vector<std::uint8_t> nal{0x41};
+    append(nal, rbsp_to_ebsp(syntax.finish()));
+    return nal;
+}
+
+std::vector<std::uint8_t> make_i_intra16_chroma_slice(
+    std::uint32_t chroma_cbp, const std::string& cb_dc,
+    const std::string& cr_dc, const std::array<std::string, 8>& ac_bits) {
+    BitWriter syntax;
+    syntax.ue(0);
+    syntax.ue(2);
+    syntax.ue(0);
+    syntax.bits(0, 4);
+    syntax.ue(0);
+    syntax.bits(0, 4);
+    syntax.bit(true);
+    syntax.bit(false);
+    syntax.se(0);
+    syntax.ue(1);
+    syntax.ue(3 + chroma_cbp * 4);
+    syntax.ue(0);
+    syntax.se(0);
+    syntax.bit(true);
+    if (chroma_cbp != 0) {
+        for (const auto bit : cb_dc) syntax.bit(bit == '1');
+        for (const auto bit : cr_dc) syntax.bit(bit == '1');
+    }
+    if (chroma_cbp == 2) {
+        for (const auto& block : ac_bits) {
+            for (const auto bit : block) syntax.bit(bit == '1');
+        }
+    }
+    std::vector<std::uint8_t> nal{0x65};
+    append(nal, rbsp_to_ebsp(syntax.finish()));
+    return nal;
+}
+
 std::vector<std::uint8_t> make_p_partition_slice(
     std::uint32_t macroblock_type, std::int64_t second_motion_difference_x) {
     assert(macroblock_type == 1 || macroblock_type == 2);
@@ -798,6 +863,35 @@ void test_h264_p_skip_picture() {
     const auto single_reference = pygorvid::decode_idr_i_pcm_frame(
         {make_i_pcm_slice(0, single_luma, single_u, single_v)},
         single_macroblock_sps, pps);
+    std::array<std::string, 8> zero_chroma_ac;
+    zero_chroma_ac.fill("1");
+    const auto intra_no_chroma = pygorvid::decode_p_frame(
+        {make_p_intra16_chroma_slice(0, "", "", zero_chroma_ac)},
+        single_macroblock_sps, pps, single_reference);
+    const auto intra_dc = pygorvid::decode_p_frame(
+        {make_p_intra16_chroma_slice(1, "00011111", "01", zero_chroma_ac)},
+        single_macroblock_sps, pps, single_reference);
+    const auto idr_dc = pygorvid::decode_idr_i_frame(
+        {make_i_intra16_chroma_slice(1, "00011111", "01", zero_chroma_ac)},
+        single_macroblock_sps, pps);
+    assert(intra_dc.luma == idr_dc.luma);
+    assert(intra_dc.chroma_u == idr_dc.chroma_u);
+    assert(intra_dc.chroma_v == idr_dc.chroma_v);
+    assert(intra_dc.chroma_u != intra_no_chroma.chroma_u);
+    assert(intra_dc.chroma_v == intra_no_chroma.chroma_v);
+    auto chroma_ac = zero_chroma_ac;
+    chroma_ac[0] = "0101";
+    const auto intra_ac = pygorvid::decode_p_frame(
+        {make_p_intra16_chroma_slice(2, "01", "01", chroma_ac)},
+        single_macroblock_sps, pps, single_reference);
+    const auto idr_ac = pygorvid::decode_idr_i_frame(
+        {make_i_intra16_chroma_slice(2, "01", "01", chroma_ac)},
+        single_macroblock_sps, pps);
+    assert(intra_ac.luma == idr_ac.luma);
+    assert(intra_ac.chroma_u == idr_ac.chroma_u);
+    assert(intra_ac.chroma_v == idr_ac.chroma_v);
+    assert(intra_ac.chroma_u != intra_no_chroma.chroma_u);
+    assert(intra_ac.chroma_v == intra_no_chroma.chroma_v);
     const auto coded_p_picture = pygorvid::decode_p_frame(
         {make_p_l0_16x16_slice()}, single_macroblock_sps, pps,
         single_reference);
@@ -1192,7 +1286,8 @@ std::vector<std::uint8_t> make_i4x4_slice(
     const std::array<std::string, 16>& luma_residual_bits,
     const std::array<std::string, 2>& chroma_dc_bits = {"01", "01"},
     const std::array<std::array<std::string, 4>, 2>* chroma_ac_bits = nullptr,
-    std::int64_t macroblock_qp_delta = 0) {
+    std::int64_t macroblock_qp_delta = 0,
+    bool p_slice = false) {
     static constexpr std::array<std::uint8_t, 48> intra_cbp{{
         47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14,
         39, 43, 45, 46, 16, 3, 5, 10, 12, 19, 21, 26,
@@ -1203,16 +1298,23 @@ std::vector<std::uint8_t> make_i4x4_slice(
 
     BitWriter syntax;
     syntax.ue(0);
-    syntax.ue(2);
+    syntax.ue(p_slice ? 0 : 2);
     syntax.ue(0);
-    syntax.bits(0, 4);
-    syntax.ue(0);
-    syntax.bits(0, 4);
-    syntax.bit(true);
-    syntax.bit(false);
+    syntax.bits(p_slice ? 1 : 0, 4);
+    if (!p_slice) syntax.ue(0);
+    syntax.bits(p_slice ? 1 : 0, 4);
+    if (p_slice) {
+        syntax.bit(false);
+        syntax.bit(false);
+        syntax.bit(false);
+    } else {
+        syntax.bit(true);
+        syntax.bit(false);
+    }
     syntax.se(0);
     syntax.ue(1);
-    syntax.ue(0);
+    if (p_slice) syntax.ue(0);
+    syntax.ue(p_slice ? 5 : 0);
     for (std::size_t block_index = 0; block_index < 16; ++block_index) {
         syntax.bit(true);
     }
@@ -1255,7 +1357,7 @@ std::vector<std::uint8_t> make_i4x4_slice(
             }
         }
     }
-    std::vector<std::uint8_t> nal{0x65};
+    std::vector<std::uint8_t> nal{static_cast<std::uint8_t>(p_slice ? 0x41 : 0x65)};
     append(nal, rbsp_to_ebsp(syntax.finish()));
     return nal;
 }
@@ -1616,6 +1718,12 @@ void test_h264_i4x4_residual_reconstruction() {
     zero_luma_bits.fill("1");
     const auto baseline = pygorvid::decode_idr_i_frame(
         {make_i4x4_slice(3, zero_luma_bits)}, sps, pps);
+    const auto p_baseline = pygorvid::decode_p_frame(
+        {make_i4x4_slice(3, zero_luma_bits, {"01", "01"}, nullptr, 0, true)},
+        sps, pps, baseline);
+    assert(p_baseline.luma == baseline.luma);
+    assert(p_baseline.chroma_u == baseline.chroma_u);
+    assert(p_baseline.chroma_v == baseline.chroma_v);
     const auto cropped_sps =
         pygorvid::parse_sps(make_sps(66, 0, 0, {1, 1, 1, 1}));
     const auto cropped = pygorvid::decode_idr_i_frame(
@@ -1633,6 +1741,12 @@ void test_h264_i4x4_residual_reconstruction() {
     luma_bits[0] = "0101";
     const auto luma_frame = pygorvid::decode_idr_i_frame(
         {make_i4x4_slice(29, luma_bits)}, sps, pps);
+    const auto p_luma = pygorvid::decode_p_frame(
+        {make_i4x4_slice(29, luma_bits, {"01", "01"}, nullptr, 0, true)},
+        sps, pps, baseline);
+    assert(p_luma.luma == luma_frame.luma);
+    assert(p_luma.chroma_u == luma_frame.chroma_u);
+    assert(p_luma.chroma_v == luma_frame.chroma_v);
     assert(luma_frame.luma[0] == 131);
     assert(luma_frame.luma[4] == 131);
     assert(luma_frame.luma[4 * 16] == 131);
@@ -1663,6 +1777,13 @@ void test_h264_i4x4_residual_reconstruction() {
         {make_i4x4_slice(42, zero_luma_bits, {"01", "01"},
                          &chroma_ac_bits)},
         sps, pps);
+    const auto p_chroma_frame = pygorvid::decode_p_frame(
+        {make_i4x4_slice(42, zero_luma_bits, {"01", "01"},
+                         &chroma_ac_bits, 0, true)},
+        sps, pps, baseline);
+    assert(p_chroma_frame.luma == chroma_frame.luma);
+    assert(p_chroma_frame.chroma_u == chroma_frame.chroma_u);
+    assert(p_chroma_frame.chroma_v == chroma_frame.chroma_v);
     assert(chroma_frame.luma == baseline.luma);
     assert(chroma_frame.chroma_u[0] == 132);
     assert(chroma_frame.chroma_u[1] == 130);
@@ -1674,6 +1795,12 @@ void test_h264_i4x4_residual_reconstruction() {
         {make_i4x4_slice(16, zero_luma_bits,
                          {"00011111", "01"}, nullptr, 16)},
         sps, pps);
+    const auto p_chroma_dc_frame = pygorvid::decode_p_frame(
+        {make_i4x4_slice(16, zero_luma_bits,
+                         {"00011111", "01"}, nullptr, 16, true)},
+        sps, pps, baseline);
+    assert(p_chroma_dc_frame.chroma_u == chroma_dc_frame.chroma_u);
+    assert(p_chroma_dc_frame.chroma_v == chroma_dc_frame.chroma_v);
     assert(chroma_dc_frame.chroma_u[0] == 139);
     assert(chroma_dc_frame.chroma_v == baseline.chroma_v);
 }
@@ -2275,6 +2402,23 @@ void test_video_sample_reader() {
     assert(presentation_index_out_of_range_rejected);
     reader.close();
     assert(!reader.is_open());
+
+    auto unsupported_codec_data = make_sample_test_mp4();
+    const auto avc1 = std::search(unsupported_codec_data.begin(),
+                                  unsupported_codec_data.end(),
+                                  std::begin("avc1"), std::end("avc1") - 1);
+    assert(avc1 != unsupported_codec_data.end());
+    std::copy(std::begin("av01"), std::end("av01") - 1, avc1);
+    std::ofstream unsupported_codec_output(test_file, std::ios::binary |
+                                                        std::ios::trunc);
+    unsupported_codec_output.write(
+        reinterpret_cast<const char*>(unsupported_codec_data.data()),
+        static_cast<std::streamsize>(unsupported_codec_data.size()));
+    unsupported_codec_output.close();
+    assert(unsupported_codec_output.good());
+    assert(!reader.open(test_file.string()));
+    assert(reader.error_info() ==
+           "unsupported video sample entry 'av01'; H.264 avc1 is required");
 
     std::filesystem::remove(test_file);
     std::filesystem::remove(test_directory);

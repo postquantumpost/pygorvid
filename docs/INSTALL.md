@@ -87,15 +87,17 @@ supports complete P pictures containing P_SKIP and P_L0_16x16 macroblocks,
 with one reference fixed to the supplied previous frame. It derives motion
 vector predictors from neighboring macroblocks and supports quarter-pel luma
 motion with bilinear fractional 4:2:0 chroma motion. These reconstruction paths
-also reconstruct CAVLC luma and chroma DC/AC residuals for P_L0_16x16
-macroblocks using default scaling lists. IDR deblocking is supported for
-decoded intra macroblocks; P-picture reconstruction requires deblocking to be
-disabled. I8x8 prediction, weighted/reordered references,
-adaptive reference marking, custom scaling lists, and CABAC are not supported.
+also reconstruct luma and chroma DC/AC residuals for inter macroblocks using
+default scaling lists. The decoder supports CABAC and deblocking for these
+paths; custom scaling matrices remain unsupported.
 Sample DTS, PTS, and durations are in `VideoSampleReader::timescale()`.
 For cropped pictures, the C++ decoder reconstructs and retains the full coded
 picture for inter prediction, while exposing cropped output planes.
-P-slice Intra_NxN macroblocks remain unsupported in the C++ decoder.
+P- and B-slice Intra_NxN macroblocks support CABAC with unconstrained intra
+prediction; P-slice Intra_4x4 also supports CAVLC. B-slice temporal direct
+prediction is explicitly unsupported by the C++ decoder.
+P-slice Intra16x16 macroblocks support chroma DC and AC residuals when using
+default scaling lists.
 
 The `vidprobe-cpp` command extracts one frame by MP4 sample index. An output
 ending in `.jpg` (case-insensitive) selects JPEG; other names produce PNG:

@@ -346,9 +346,9 @@ std::uint8_t CabacArithmeticDecoder::decode_p_mb_type(
 std::uint8_t CabacArithmeticDecoder::decode_b_mb_type(
     std::size_t context_increment,
     std::vector<CabacContextModel>& contexts) {
-    if (context_increment > 3 || contexts.size() < 35) {
+    if (context_increment > 3 || contexts.size() < 36) {
         throw std::invalid_argument(
-            "B mb_type requires context increment 0..3 and contexts 27 through 34");
+            "B mb_type requires context increment 0..3 and contexts 27 through 35");
     }
 
     const auto original_range = code_range_;
@@ -384,9 +384,9 @@ std::uint8_t CabacArithmeticDecoder::decode_b_mb_type(
                                 4 + 4 * decode_bin(next_contexts[34]));
                         }
                         intra_type += static_cast<std::uint8_t>(
-                            2 * decode_bin(next_contexts[34]));
+                            2 * decode_bin(next_contexts[35]));
                         intra_type += static_cast<std::uint8_t>(
-                            decode_bin(next_contexts[34]));
+                            decode_bin(next_contexts[35]));
                     }
                     macroblock_type =
                         static_cast<std::uint8_t>(23 + intra_type);
