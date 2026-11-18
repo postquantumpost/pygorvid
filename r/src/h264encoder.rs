@@ -98,9 +98,15 @@ impl H264Encoder {
         for value in [0, 2, 0] {
             writer.ue(value);
         }
-        writer.bits(0, 4);
-        writer.ue(u32::from(idr_pic_id));
-        writer.bits(0, 2);
+        let non_idr_reference = idr_pic_id == 2;
+        if non_idr_reference {
+            writer.bits(1, 4);
+            writer.bits(0, 1);
+        } else {
+            writer.bits(0, 4);
+            writer.ue(u32::from(idr_pic_id));
+            writer.bits(0, 2);
+        }
         writer.ue(0);
         writer.ue(1);
         for macroblock in 0..16 {
@@ -115,7 +121,7 @@ impl H264Encoder {
             writer.data.extend_from_slice(&[128; 128]);
             writer.bit_count += 384 * 8;
         }
-        let nal = writer.nal(0x65);
+        let nal = writer.nal(if non_idr_reference { 0x21 } else { 0x65 });
         let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
         sample.extend(nal);
         sample

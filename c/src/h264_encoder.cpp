@@ -100,9 +100,15 @@ std::vector<std::uint8_t> H264Encoder::encode_pcm_frame(
     for (const auto value : {0u, 2u, 0u}) {
         writer.ue(value);
     }
-    writer.bits(0, 4);
-    writer.ue(idr_pic_id);
-    writer.bits(0, 2);
+    const bool non_idr_reference = idr_pic_id == 2;
+    if (non_idr_reference) {
+        writer.bits(1, 4);
+        writer.bits(0, 1);
+    } else {
+        writer.bits(0, 4);
+        writer.ue(idr_pic_id);
+        writer.bits(0, 2);
+    }
     writer.ue(0);
     writer.ue(1);
     for (int macroblock = 0; macroblock < 16; ++macroblock) {
@@ -117,7 +123,7 @@ std::vector<std::uint8_t> H264Encoder::encode_pcm_frame(
         writer.data.insert(writer.data.end(), 128, 128);
         writer.bit_count += 384 * 8;
     }
-    const auto nal = writer.nal(0x65);
+    const auto nal = writer.nal(non_idr_reference ? 0x21 : 0x65);
     const auto size = static_cast<std::uint32_t>(nal.size());
     std::vector<std::uint8_t> sample;
     for (int shift = 24; shift >= 0; shift -= 8) {

@@ -30,6 +30,23 @@ int main() {
         [](std::uint8_t value) { return value == 128; }));
     assert(feature_frame.chroma_u == std::vector<std::uint8_t>(1024, 128));
     assert(feature_frame.chroma_v == std::vector<std::uint8_t>(1024, 128));
+    const auto non_idr_sample = encoder.encode_generated_frame(2);
+    assert(pygorvid::parse_nal_header(std::vector<std::uint8_t>(
+        non_idr_sample.begin() + 4, non_idr_sample.end())).unit_type == 1);
+    const auto non_idr_frame = pygorvid::decode_h264_reference_frame(
+        {std::vector<std::uint8_t>(
+             non_idr_sample.begin() + 4, non_idr_sample.end())},
+        sps, pps);
+    assert(non_idr_frame.luma == std::vector<std::uint8_t>(4096, 128));
+    assert(non_idr_frame.chroma_u ==
+           std::vector<std::uint8_t>(1024, 128));
+    assert(non_idr_frame.chroma_v ==
+           std::vector<std::uint8_t>(1024, 128));
+    const auto non_idr_header = pygorvid::parse_idr_i_slice_header(
+        std::vector<std::uint8_t>(
+            non_idr_sample.begin() + 4, non_idr_sample.end()),
+        sps, pps);
+    assert(non_idr_header.frame_num == 1);
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload.size() < 400000);

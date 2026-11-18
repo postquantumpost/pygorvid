@@ -451,8 +451,8 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
                                         const SpsInfo& sps,
                                         const PpsInfo& pps) {
     const auto header = parse_nal_header(nal);
-    if (header.unit_type != 5) {
-        invalid("NAL unit is not an IDR slice");
+    if (header.unit_type != 1 && header.unit_type != 5) {
+        invalid("NAL unit is not an I slice");
     }
     if (pps.sequence_parameter_set_id != sps.sps_id) {
         invalid("PPS references SPS " + std::to_string(pps.sequence_parameter_set_id) +
@@ -484,9 +484,12 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
     } catch (const std::exception& error) {
         throw context("slice", "frame_num", error);
     }
-    result.idr_pic_id = read_ue(reader, "slice", "idr_pic_id");
-    if (result.idr_pic_id > 65535) {
-        invalid("idr_pic_id " + std::to_string(result.idr_pic_id) + " exceeds 65535");
+    if (header.unit_type == 5) {
+        result.idr_pic_id = read_ue(reader, "slice", "idr_pic_id");
+        if (result.idr_pic_id > 65535) {
+            invalid("idr_pic_id " + std::to_string(result.idr_pic_id) +
+                    " exceeds 65535");
+        }
     }
     if (sps.pic_order_cnt_type == 0) {
         if (!sps.log2_max_pic_order_cnt_lsb_minus4) {
@@ -519,11 +522,15 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
             invalid("redundant_pic_cnt exceeds 127");
         }
     }
-    if (header.reference_idc != 0) {
+    if (header.unit_type == 5 && header.reference_idc != 0) {
         result.no_output_of_prior_pics =
             read_flag(reader, "slice", "no_output_of_prior_pics_flag");
         result.long_term_reference =
             read_flag(reader, "slice", "long_term_reference_flag");
+    } else if (header.reference_idc != 0 &&
+               read_flag(reader, "slice",
+                         "adaptive_ref_pic_marking_mode_flag")) {
+        invalid("adaptive reference marking is unsupported for C++ I slices");
     }
     result.slice_qp_delta = read_se(reader, "slice", "slice_qp_delta");
     const auto slice_qpy = 26 + pps.pic_init_qp_minus26 + result.slice_qp_delta;

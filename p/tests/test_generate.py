@@ -23,9 +23,11 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
         for index in (0, 1, 2, 59):
             sample = reader.sample_at(index)
             assert (sample.dts_ticks, sample.pts_ticks, sample.duration_ticks) == (index, index, 1)
-            assert sample.is_sync
+            assert sample.is_sync == (index != 2)
             if index == 1:
                 assert b"\x00\x00\x03\x01" in sample.data
+            if index == 2:
+                assert sample.data[4] == 0x21
             frame = decoder.decode_frame(index)
             assert (frame.width, frame.height) == (64, 64)
             expected_luma = bytearray([128] * 4096)

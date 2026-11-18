@@ -2598,9 +2598,10 @@ Yuv420Frame decode_idr_i_frame_impl(
     std::size_t slice_id = 0;
     for (const auto& nal : slice_nals) {
         const auto header = parse_nal_header(nal);
-        if (header.unit_type != 5 || header.reference_idc == 0) {
+        if ((header.unit_type != 1 && header.unit_type != 5) ||
+            header.reference_idc == 0) {
             throw std::runtime_error(
-                "I_PCM frame input must contain reference IDR slice NAL units");
+                "I_PCM frame input must contain reference I slice NAL units");
         }
         const auto slice_header = parse_idr_i_slice_header(nal, sps, pps);
         if (!have_picture_header) {
@@ -5932,6 +5933,13 @@ Yuv420Frame decode_h264_reference_frame(
         return decode_idr_i_frame(slice_nals, sps, pps);
     }
     if (unit_type == 1) {
+        const std::vector<std::uint8_t> ebsp(slice_nals.front().begin() + 1,
+                                             slice_nals.front().end());
+        BitReader slice_type_reader(ebsp_to_rbsp(ebsp));
+        (void)slice_type_reader.read_ue();
+        if (slice_type_reader.read_ue() % 5 == 2) {
+            return decode_idr_i_frame(slice_nals, sps, pps);
+        }
         if (reference_frames_l0.empty() ||
             reference_frames_l0.front() == nullptr) {
             throw std::invalid_argument(
@@ -5948,7 +5956,7 @@ Yuv420Frame decode_h264_reference_frame(
                                          reference_frames_l1);
     }
     throw std::runtime_error(
-        "H.264 frame decoding supports IDR I and restricted P/B pictures only");
+        "H.264 frame decoding supports I and restricted P/B pictures only");
 }
 
 Yuv420Frame decode_h264_reference_frame(

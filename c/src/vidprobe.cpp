@@ -78,6 +78,16 @@ std::uint32_t slice_pps_id(const std::vector<std::uint8_t>& nal) {
     return reader.read_ue();
 }
 
+std::uint32_t slice_type(const std::vector<std::uint8_t>& nal) {
+    if (nal.size() < 2) {
+        throw std::runtime_error("H.264 slice NAL is truncated");
+    }
+    const std::vector<std::uint8_t> ebsp(nal.begin() + 1, nal.end());
+    pygorvid::BitReader reader(pygorvid::ebsp_to_rbsp(ebsp));
+    (void)reader.read_ue();
+    return reader.read_ue();
+}
+
 void save_image(const std::string& path, const pygorvid::Yuv420Frame& frame) {
     auto extension = std::filesystem::path(path).extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(),
@@ -252,8 +262,11 @@ std::size_t decode_video(
             });
         const auto& selected_sps_info = *selected_sps;
         const auto& selected_pps_info = *selected_pps;
+        const bool is_i_slice = slice_type(slices.front()) % 5 == 2;
+        const bool is_idr_slice =
+            pygorvid::parse_nal_header(slices.front()).unit_type == 5;
         const auto slice_header =
-            pygorvid::parse_nal_header(slices.front()).unit_type == 5
+            is_i_slice
             ? std::optional<pygorvid::PSliceHeader>{}
             : std::optional<pygorvid::PSliceHeader>{
                   pygorvid::parse_p_slice_header(
@@ -269,7 +282,7 @@ std::size_t decode_video(
             slice_header
                 ? slice_header->frame_num
                 : idr_header->frame_num;
-        if (idr_header) {
+        if (is_idr_slice) {
             reference_frames.clear();
             reference_frame_nums.clear();
             reference_long_term_frame_idxs.clear();

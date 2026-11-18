@@ -101,9 +101,15 @@ func (e H264Encoder) encodePCMFrame(idrPicID uint16, emulationPreventionTest boo
 	for _, value := range []uint32{0, 2, 0} {
 		w.ue(value)
 	}
-	w.bits(0, 4)
-	w.ue(uint32(idrPicID))
-	w.bits(0, 2)
+	nonIDRReference := idrPicID == 2
+	if nonIDRReference {
+		w.bits(1, 4)
+		w.bits(0, 1)
+	} else {
+		w.bits(0, 4)
+		w.ue(uint32(idrPicID))
+		w.bits(0, 2)
+	}
 	w.ue(0)
 	w.ue(1)
 	for mb := 0; mb < 16; mb++ {
@@ -124,7 +130,11 @@ func (e H264Encoder) encodePCMFrame(idrPicID uint16, emulationPreventionTest boo
 		}
 		w.bitCount += 384 * 8
 	}
-	nal := w.nal(0x65)
+	header := byte(0x65)
+	if nonIDRReference {
+		header = 0x21
+	}
+	nal := w.nal(header)
 	result := make([]byte, 4, 4+len(nal))
 	binary.BigEndian.PutUint32(result, uint32(len(nal)))
 	return append(result, nal...)

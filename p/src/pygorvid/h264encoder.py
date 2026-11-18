@@ -76,9 +76,13 @@ class H264Encoder:
         writer = _BitWriter()
         for value in (0, 2, 0):
             writer.ue(value)
-        writer.bits(0, 4)
-        writer.ue(idr_pic_id)
-        writer.bits(0, 2)
+        non_idr_reference = idr_pic_id == 2
+        writer.bits(1 if non_idr_reference else 0, 4)
+        if non_idr_reference:
+            writer.bits(0, 1)
+        else:
+            writer.ue(idr_pic_id)
+            writer.bits(0, 2)
         writer.ue(0)
         writer.ue(1)
         for macroblock in range(16):
@@ -91,5 +95,5 @@ class H264Encoder:
                 writer.data.extend(bytes([128]) * 256)
             writer.data.extend(bytes([128]) * 128)
             writer.bit_count += 384 * 8
-        nal = writer.nal(0x65)
+        nal = writer.nal(0x21 if non_idr_reference else 0x65)
         return len(nal).to_bytes(4, "big") + nal

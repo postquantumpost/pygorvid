@@ -3,7 +3,7 @@ use std::io;
 
 const VIDEO_FRAME_RATE: u32 = 60;
 const MIN_VIDEO_FRAME_COUNT: u32 = VIDEO_FRAME_RATE;
-const GENERATED_FEATURE_FRAME_COUNT: u32 = 2;
+const GENERATED_FEATURE_FRAME_COUNT: u32 = 3;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
 #[derive(Clone, Debug, Default)]
@@ -430,6 +430,7 @@ fn track(
     duration_ms: u32,
     offset: u32,
     video: bool,
+    sync_samples: &[u32],
 ) -> Vec<u8> {
     let dimension = if video { 64 << 16 } else { 0 };
     let volume = if video { 0 } else { 0x100 };
@@ -472,16 +473,26 @@ fn track(
             &[&u32s(&[1]), &full_box(b"url ", 1, &[])],
         )],
     );
-    let stbl = mp4_box(
-        b"stbl",
-        &[
-            &full_box(b"stsd", 0, &[&u32s(&[1]), entry]),
-            &full_box(b"stts", 0, &[&u32s(&[1, count, 1])]),
-            &full_box(b"stsc", 0, &[&u32s(&[1, 1, count, 1])]),
-            sizes,
-            &full_box(b"stco", 0, &[&u32s(&[1, offset])]),
-        ],
-    );
+    let sync_box = if sync_samples.is_empty() {
+        Vec::new()
+    } else {
+        let mut entries = vec![sync_samples.len() as u32];
+        entries.extend_from_slice(sync_samples);
+        full_box(
+            b"stss",
+            0,
+            &[&u32s(&entries)],
+        )
+    };
+    let stsd = full_box(b"stsd", 0, &[&u32s(&[1]), entry]);
+    let stts = full_box(b"stts", 0, &[&u32s(&[1, count, 1])]);
+    let stsc = full_box(b"stsc", 0, &[&u32s(&[1, 1, count, 1])]);
+    let stco = full_box(b"stco", 0, &[&u32s(&[1, offset])]);
+    let stbl_parts: Vec<&[u8]> = [&stsd, &stts, &stsc, sizes, sync_box.as_slice(), &stco]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect();
+    let stbl = mp4_box(b"stbl", &stbl_parts);
     mp4_box(
         b"trak",
         &[
@@ -569,6 +580,9 @@ impl Mp4Writer {
         );
         let ftyp = mp4_box(b"ftyp", &[b"isom", &u32s(&[0x200]), b"isomiso2avc1qt  "]);
         let offset = ftyp.len() as u32 + 8;
+        let sync_samples: Vec<u32> = (1..=frame_count)
+            .filter(|sample| *sample != 3)
+            .collect();
         let video_track = track(
             1,
             &visual,
@@ -578,6 +592,7 @@ impl Mp4Writer {
             video_duration_ms,
             offset,
             true,
+            &sync_samples,
         );
         let audio_track = track(
             2,
@@ -588,6 +603,7 @@ impl Mp4Writer {
             audio_duration_ms,
             offset + video.len() as u32,
             false,
+            &[],
         );
         let mvhd = full_box(
             b"mvhd",

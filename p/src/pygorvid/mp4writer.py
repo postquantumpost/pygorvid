@@ -1,12 +1,12 @@
 import struct
 from dataclasses import dataclass, fields
-from typing import Optional
+from typing import Optional, Sequence
 
 from .h264encoder import H264Encoder
 
 _VIDEO_FRAME_RATE = 60
 _MIN_VIDEO_FRAME_COUNT = _VIDEO_FRAME_RATE
-_GENERATED_FEATURE_FRAME_COUNT = 2
+_GENERATED_FEATURE_FRAME_COUNT = 3
 _AUDIO_SAMPLE_RATE = 48000
 
 
@@ -159,7 +159,7 @@ def _matrix() -> bytes:
 
 def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
            sample_count: int, timescale: int, duration_ms: int,
-           chunk_offset: int, video: bool) -> bytes:
+           chunk_offset: int, video: bool, sync_samples: Sequence[int] = ()) -> bytes:
     tkhd = _full_box(
         b"tkhd", _u32(0, 0, track_id, 0, duration_ms), bytes(8),
         _u16(0, 0, 0 if video else 0x100, 0), _matrix(),
@@ -179,6 +179,8 @@ def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
         _full_box(b"stts", _u32(1, sample_count, 1)),
         _full_box(b"stsc", _u32(1, 1, sample_count, 1)),
         sample_sizes,
+        (_full_box(b"stss", _u32(len(sync_samples)), _u32(*sync_samples))
+         if sync_samples else b""),
         _full_box(b"stco", _u32(1, chunk_offset)),
     )
     return _box(b"trak", tkhd, _box(b"mdia", mdhd, hdlr, _box(b"minf", media_header, dinf, stbl)))
@@ -217,7 +219,9 @@ class Mp4Writer:
         video_offset = len(ftyp) + 8
         sizes = _full_box(b"stsz", _u32(0, frame_count), _u32(*(len(sample) for sample in samples)))
         video_track = _track(
-            1, visual, sizes, frame_count, _VIDEO_FRAME_RATE, video_duration_ms, video_offset, True,
+            1, visual, sizes, frame_count, _VIDEO_FRAME_RATE, video_duration_ms,
+            video_offset, True,
+            tuple(index + 1 for index in range(frame_count) if index != 2),
         )
         audio_sizes = _full_box(b"stsz", _u32(4, audio_sample_count))
         audio_track = _track(
