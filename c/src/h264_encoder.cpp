@@ -1,7 +1,9 @@
 #include "pygorvid/h264_encoder.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <stdexcept>
 
 namespace pygorvid {
 namespace {
@@ -167,6 +169,90 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
             }
             writer.ue(0);
             writer.ue(3);
+        }
+        const auto nal = writer.nal(0x21);
+        const auto size = static_cast<std::uint32_t>(nal.size());
+        std::vector<std::uint8_t> sample;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            sample.push_back(static_cast<std::uint8_t>(size >> shift));
+        }
+        sample.insert(sample.end(), nal.begin(), nal.end());
+        return sample;
+    }
+    if (frame_index == 6) {
+        BitWriter writer;
+        for (const auto value : {0u, 2u, 0u}) {
+            writer.ue(value);
+        }
+        writer.bits(5, 4);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+
+        writer.ue(25);
+        writer.align();
+        for (int row = 0; row < 16; ++row) {
+            for (int column = 0; column < 16; ++column) {
+                writer.data.push_back(
+                    static_cast<std::uint8_t>(32 + 3 * column + 5 * row));
+            }
+        }
+        for (const int base : {80, 176}) {
+            for (int row = 0; row < 8; ++row) {
+                for (int column = 0; column < 8; ++column) {
+                    writer.data.push_back(
+                        static_cast<std::uint8_t>(base + column + 2 * row));
+                }
+            }
+        }
+        writer.bit_count += 384 * 8;
+
+        const std::array<int, 16> modes{
+            2, 2, 2, 4, 8, 1, 5, 6, 7, 0, 3, 4, 5, 7, 6, 8};
+        const std::array<int, 16> scan{
+            0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15};
+        const auto scan_index = [&scan](int raster) {
+            const auto found = std::find(scan.begin(), scan.end(), raster);
+            if (found == scan.end()) {
+                throw std::logic_error("invalid Intra_4x4 raster index");
+            }
+            return static_cast<std::size_t>(found - scan.begin());
+        };
+        std::array<std::array<int, 16>, 16> macroblock_modes{};
+        macroblock_modes[0].fill(2);
+        for (int macroblock = 1; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            const int mb_x = macroblock % 4;
+            const int mb_y = macroblock / 4;
+            for (std::size_t block = 0; block < modes.size(); ++block) {
+                const int raster = scan[block];
+                const int column = raster % 4;
+                const int row = raster / 4;
+                int left_mode = -1;
+                int top_mode = -1;
+                if (column) {
+                    left_mode = modes[scan_index(raster - 1)];
+                } else if (mb_x) {
+                    left_mode = macroblock_modes[macroblock - 1][scan_index(row * 4 + 3)];
+                }
+                if (row) {
+                    top_mode = modes[scan_index(raster - 4)];
+                } else if (mb_y) {
+                    top_mode = macroblock_modes[macroblock - 4][scan_index(12 + column)];
+                }
+                const int predicted = left_mode >= 0 && top_mode >= 0
+                    ? std::min(left_mode, top_mode) : 2;
+                const int desired = modes[block];
+                if (desired == predicted) {
+                    writer.bits(1, 1);
+                } else {
+                    writer.bits(0, 1);
+                    writer.bits(desired - (desired >= predicted ? 1 : 0), 3);
+                }
+            }
+            writer.ue(0);
+            writer.ue(3);
+            macroblock_modes[macroblock] = modes;
         }
         const auto nal = writer.nal(0x21);
         const auto size = static_cast<std::uint32_t>(nal.size());

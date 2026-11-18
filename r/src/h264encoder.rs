@@ -99,6 +99,9 @@ impl H264Encoder {
         if frame_index == 5 {
             return self.encode_intra4x4_dc_frame();
         }
+        if frame_index == 6 {
+            return self.encode_intra4x4_directional_frame();
+        }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
 
@@ -171,6 +174,79 @@ impl H264Encoder {
             }
             writer.ue(0);
             writer.ue(3);
+        }
+        let nal = writer.nal(0x21);
+        let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
+        sample.extend(nal);
+        sample
+    }
+
+    fn encode_intra4x4_directional_frame(&self) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        for value in [0, 2, 0] {
+            writer.ue(value);
+        }
+        writer.bits(5, 4);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+
+        writer.ue(25);
+        writer.align();
+        for row in 0..16 {
+            for column in 0..16 {
+                writer.data.push((32 + 3 * column + 5 * row) as u8);
+            }
+        }
+        for base in [80, 176] {
+            for row in 0..8 {
+                for column in 0..8 {
+                    writer.data.push((base + column + 2 * row) as u8);
+                }
+            }
+        }
+        writer.bit_count += 384 * 8;
+
+        let modes = [2, 2, 2, 4, 8, 1, 5, 6, 7, 0, 3, 4, 5, 7, 6, 8];
+        let scan = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+        let scan_index = |raster: usize| scan.iter().position(|value| *value == raster).unwrap();
+        let mut macroblock_modes = vec![[2; 16]];
+        for macroblock in 1..16 {
+            writer.ue(0);
+            let mb_x = macroblock % 4;
+            let mb_y = macroblock / 4;
+            for (block, desired) in modes.into_iter().enumerate() {
+                let raster = scan[block];
+                let column = raster % 4;
+                let row = raster / 4;
+                let left_mode = if column != 0 {
+                    Some(modes[scan_index(raster - 1)])
+                } else if mb_x != 0 {
+                    Some(macroblock_modes[macroblock - 1][scan_index(row * 4 + 3)])
+                } else {
+                    None
+                };
+                let top_mode = if row != 0 {
+                    Some(modes[scan_index(raster - 4)])
+                } else if mb_y != 0 {
+                    Some(macroblock_modes[macroblock - 4][scan_index(12 + column)])
+                } else {
+                    None
+                };
+                let predicted = match (left_mode, top_mode) {
+                    (Some(left), Some(top)) => left.min(top),
+                    _ => 2,
+                };
+                if desired == predicted {
+                    writer.bits(1, 1);
+                } else {
+                    writer.bits(0, 1);
+                    writer.bits((desired - usize::from(desired >= predicted)) as u32, 3);
+                }
+            }
+            writer.ue(0);
+            writer.ue(3);
+            macroblock_modes.push(modes);
         }
         let nal = writer.nal(0x21);
         let mut sample = (nal.len() as u32).to_be_bytes().to_vec();

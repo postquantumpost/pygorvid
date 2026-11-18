@@ -75,6 +75,22 @@ int main() {
     const auto intra4_frame =
         pygorvid::decode_h264_reference_frame({intra4_nal}, sps, pps);
     assert(intra4_frame.luma == std::vector<std::uint8_t>(4096, 128));
+    const auto directional_sample = encoder.encode_generated_frame(6);
+    const auto directional_nal = std::vector<std::uint8_t>(
+        directional_sample.begin() + 4, directional_sample.end());
+    const auto directional_header =
+        pygorvid::parse_idr_i_slice_header(directional_nal, sps, pps);
+    assert(directional_header.frame_num == 5);
+    assert(pygorvid::parse_nal_header(directional_nal).unit_type == 1);
+    const auto directional_frame =
+        pygorvid::decode_h264_reference_frame({directional_nal}, sps, pps);
+    for (int column = 0; column < 16; ++column) {
+        assert(directional_frame.luma[column] == 32 + 3 * column);
+    }
+    assert(std::minmax_element(
+        directional_frame.luma.begin(), directional_frame.luma.end()).first !=
+        std::minmax_element(
+            directional_frame.luma.begin(), directional_frame.luma.end()).second);
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));

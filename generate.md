@@ -91,6 +91,10 @@ vertical, horizontal, DC, and plane luma modes plus all four 4:2:0 chroma
 modes. Compact luma and chroma DC residuals seed observable reference edges.
 Frame 6 is a reference non-IDR Intra_4x4 DC picture: every macroblock signals
 all sixteen `prev_intra4x4_pred_mode_flag` bits and zero coded-block pattern.
+Frame 7 is a reference non-IDR Intra_4x4 directional picture. Its first
+macroblock uses I_PCM to seed non-flat references; the remaining macroblocks
+exercise all directional modes, top-left/top-right reference paths, and both
+predicted and explicitly signaled neighbor-derived modes.
 Gray IDR padding follows through frame 60; the padded duration is at least one
 second. All current pictures are Constrained Baseline I_PCM, I_16x16, or
 Intra_4x4. The plan changes the

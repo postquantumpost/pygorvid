@@ -11,7 +11,7 @@ import (
 const (
 	generatedVideoFrameRate     = uint32(60)
 	minGeneratedVideoFrameCount = uint32(generatedVideoFrameRate)
-	generatedFeatureFrameCount  = uint32(6)
+	generatedFeatureFrameCount  = uint32(7)
 	generatedAudioSampleRate    = uint32(48000)
 )
 
@@ -349,7 +349,7 @@ func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata
 	offset := uint32(len(ftyp) + 8)
 	syncSamples := make([]uint32, 0, frameCount-1)
 	for sample := uint32(1); sample <= frameCount; sample++ {
-		if sample != 3 && sample != 4 && sample != 5 && sample != 6 {
+		if sample != 3 && sample != 4 && sample != 5 && sample != 6 && sample != 7 {
 			syncSamples = append(syncSamples, sample)
 		}
 	}

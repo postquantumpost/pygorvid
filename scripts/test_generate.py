@@ -295,15 +295,20 @@ def main() -> None:
             assert hashlib.sha256(actual_frame5).hexdigest() == (
                 "b2640d261e877b8e5a9ce9ac07a0f3088401403cca1779bde50151ccfc942cd8"
             )
-            decoded_without_frame5 = (
-                decoded[:frame5_start] +
-                decoded[frame5_start + frame_size:]
+            frame7_start = 6 * frame_size
+            actual_frame7 = decoded[frame7_start:frame7_start + frame_size]
+            assert hashlib.sha256(actual_frame7).hexdigest() == (
+                "f87a64a7a9aab29c5325796336599aea66eb1e6600d18c1c60a0c669bbf3e7b3"
             )
-            expected_without_frame5 = bytes(
-                expected_video[:frame5_start] +
-                expected_video[frame5_start + frame_size:]
+            decoded_gray_frames = b"".join(
+                decoded[index * frame_size:(index + 1) * frame_size]
+                for index in range(60) if index not in (4, 6)
             )
-            assert decoded_without_frame5 == expected_without_frame5
+            expected_gray_frames = b"".join(
+                expected_video[index * frame_size:(index + 1) * frame_size]
+                for index in range(60) if index not in (4, 6)
+            )
+            assert decoded_gray_frames == expected_gray_frames
             assert b"\x00\x00\x03\x01" in payload
             silence = run([
                 ffmpeg, "-v", "error", "-xerror", "-i", str(output), "-map", "0:a:0",

@@ -74,7 +74,62 @@ class H264Encoder:
             return self._encode_intra16x16_prediction_modes_frame()
         if frame_index == 5:
             return self._encode_intra4x4_dc_frame()
+        if frame_index == 6:
+            return self._encode_intra4x4_directional_frame()
         return self._encode_pcm_frame(frame_index, frame_index == 1)
+
+    def _encode_intra4x4_directional_frame(self) -> bytes:
+        writer = _BitWriter()
+        for value in (0, 2, 0):
+            writer.ue(value)
+        writer.bits(5, 4)
+        writer.bits(0, 1)
+        writer.ue(0)
+        writer.ue(1)
+
+        writer.ue(25)
+        writer.align()
+        for row in range(16):
+            writer.data.extend(32 + 3 * column + 5 * row for column in range(16))
+        for base in (80, 176):
+            writer.data.extend(base + column + 2 * row for row in range(8) for column in range(8))
+        writer.bit_count += 384 * 8
+
+        modes = (2, 2, 2, 4, 8, 1, 5, 6, 7, 0, 3, 4, 5, 7, 6, 8)
+        scan = (0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15)
+        macroblock_modes = [[2] * 16]
+        for macroblock in range(1, 16):
+            writer.ue(0)
+            mb_x, mb_y = macroblock % 4, macroblock // 4
+            for block, desired in enumerate(modes):
+                raster = scan[block]
+                column, row = raster % 4, raster // 4
+                left_mode = (
+                    modes[scan.index(raster - 1)]
+                    if column
+                    else macroblock_modes[macroblock - 1][scan.index(row * 4 + 3)]
+                    if mb_x
+                    else None
+                )
+                top_mode = (
+                    modes[scan.index(raster - 4)]
+                    if row
+                    else macroblock_modes[macroblock - 4][scan.index(12 + column)]
+                    if mb_y
+                    else None
+                )
+                predicted = 2 if left_mode is None or top_mode is None else min(left_mode, top_mode)
+                if desired == predicted:
+                    writer.bits(1, 1)
+                else:
+                    writer.bits(0, 1)
+                    writer.bits(desired - (desired >= predicted), 3)
+            writer.ue(0)
+            writer.ue(3)
+            macroblock_modes.append(list(modes))
+
+        nal = writer.nal(0x21)
+        return len(nal).to_bytes(4, "big") + nal
 
     def _encode_intra4x4_dc_frame(self) -> bytes:
         writer = _BitWriter()

@@ -102,6 +102,9 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 5 {
 		return e.encodeIntra4x4DCFrame()
 	}
+	if frameIndex == 6 {
+		return e.encodeIntra4x4DirectionalFrame()
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
 }
 
@@ -142,6 +145,84 @@ func (e H264Encoder) encodeIntra4x4DCFrame() []byte {
 		w.ue(3)
 	}
 	return prependH264NALSize(w.nal(0x21))
+}
+
+func (e H264Encoder) encodeIntra4x4DirectionalFrame() []byte {
+	w := h264BitWriter{}
+	for _, value := range []uint32{0, 2, 0} {
+		w.ue(value)
+	}
+	w.bits(5, 4)
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+
+	w.ue(25)
+	w.align()
+	for row := 0; row < 16; row++ {
+		for column := 0; column < 16; column++ {
+			w.data = append(w.data, byte(32+3*column+5*row))
+		}
+	}
+	for _, base := range []int{80, 176} {
+		for row := 0; row < 8; row++ {
+			for column := 0; column < 8; column++ {
+				w.data = append(w.data, byte(base+column+2*row))
+			}
+		}
+	}
+	w.bitCount += 384 * 8
+
+	modes := [...]int{2, 2, 2, 4, 8, 1, 5, 6, 7, 0, 3, 4, 5, 7, 6, 8}
+	scan := [...]int{0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15}
+	macroblockModes := [][16]int{{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}}
+	for mb := 1; mb < 16; mb++ {
+		w.ue(0)
+		mbX, mbY := mb%4, mb/4
+		for block, desired := range modes {
+			raster := scan[block]
+			column, row := raster%4, raster/4
+			leftMode := -1
+			topMode := -1
+			if column != 0 {
+				leftMode = modes[indexIntra4x4Scan(scan, raster-1)]
+			} else if mbX != 0 {
+				leftMode = macroblockModes[mb-1][indexIntra4x4Scan(scan, row*4+3)]
+			}
+			if row != 0 {
+				topMode = modes[indexIntra4x4Scan(scan, raster-4)]
+			} else if mbY != 0 {
+				topMode = macroblockModes[mb-4][indexIntra4x4Scan(scan, 12+column)]
+			}
+			predicted := 2
+			if leftMode >= 0 && topMode >= 0 {
+				predicted = min(leftMode, topMode)
+			}
+			if desired == predicted {
+				w.bits(1, 1)
+			} else {
+				w.bits(0, 1)
+				remaining := desired
+				if desired >= predicted {
+					remaining--
+				}
+				w.bits(uint32(remaining), 3)
+			}
+		}
+		w.ue(0)
+		w.ue(3)
+		macroblockModes = append(macroblockModes, modes)
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func indexIntra4x4Scan(scan [16]int, raster int) int {
+	for index, value := range scan {
+		if value == raster {
+			return index
+		}
+	}
+	panic("invalid Intra4x4 raster index")
 }
 
 func (e H264Encoder) encodeIntra16x16PredictionModesFrame() []byte {
