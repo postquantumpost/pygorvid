@@ -36,6 +36,120 @@ class _BitWriter:
         return bytes(result)
 
 
+class _CABACWriter:
+    def __init__(self, contexts) -> None:
+        self.contexts = contexts
+        self.low = 0
+        self.range = 510
+        self.bits_to_follow = 0
+        self.bits: list[int] = []
+        self.first_bit = True
+
+    def renormalize(self) -> None:
+        while self.range < 256:
+            if self.low < 256:
+                self.put(0)
+            elif self.low >= 512:
+                self.put(1)
+                self.low -= 512
+            else:
+                self.bits_to_follow += 1
+                self.low -= 256
+            self.low <<= 1
+            self.range <<= 1
+
+    def put(self, bit: int) -> None:
+        if self.first_bit:
+            self.first_bit = False
+        else:
+            self.bits.append(bit)
+        while self.bits_to_follow:
+            self.bits.append(bit ^ 1)
+            self.bits_to_follow -= 1
+
+    def decision(self, value: int, context_index: int) -> None:
+        from .h264_cabac import _RANGE_LPS
+
+        model = self.contexts[context_index]
+        range_lps = _RANGE_LPS[(self.range >> 6) & 3][model._state_index]
+        if bool(value) == model._value_mps:
+            self.range -= range_lps
+            model.update(bool(value))
+            self.renormalize()
+            return
+        self.low += self.range - range_lps
+        self.range = range_lps
+        model.update(bool(value))
+        self.renormalize()
+
+    def luma_cbp(self, left: int, top: int, desired: int) -> None:
+        context_index = int(not left & 0x02) + 2 * int(not top & 0x04)
+        self.decision(desired & 1, 73 + context_index)
+        current = desired & 1
+        context_index = int(not current & 0x01) + 2 * int(not top & 0x08)
+        self.decision((desired >> 1) & 1, 73 + context_index)
+        current |= desired & 2
+        context_index = int(not left & 0x08) + 2 * int(not (current & 1))
+        self.decision((desired >> 2) & 1, 73 + context_index)
+        current |= desired & 4
+        context_index = int(not (current & 4)) + 2 * int(not (current & 2))
+        self.decision((desired >> 3) & 1, 73 + context_index)
+
+    def zero_luma_cbp(self, left: int, top: int) -> None:
+        self.luma_cbp(left, top, 0)
+
+    def bypass(self, value: int) -> None:
+        self.low <<= 1
+        if value:
+            self.low += self.range
+        if self.low >= 1024:
+            self.low -= 1024
+            self.put(1)
+        elif self.low < 512:
+            self.put(0)
+        else:
+            self.low -= 512
+            self.bits_to_follow += 1
+
+    def terminate(self, value: int) -> None:
+        self.range -= 2
+        if not value:
+            self.renormalize()
+            return
+        self.low += self.range
+        self.range = 2
+        self.renormalize()
+        self.put((self.low >> 9) & 1)
+        self.bits.extend([(self.low >> 8) & 1, 1])
+
+    def level(self, magnitude: int, first_context: int, greater_context: int) -> None:
+        if magnitude == 1:
+            self.decision(0, first_context)
+        else:
+            self.decision(1, first_context)
+            for _ in range(min(magnitude - 2, 13)):
+                self.decision(1, greater_context + 5)
+            if magnitude <= 14:
+                self.decision(0, greater_context + 5)
+        self.bypass(0)
+
+    def end(self) -> None:
+        self.range -= 2
+        self.low += self.range
+        self.range = 2
+        self.renormalize()
+        self.put((self.low >> 9) & 1)
+        self.bits.extend([(self.low >> 8) & 1, 1])
+
+    def data(self, padding: int = 4) -> bytes:
+        result = bytearray((len(self.bits) + 7) // 8)
+        for index, bit in enumerate(self.bits):
+            if bit:
+                result[index // 8] |= 0x80 >> (index % 8)
+        result.extend(bytes(padding))
+        return bytes(result)
+
+
 class H264Encoder:
     """Initial subset: 64x64, 8-bit YUV420 grey, Baseline I_PCM IDR pictures."""
 
@@ -58,14 +172,20 @@ class H264Encoder:
         return writer.nal(0x67)
 
     def picture_parameter_set(self) -> bytes:
+        return self._picture_parameter_set(0, False, 0)
+
+    def _picture_parameter_set(
+        self, pps_id: int, cabac: bool = False, weighted_bipred_idc: int = 0
+    ) -> bytes:
         writer = _BitWriter()
+        writer.ue(pps_id)
         writer.ue(0)
-        writer.ue(0)
-        writer.bits(0, 2)
+        writer.bits(int(cabac), 1)
+        writer.bits(0, 1)
         for _ in range(3):
             writer.ue(0)
         writer.bits(1, 1)
-        writer.bits(0, 2)
+        writer.bits(weighted_bipred_idc, 2)
         for _ in range(3):
             writer.ue(0)  # Signed Exp-Golomb zero has the same representation.
         writer.bits(0b100, 3)
@@ -97,7 +217,313 @@ class H264Encoder:
             return self._encode_p_frame(19, future_reference=True)
         if frame_index == 20:
             return self._encode_b_frame()
+        if frame_index in (21, 22, 23):
+            return self._encode_b_feature_frame(frame_index)
+        if frame_index == 24:
+            return self._encode_b_weighted_frame(explicit=True)
+        if frame_index == 25:
+            return self._encode_b_weighted_frame(explicit=False)
+        if frame_index == 26:
+            return self._encode_inter_residual_frame()
+        if frame_index == 27:
+            return self._encode_cabac_i_frame()
+        if frame_index == 28:
+            return self._encode_cabac_p_frame()
+        if frame_index == 29:
+            return self._encode_cabac_b_frame()
+        if frame_index == 30:
+            return self._encode_cabac_residual_frame()
         return self._encode_pcm_frame(frame_index, frame_index == 1)
+
+    @staticmethod
+    def _b_macroblock(writer: _BitWriter, kind: int, spatial_direct: bool,
+                      sub_types: tuple[int, ...] = ()) -> None:
+        writer.ue(kind)
+        if kind == 22:
+            for sub_type in sub_types:
+                writer.ue(sub_type)
+            writer.ue(0)
+            return
+        if kind == 0:
+            writer.ue(0)
+            return
+        if 1 <= kind <= 3:
+            for list_index in range(2):
+                if kind == 1 and list_index == 1 or kind == 2 and list_index == 0:
+                    continue
+                writer.se(0)
+                writer.se(0)
+            writer.ue(0)
+            return
+        if 4 <= kind <= 21:
+            partition_count = 2
+            flags_by_kind = (
+                (1, 0), (1, 0), (0, 1), (0, 1), (1, 0),
+                (1, 0), (0, 1), (0, 1), (1, 1), (1, 1),
+                (0, 1), (0, 1), (1, 1), (1, 1), (0, 1),
+                (0, 1), (1, 1), (1, 1),
+            )
+            flags = flags_by_kind[kind - 4]
+            for _ in range(partition_count):
+                for active in flags:
+                    if active:
+                        writer.se(0)
+                        writer.se(0)
+            writer.ue(0)
+
+    def _begin_b_slice(self, writer: _BitWriter, frame_num: int, spatial_direct: bool,
+                       pps_id: int = 0, explicit_weights: bool = False) -> None:
+        writer.ue(0)
+        writer.ue(1)
+        writer.ue(pps_id)
+        writer.bits(frame_num, 4)
+        writer.bits(int(spatial_direct), 1)
+        writer.bits(0, 1)
+        writer.bits(0, 1)
+        writer.bits(0, 1)
+        if explicit_weights:
+            writer.ue(0)
+            writer.ue(0)
+            for _ in range(2):
+                writer.bits(1, 1)
+                writer.se(2)
+                writer.se(-8)
+                writer.bits(1, 1)
+                writer.se(2)
+                writer.se(4)
+                writer.se(2)
+                writer.se(-4)
+        writer.bits(0, 1)
+        writer.ue(0)
+        writer.ue(1)
+
+    def _encode_b_feature_frame(self, frame_index: int) -> bytes:
+        writer = _BitWriter()
+        spatial_direct = frame_index != 22
+        self._begin_b_slice(writer, (frame_index - 16) & 15, spatial_direct)
+        for macroblock in range(16):
+            writer.ue(0)
+            if frame_index == 23:
+                self._b_macroblock(writer, 1 + (macroblock % 11) % 3, spatial_direct)
+            elif frame_index == 21 and macroblock % 2:
+                self._b_macroblock(writer, 22, spatial_direct, (0, 0, 0, 0))
+            else:
+                self._b_macroblock(writer, 0, spatial_direct)
+        return self._sample(writer.nal(0x21))
+
+    def _encode_b_weighted_frame(self, explicit: bool) -> bytes:
+        pps_id = 1 if explicit else 2
+        writer = _BitWriter()
+        self._begin_b_slice(writer, 9 if explicit else 10, True, pps_id, explicit)
+        for macroblock in range(16):
+            writer.ue(0)
+            self._b_macroblock(writer, 3, True)
+        return self._sample(writer.nal(0x21))
+
+    def _encode_inter_residual_frame(self) -> bytes:
+        writer = _BitWriter()
+        writer.ue(0)
+        writer.ue(0)
+        writer.ue(0)
+        writer.bits(11, 4)
+        writer.bits(0, 1)
+        writer.bits(0, 1)
+        self._prediction_weight_table(writer, 1)
+        writer.bits(0, 1)
+        writer.ue(0)
+        writer.ue(1)
+        for macroblock in range(16):
+            writer.ue(0)
+            writer.ue(0)
+            writer.se(0)
+            writer.se(0)
+            if macroblock in (0, 15):
+                writer.ue(2)
+                writer.se(1)
+                for block in range(4):
+                    if block in (0, 3):
+                        writer.bits(0b01, 2)
+                        writer.bits(0, 1)
+                        writer.bits(1, 1)
+                    else:
+                        writer.bits(1, 1)
+            else:
+                writer.ue(0)
+        return self._sample(writer.nal(0x21))
+
+    @staticmethod
+    def _sample(nal: bytes) -> bytes:
+        return len(nal).to_bytes(4, "big") + nal
+
+    @staticmethod
+    def _cabac_nal(header: int, rbsp: bytes) -> bytes:
+        result = bytearray([header])
+        zeros = 0
+        for value in rbsp:
+            if zeros == 2 and value <= 3:
+                result.append(3)
+                zeros = 0
+            result.append(value)
+            zeros = zeros + 1 if value == 0 else 0
+        return bytes(result)
+
+    def _encode_cabac_i_frame(self) -> bytes:
+        from .h264_cabac import initialize_slice_contexts
+
+        pps = self._picture_parameter_set(3, True, 0)
+        header = _BitWriter()
+        header.ue(0)
+        header.ue(2)
+        header.ue(3)
+        header.bits(12, 4)
+        header.bits(0, 1)
+        header.ue(0)
+        header.ue(1)
+        while header.bit_count % 8:
+            header.bits(1, 1)
+        cabac = _CABACWriter(initialize_slice_contexts(2, 0, 26))
+        for macroblock in range(16):
+            cabac.decision(0, 3)
+            for _ in range(16):
+                cabac.decision(1, 68)
+            cabac.decision(0, 64)
+            cabac.zero_luma_cbp(
+                15 if macroblock % 4 == 0 else 0,
+                15 if macroblock < 4 else 0,
+            )
+            cabac.decision(0, 77)
+            if macroblock != 15:
+                cabac.terminate(False)
+        cabac.end()
+        nal = self._cabac_nal(0x21, header.data + cabac.data())
+        return self._sample(nal)
+
+    def _encode_cabac_p_frame(self) -> bytes:
+        from .h264_cabac import initialize_slice_contexts
+
+        pps = self._picture_parameter_set(3, True, 0)
+        header = _BitWriter()
+        header.ue(0)
+        header.ue(0)
+        header.ue(3)
+        header.bits(13, 4)
+        header.bits(0, 1)
+        header.bits(0, 1)
+        header.ue(0)
+        header.ue(0)
+        header.bits(0, 1)
+        header.bits(0, 1)
+        header.bits(0, 1)
+        header.ue(0)
+        header.ue(0)
+        header.ue(1)
+        while header.bit_count % 8:
+            header.bits(1, 1)
+        cabac = _CABACWriter(initialize_slice_contexts(0, 0, 26))
+        for macroblock in range(16):
+            skipped = macroblock % 3 == 1
+            left_skip = macroblock % 4 != 0 and (macroblock - 1) % 3 == 1
+            top_skip = macroblock >= 4 and (macroblock - 4) % 3 == 1
+            increment = int(macroblock % 4 != 0 and not left_skip)
+            increment += int(macroblock >= 4 and not top_skip)
+            cabac.decision(int(skipped), 11 + increment)
+            if skipped:
+                if macroblock != 15:
+                    cabac.terminate(False)
+                continue
+            cabac.decision(0, 14)
+            cabac.decision(0, 15)
+            cabac.decision(0, 16)
+            cabac.decision(0, 40)
+            cabac.decision(0, 47)
+            cabac.zero_luma_cbp(
+                15 if macroblock % 4 == 0 else 0,
+                15 if macroblock < 4 else 0,
+            )
+            cabac.decision(0, 77)
+            if macroblock != 15:
+                cabac.terminate(False)
+        cabac.end()
+        nal = self._cabac_nal(0x21, header.data + cabac.data())
+        return self._sample(nal)
+
+    def _encode_cabac_b_frame(self) -> bytes:
+        from .h264_cabac import initialize_slice_contexts
+
+        pps = self._picture_parameter_set(3, True, 0)
+        header = _BitWriter()
+        header.ue(0)
+        header.ue(1)
+        header.ue(3)
+        header.bits(14, 4)
+        header.bits(1, 1)
+        header.bits(0, 1)
+        header.bits(0, 1)
+        header.bits(0, 1)
+        header.bits(0, 1)
+        header.ue(0)
+        header.ue(0)
+        header.ue(1)
+        while header.bit_count % 8:
+            header.bits(1, 1)
+        cabac = _CABACWriter(initialize_slice_contexts(1, 0, 26))
+        for macroblock in range(16):
+            cabac.decision(
+                0, 24 + int(macroblock % 4 != 0) + int(macroblock >= 4)
+            )
+            cabac.decision(0, 27)
+            cabac.zero_luma_cbp(
+                15 if macroblock % 4 == 0 else 0,
+                15 if macroblock < 4 else 0,
+            )
+            cabac.decision(0, 77)
+            if macroblock != 15:
+                cabac.terminate(False)
+        cabac.end()
+        nal = self._cabac_nal(0x21, header.data + cabac.data())
+        return self._sample(nal)
+
+    def _encode_cabac_residual_frame(self) -> bytes:
+        from .h264_cabac import initialize_slice_contexts
+
+        pps = self._picture_parameter_set(3, True, 0)
+        header = _BitWriter()
+        header.ue(0)
+        header.ue(2)
+        header.ue(3)
+        header.bits(15, 4)
+        header.bits(0, 1)
+        header.ue(0)
+        header.ue(1)
+        while header.bit_count % 8:
+            header.bits(1, 1)
+        cabac = _CABACWriter(initialize_slice_contexts(2, 0, 26))
+        for macroblock in range(16):
+            cabac.decision(0, 3)
+            for _ in range(16):
+                cabac.decision(1, 68)
+            cabac.decision(0, 64)
+            cabac.luma_cbp(
+                15 if macroblock % 4 == 0 else 0,
+                15 if macroblock < 4 else 0,
+                1 if macroblock == 15 else 0,
+            )
+            cabac.decision(0, 77)
+            if macroblock == 15:
+                cabac.decision(0, 60)
+                cabac.decision(1, 93)
+                cabac.decision(1, 134)
+                cabac.decision(1, 195)
+                cabac.decision(0, 248)
+                cabac.bypass(0)
+                cabac.decision(0, 94)
+                cabac.decision(0, 95)
+                cabac.decision(0, 93)
+            if macroblock != 15:
+                cabac.terminate(False)
+        cabac.end()
+        nal = self._cabac_nal(0x21, header.data + cabac.data())
+        return self._sample(nal)
 
     @staticmethod
     def _prediction_weight_table(writer: _BitWriter, reference_count: int,

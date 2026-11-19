@@ -181,6 +181,38 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
         assert (b_picture.frame_num, b_picture.slice_type) == (2, 1)
         assert reader.sample_at(20).data[4] == 0x01
         assert decoder.decode_frame(19).y != decoder.decode_frame(20).y
+        pps_sets = [
+            pps,
+            parse_pps(H264Encoder()._picture_parameter_set(1, False, 1)),
+            parse_pps(H264Encoder()._picture_parameter_set(2, False, 2)),
+            parse_pps(H264Encoder()._picture_parameter_set(3, True, 0)),
+        ]
+        for index in range(21, 24):
+            header = parse_slice_header(
+                reader.sample_at(index).data[4:], sps, pps_sets[0]
+            )
+            assert header.slice_type == 1
+            assert header.direct_spatial_mv_pred == (index != 22)
+        explicit = parse_slice_header(
+            reader.sample_at(24).data[4:], sps, pps_sets[1]
+        )
+        implicit = parse_slice_header(
+            reader.sample_at(25).data[4:], sps, pps_sets[2]
+        )
+        assert explicit.prediction_weight_table is not None
+        assert implicit.prediction_weight_table is None
+        inter_residual = parse_slice_header(
+            reader.sample_at(26).data[4:], sps, pps_sets[0]
+        )
+        assert inter_residual.slice_type == 0
+        for index in range(27, 31):
+            header = parse_slice_header(
+                reader.sample_at(index).data[4:], sps, pps_sets[3]
+            )
+            assert header.picture_parameter_set_id == 3
+            assert header.slice_data_bit_offset == 24
+            frame = decoder.decode_frame(index)
+            assert (frame.width, frame.height) == (64, 64)
     finally:
         reader.close()
     assert list(tmp_path.iterdir()) == [output]

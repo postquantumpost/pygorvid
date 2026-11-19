@@ -7,6 +7,160 @@ type h264BitWriter struct {
 	bitCount int
 }
 
+type h264CABACWriter struct {
+	contexts     [CABACContextCount]CABACContextModel
+	low          uint32
+	codeRange    uint32
+	bitsToFollow int
+	bits         []byte
+	firstBit     bool
+}
+
+func newH264CABACWriter(sliceType, cabacInitIDC uint8, sliceQPY int) *h264CABACWriter {
+	contexts, err := NewCABACSliceContexts(sliceType, cabacInitIDC, sliceQPY)
+	if err != nil {
+		panic(err)
+	}
+	return &h264CABACWriter{contexts: contexts, codeRange: cabacInitialRange, firstBit: true}
+}
+
+func (w *h264CABACWriter) put(bit byte) {
+	if w.firstBit {
+		w.firstBit = false
+	} else {
+		w.bits = append(w.bits, bit)
+	}
+	for w.bitsToFollow != 0 {
+		w.bits = append(w.bits, bit^1)
+		w.bitsToFollow--
+	}
+}
+
+func (w *h264CABACWriter) renormalize() {
+	for w.codeRange < 256 {
+		switch {
+		case w.low < 256:
+			w.put(0)
+		case w.low >= 512:
+			w.put(1)
+			w.low -= 512
+		default:
+			w.bitsToFollow++
+			w.low -= 256
+		}
+		w.low <<= 1
+		w.codeRange <<= 1
+	}
+}
+
+func (w *h264CABACWriter) decision(value int, contextIndex int) {
+	model := &w.contexts[contextIndex]
+	rangeLPS := uint32(cabacRangeLPS[(w.codeRange>>6)&3][model.stateIndex])
+	if (value != 0) == model.valueMPS {
+		w.codeRange -= rangeLPS
+		model.Update(value != 0)
+		w.renormalize()
+		return
+	}
+	w.low += w.codeRange - rangeLPS
+	w.codeRange = rangeLPS
+	model.Update(value != 0)
+	w.renormalize()
+}
+
+func (w *h264CABACWriter) lumaCBP(left, top, desired int) {
+	contextIndex := boolInt(left&2 == 0) + 2*boolInt(top&4 == 0)
+	w.decision(desired&1, 73+contextIndex)
+	current := desired & 1
+	contextIndex = boolInt(current&1 == 0) + 2*boolInt(top&8 == 0)
+	w.decision((desired>>1)&1, 73+contextIndex)
+	current |= desired & 2
+	contextIndex = boolInt(left&8 == 0) + 2*boolInt(current&1 == 0)
+	w.decision((desired>>2)&1, 73+contextIndex)
+	current |= desired & 4
+	contextIndex = boolInt(current&4 == 0) + 2*boolInt(current&2 == 0)
+	w.decision((desired>>3)&1, 73+contextIndex)
+}
+
+func (w *h264CABACWriter) zeroLumaCBP(left, top int) {
+	w.lumaCBP(left, top, 0)
+}
+
+func (w *h264CABACWriter) terminate(value int) {
+	w.codeRange -= 2
+	if value == 0 {
+		w.renormalize()
+		return
+	}
+	w.low += w.codeRange
+	w.codeRange = 2
+	w.renormalize()
+	w.put(byte((w.low >> 9) & 1))
+	w.bits = append(w.bits, byte((w.low>>8)&1), 1)
+}
+
+func (w *h264CABACWriter) bypass(value int) {
+	w.low <<= 1
+	if value != 0 {
+		w.low += w.codeRange
+	}
+	switch {
+	case w.low >= 1024:
+		w.low -= 1024
+		w.put(1)
+	case w.low < 512:
+		w.put(0)
+	default:
+		w.low -= 512
+		w.bitsToFollow++
+	}
+}
+
+func (w *h264CABACWriter) level(magnitude, firstContext, greaterContext int) {
+	if magnitude == 1 {
+		w.decision(0, firstContext)
+	} else {
+		w.decision(1, firstContext)
+		count := magnitude - 2
+		if count > 13 {
+			count = 13
+		}
+		for index := 0; index < count; index++ {
+			w.decision(1, greaterContext+5)
+		}
+		if magnitude <= 14 {
+			w.decision(0, greaterContext+5)
+		}
+	}
+	w.bypass(0)
+}
+
+func (w *h264CABACWriter) end() {
+	w.codeRange -= 2
+	w.low += w.codeRange
+	w.codeRange = 2
+	w.renormalize()
+	w.put(byte((w.low >> 9) & 1))
+	w.bits = append(w.bits, byte((w.low>>8)&1), 1)
+}
+
+func (w *h264CABACWriter) data(padding int) []byte {
+	result := make([]byte, (len(w.bits)+7)/8+padding)
+	for index, bit := range w.bits {
+		if bit != 0 {
+			result[index/8] |= 0x80 >> (index % 8)
+		}
+	}
+	return result
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func (w *h264BitWriter) bits(value uint32, count int) {
 	for shift := count - 1; shift >= 0; shift-- {
 		if w.bitCount%8 == 0 {
@@ -87,14 +241,20 @@ func (e H264Encoder) SequenceParameterSet() []byte {
 }
 
 func (e H264Encoder) PictureParameterSet() []byte {
+	return e.pictureParameterSet(0, false, 0)
+}
+
+func (e H264Encoder) pictureParameterSet(ppsID uint32, cabac bool, weightedBipredIDC uint32) []byte {
 	w := h264BitWriter{}
+	w.ue(ppsID)
 	w.ue(0)
-	w.ue(0)
-	w.bits(0, 2)
+	w.bits(boolUint32(cabac), 1)
+	w.bits(0, 1)
 	for i := 0; i < 3; i++ {
 		w.ue(0)
 	}
-	w.bits(0b100, 3)
+	w.bits(1, 1)
+	w.bits(weightedBipredIDC, 2)
 	for i := 0; i < 3; i++ {
 		w.ue(0)
 	}
@@ -137,7 +297,365 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 20 {
 		return e.encodeBFrame()
 	}
+	if frameIndex >= 21 && frameIndex <= 23 {
+		return e.encodeBFeatureFrame(frameIndex)
+	}
+	if frameIndex == 24 {
+		return e.encodeBWeightedFrame(true)
+	}
+	if frameIndex == 25 {
+		return e.encodeBWeightedFrame(false)
+	}
+	if frameIndex == 26 {
+		return e.encodeInterResidualFrame()
+	}
+	if frameIndex == 27 {
+		return e.encodeCABACIFrame()
+	}
+	if frameIndex == 28 {
+		return e.encodeCABACPFrame()
+	}
+	if frameIndex == 29 {
+		return e.encodeCABACBFrame()
+	}
+	if frameIndex == 30 {
+		return e.encodeCABACResidualFrame()
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
+}
+
+func bMacroblock(w *h264BitWriter, kind int, subTypes []int) {
+	w.ue(uint32(kind))
+	switch {
+	case kind == 22:
+		for _, subType := range subTypes {
+			w.ue(uint32(subType))
+		}
+		w.ue(0)
+	case kind == 0:
+		w.ue(0)
+	case kind >= 1 && kind <= 3:
+		for listIndex := 0; listIndex < 2; listIndex++ {
+			if kind == 1 && listIndex == 1 || kind == 2 && listIndex == 0 {
+				continue
+			}
+			w.se(0)
+			w.se(0)
+		}
+		w.ue(0)
+	case kind >= 4 && kind <= 21:
+		flags := [][2]int{
+			{1, 0}, {1, 0}, {0, 1}, {0, 1}, {1, 0}, {1, 0},
+			{0, 1}, {0, 1}, {1, 1}, {1, 1}, {0, 1}, {0, 1},
+			{1, 1}, {1, 1}, {0, 1}, {0, 1}, {1, 1}, {1, 1},
+		}[kind-4]
+		for partition := 0; partition < 2; partition++ {
+			for _, active := range flags {
+				if active != 0 {
+					w.se(0)
+					w.se(0)
+				}
+			}
+		}
+		w.ue(0)
+	}
+}
+
+func beginBSlice(w *h264BitWriter, frameNum, ppsID uint32, spatialDirect, explicitWeights bool) {
+	w.ue(0)
+	w.ue(1)
+	w.ue(ppsID)
+	w.bits(frameNum, 4)
+	w.bits(boolUint32(spatialDirect), 1)
+	w.bits(0, 1)
+	w.bits(0, 1)
+	w.bits(0, 1)
+	if explicitWeights {
+		w.ue(0)
+		w.ue(0)
+		for reference := 0; reference < 2; reference++ {
+			w.bits(1, 1)
+			w.se(2)
+			w.se(-8)
+			w.bits(1, 1)
+			w.se(2)
+			w.se(4)
+			w.se(2)
+			w.se(-4)
+		}
+	}
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+}
+
+func (e H264Encoder) encodeBFeatureFrame(frameIndex uint16) []byte {
+	w := h264BitWriter{}
+	spatialDirect := frameIndex != 22
+	beginBSlice(&w, uint32(frameIndex-16)&15, 0, spatialDirect, false)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		w.ue(0)
+		if frameIndex == 23 {
+			bMacroblock(&w, 1+(macroblock%11)%3, nil)
+		} else if frameIndex == 21 && macroblock%2 != 0 {
+			bMacroblock(&w, 22, []int{0, 0, 0, 0})
+		} else {
+			bMacroblock(&w, 0, nil)
+		}
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func (e H264Encoder) encodeBWeightedFrame(explicit bool) []byte {
+	ppsID := uint32(2)
+	frameNum := uint32(10)
+	if explicit {
+		ppsID, frameNum = 1, 9
+	}
+	w := h264BitWriter{}
+	beginBSlice(&w, frameNum, ppsID, true, explicit)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		w.ue(0)
+		bMacroblock(&w, 3, nil)
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func (e H264Encoder) encodeInterResidualFrame() []byte {
+	w := h264BitWriter{}
+	w.ue(0)
+	w.ue(0)
+	w.ue(0)
+	w.bits(11, 4)
+	w.bits(0, 1)
+	w.bits(0, 1)
+	w.predictionWeightTable(1, false)
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		w.ue(0)
+		w.ue(0)
+		w.se(0)
+		w.se(0)
+		if macroblock == 0 || macroblock == 15 {
+			w.ue(2)
+			w.se(1)
+			for block := 0; block < 4; block++ {
+				if block == 0 || block == 3 {
+					w.bits(0b01, 2)
+					w.bits(0, 1)
+					w.bits(1, 1)
+				} else {
+					w.bits(1, 1)
+				}
+			}
+		} else {
+			w.ue(0)
+		}
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func cabacNAL(header byte, rbsp []byte) []byte {
+	result := []byte{header}
+	zeros := 0
+	for _, value := range rbsp {
+		if zeros == 2 && value <= 3 {
+			result = append(result, 3)
+			zeros = 0
+		}
+		result = append(result, value)
+		if value == 0 {
+			zeros++
+		} else {
+			zeros = 0
+		}
+	}
+	return result
+}
+
+func alignCABACHeader(header *h264BitWriter) {
+	for header.bitCount%8 != 0 {
+		header.bits(1, 1)
+	}
+}
+
+func (e H264Encoder) encodeCABACIFrame() []byte {
+	header := h264BitWriter{}
+	header.ue(0)
+	header.ue(2)
+	header.ue(3)
+	header.bits(12, 4)
+	header.bits(0, 1)
+	header.ue(0)
+	header.ue(1)
+	alignCABACHeader(&header)
+	cabac := newH264CABACWriter(2, 0, 26)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		cabac.decision(0, 3)
+		for block := 0; block < 16; block++ {
+			cabac.decision(1, 68)
+		}
+		cabac.decision(0, 64)
+		left, top := 0, 0
+		if macroblock%4 == 0 {
+			left = 15
+		}
+		if macroblock < 4 {
+			top = 15
+		}
+		cabac.zeroLumaCBP(left, top)
+		cabac.decision(0, 77)
+		if macroblock != 15 {
+			cabac.terminate(0)
+		}
+	}
+	cabac.end()
+	return prependH264NALSize(cabacNAL(0x21, append(header.data, cabac.data(4)...)))
+}
+
+func (e H264Encoder) encodeCABACPFrame() []byte {
+	header := h264BitWriter{}
+	header.ue(0)
+	header.ue(0)
+	header.ue(3)
+	header.bits(13, 4)
+	header.bits(0, 1)
+	header.bits(0, 1)
+	header.ue(0)
+	header.ue(0)
+	header.bits(0, 1)
+	header.bits(0, 1)
+	header.bits(0, 1)
+	header.ue(0)
+	header.ue(0)
+	header.ue(1)
+	alignCABACHeader(&header)
+	cabac := newH264CABACWriter(0, 0, 26)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		skipped := macroblock%3 == 1
+		leftSkip := macroblock%4 != 0 && (macroblock-1)%3 == 1
+		topSkip := macroblock >= 4 && (macroblock-4)%3 == 1
+		increment := 0
+		if macroblock%4 != 0 && !leftSkip {
+			increment++
+		}
+		if macroblock >= 4 && !topSkip {
+			increment++
+		}
+		cabac.decision(boolInt(skipped), 11+increment)
+		if skipped {
+			if macroblock != 15 {
+				cabac.terminate(0)
+			}
+			continue
+		}
+		cabac.decision(0, 14)
+		cabac.decision(0, 15)
+		cabac.decision(0, 16)
+		cabac.decision(0, 40)
+		cabac.decision(0, 47)
+		left, top := 0, 0
+		if macroblock%4 == 0 {
+			left = 15
+		}
+		if macroblock < 4 {
+			top = 15
+		}
+		cabac.zeroLumaCBP(left, top)
+		cabac.decision(0, 77)
+		if macroblock != 15 {
+			cabac.terminate(0)
+		}
+	}
+	cabac.end()
+	return prependH264NALSize(cabacNAL(0x21, append(header.data, cabac.data(4)...)))
+}
+
+func (e H264Encoder) encodeCABACBFrame() []byte {
+	header := h264BitWriter{}
+	header.ue(0)
+	header.ue(1)
+	header.ue(3)
+	header.bits(14, 4)
+	header.bits(1, 1)
+	header.bits(0, 1)
+	header.bits(0, 1)
+	header.bits(0, 1)
+	header.bits(0, 1)
+	header.ue(0)
+	header.ue(0)
+	header.ue(1)
+	alignCABACHeader(&header)
+	cabac := newH264CABACWriter(1, 0, 26)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		cabac.decision(0, 24+boolInt(macroblock%4 != 0)+boolInt(macroblock >= 4))
+		cabac.decision(0, 27)
+		left, top := 0, 0
+		if macroblock%4 == 0 {
+			left = 15
+		}
+		if macroblock < 4 {
+			top = 15
+		}
+		cabac.zeroLumaCBP(left, top)
+		cabac.decision(0, 77)
+		if macroblock != 15 {
+			cabac.terminate(0)
+		}
+	}
+	cabac.end()
+	return prependH264NALSize(cabacNAL(0x21, append(header.data, cabac.data(4)...)))
+}
+
+func (e H264Encoder) encodeCABACResidualFrame() []byte {
+	header := h264BitWriter{}
+	header.ue(0)
+	header.ue(2)
+	header.ue(3)
+	header.bits(15, 4)
+	header.bits(0, 1)
+	header.ue(0)
+	header.ue(1)
+	alignCABACHeader(&header)
+	cabac := newH264CABACWriter(2, 0, 26)
+	for macroblock := 0; macroblock < 16; macroblock++ {
+		cabac.decision(0, 3)
+		for block := 0; block < 16; block++ {
+			cabac.decision(1, 68)
+		}
+		cabac.decision(0, 64)
+		left, top := 0, 0
+		if macroblock%4 == 0 {
+			left = 15
+		}
+		if macroblock < 4 {
+			top = 15
+		}
+		desired := 0
+		if macroblock == 15 {
+			desired = 1
+		}
+		cabac.lumaCBP(left, top, desired)
+		cabac.decision(0, 77)
+		if macroblock == 15 {
+			cabac.decision(0, 60)
+			cabac.decision(1, 93)
+			cabac.decision(1, 134)
+			cabac.decision(1, 195)
+			cabac.decision(0, 248)
+			cabac.bypass(0)
+			cabac.decision(0, 94)
+			cabac.decision(0, 95)
+			cabac.decision(0, 93)
+		}
+		if macroblock != 15 {
+			cabac.terminate(0)
+		}
+	}
+	cabac.end()
+	return prependH264NALSize(cabacNAL(0x21, append(header.data, cabac.data(4)...)))
 }
 
 func (w *h264BitWriter) predictionWeightTable(referenceCount int, explicit bool) {

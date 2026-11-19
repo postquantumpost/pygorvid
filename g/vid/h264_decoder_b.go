@@ -191,7 +191,9 @@ func (decoder *H264Decoder) nativeBDirect(slice nativeSlice, address int, poc in
 			}
 		}
 		if refIndex < 0 {
-			return predictions, fmt.Errorf("temporal direct colocated reference is unavailable")
+			colocated = nativePrediction{refIndex: -1}
+			colocatedIntra = true
+			refIndex = 0
 		}
 	}
 	motion0, motion1 := MotionVector{}, MotionVector{}

@@ -3,7 +3,7 @@ use std::io;
 
 const VIDEO_FRAME_RATE: u32 = 60;
 const MIN_VIDEO_FRAME_COUNT: u32 = VIDEO_FRAME_RATE;
-const GENERATED_FEATURE_FRAME_COUNT: u32 = 21;
+const GENERATED_FEATURE_FRAME_COUNT: u32 = 31;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
 #[derive(Clone, Debug, Default)]
@@ -557,16 +557,25 @@ impl Mp4Writer {
             (audio_sample_count * 1000 + AUDIO_SAMPLE_RATE - 1) / AUDIO_SAMPLE_RATE;
         let movie_duration_ms = video_duration_ms.max(audio_duration_ms);
         let sps = encoder.sequence_parameter_set();
-        let pps = encoder.picture_parameter_set();
+        let pps_sets = [
+            encoder.picture_parameter_set(),
+            encoder.picture_parameter_set_with(1, false, 1),
+            encoder.picture_parameter_set_with(2, false, 2),
+            encoder.picture_parameter_set_with(3, true, 0),
+        ];
+        let mut pps_payload = Vec::new();
+        pps_payload.push(pps_sets.len() as u8);
+        for pps in pps_sets {
+            pps_payload.extend(u16s(&[pps.len() as u16]));
+            pps_payload.extend(pps);
+        }
         let avcc = mp4_box(
             b"avcC",
             &[
                 &[1, sps[1], sps[2], sps[3], 0xff, 0xe1],
                 &u16s(&[sps.len() as u16]),
                 &sps,
-                &[1],
-                &u16s(&[pps.len() as u16]),
-                &pps,
+                &pps_payload,
             ],
         );
         let visual = mp4_box(
@@ -596,7 +605,7 @@ impl Mp4Writer {
         let ftyp = mp4_box(b"ftyp", &[b"isom", &u32s(&[0x200]), b"isomiso2avc1qt  "]);
         let offset = ftyp.len() as u32 + 8;
         let sync_samples: Vec<u32> = (1..=frame_count)
-            .filter(|sample| !matches!(*sample, 3..=21))
+            .filter(|sample| !matches!(*sample, 3..=31))
             .collect();
         let video_track = track(
             1,

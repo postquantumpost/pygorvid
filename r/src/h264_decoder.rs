@@ -1997,11 +1997,6 @@ impl H264Decoder {
             ..crate::CabacInterMacroblockResidualInput::default()
         };
         let b_skip_input = if header.slice_type % 5 == 1 {
-            if !header.direct_spatial_mv_pred {
-                return Err(invalid(
-                    "temporal B direct requires co-located motion metadata in the reference buffer",
-                ));
-            }
             let direct_neighbors =
                 crate::derive_cabac_inter_macroblock_neighbor_state_from_history(
                     macroblock_address,
@@ -2034,7 +2029,7 @@ impl H264Decoder {
                 slice_type: header.slice_type,
                 macroblock_x,
                 macroblock_y,
-                direct_spatial: true,
+                direct_spatial: header.direct_spatial_mv_pred,
                 left_available: direct_neighbors.left_available,
                 left_skipped: direct_neighbors.left_skipped,
                 top_available: direct_neighbors.top_available,

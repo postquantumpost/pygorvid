@@ -11,7 +11,7 @@ import (
 const (
 	generatedVideoFrameRate     = uint32(60)
 	minGeneratedVideoFrameCount = uint32(generatedVideoFrameRate)
-	generatedFeatureFrameCount  = uint32(21)
+	generatedFeatureFrameCount  = uint32(31)
 	generatedAudioSampleRate    = uint32(48000)
 )
 
@@ -345,9 +345,19 @@ func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata
 	if movieDurationMS < audioDurationMS {
 		movieDurationMS = audioDurationMS
 	}
-	sps, pps := encoder.SequenceParameterSet(), encoder.PictureParameterSet()
+	sps := encoder.SequenceParameterSet()
+	ppsSets := [][]byte{
+		encoder.PictureParameterSet(),
+		encoder.pictureParameterSet(1, false, 1),
+		encoder.pictureParameterSet(2, false, 2),
+		encoder.pictureParameterSet(3, true, 0),
+	}
 	avcc := mp4Box("avcC", []byte{1, sps[1], sps[2], sps[3], 0xff, 0xe1},
-		mp4U16(uint16(len(sps))), sps, []byte{1}, mp4U16(uint16(len(pps))), pps)
+		mp4U16(uint16(len(sps))), sps, []byte{byte(len(ppsSets))},
+		mp4U16(uint16(len(ppsSets[0]))), ppsSets[0],
+		mp4U16(uint16(len(ppsSets[1]))), ppsSets[1],
+		mp4U16(uint16(len(ppsSets[2]))), ppsSets[2],
+		mp4U16(uint16(len(ppsSets[3]))), ppsSets[3])
 	visual := mp4Box("avc1", make([]byte, 6), mp4U16(1), make([]byte, 16), mp4U16(64, 64),
 		mp4U32(0x480000, 0x480000, 0), mp4U16(1), make([]byte, 32), mp4U16(24, 0xffff), avcc)
 	sound := mp4Box("sowt", make([]byte, 6), mp4U16(1), make([]byte, 8),
@@ -356,7 +366,7 @@ func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata
 	offset := uint32(len(ftyp) + 8)
 	syncSamples := make([]uint32, 0, frameCount-1)
 	for sample := uint32(1); sample <= frameCount; sample++ {
-		if sample <= 2 || sample > 21 {
+		if sample <= 2 || sample > 31 {
 			syncSamples = append(syncSamples, sample)
 		}
 	}

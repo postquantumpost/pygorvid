@@ -6,7 +6,7 @@ from .h264encoder import H264Encoder
 
 _VIDEO_FRAME_RATE = 60
 _MIN_VIDEO_FRAME_COUNT = _VIDEO_FRAME_RATE
-_GENERATED_FEATURE_FRAME_COUNT = 21
+_GENERATED_FEATURE_FRAME_COUNT = 31
 _AUDIO_SAMPLE_RATE = 48000
 
 
@@ -214,10 +214,16 @@ class Mp4Writer:
         audio_duration_ms = (audio_sample_count * 1000 + _AUDIO_SAMPLE_RATE - 1) // _AUDIO_SAMPLE_RATE
         movie_duration_ms = max(video_duration_ms, audio_duration_ms)
         sps = encoder.sequence_parameter_set()
-        pps = encoder.picture_parameter_set()
+        pps_sets = (
+            encoder.picture_parameter_set(),
+            encoder._picture_parameter_set(1, False, 1),
+            encoder._picture_parameter_set(2, False, 2),
+            encoder._picture_parameter_set(3, True, 0),
+        )
         avcc = _box(
             b"avcC", bytes([1, sps[1], sps[2], sps[3], 0xFF, 0xE1]),
-            _u16(len(sps)), sps, bytes([1]), _u16(len(pps)), pps,
+            _u16(len(sps)), sps, bytes([len(pps_sets)]),
+            *(_u16(len(pps)) + pps for pps in pps_sets),
         )
         visual = _box(
             b"avc1", bytes(6), _u16(1), bytes(16), _u16(64, 64),
@@ -234,7 +240,7 @@ class Mp4Writer:
             1, visual, sizes, frame_count, _VIDEO_FRAME_RATE, video_duration_ms,
             video_offset, True,
             tuple(index + 1 for index in range(frame_count)
-                  if index not in range(2, 21)),
+                  if index not in range(2, 31)),
             ((19, 0), (1, 1), (1, -1), (frame_count - 21, 0)),
         )
         audio_sizes = _full_box(b"stsz", _u32(4, audio_sample_count))

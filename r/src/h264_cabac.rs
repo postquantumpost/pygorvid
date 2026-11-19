@@ -1126,9 +1126,48 @@ fn cabac_spatial_b_direct_prediction(
     direct_8x8_inference: bool,
 ) -> io::Result<CabacBDirectMacroblockResult> {
     if !input.direct_spatial {
-        return Err(invalid(
-            "temporal B direct requires co-located partition metadata",
-        ));
+        let colocated_field = input
+            .colocated_motion_field
+            .ok_or_else(|| invalid("temporal B direct requires co-located partition metadata"))?;
+        let colocated = colocated_field[(partition_y / 4) * 4 + partition_x / 4];
+        let reference_indices = [colocated.reference_index, 0];
+        let mut prediction_flags = [false, true];
+        let mut motion_vectors = [crate::MotionVector::default(); 2];
+        if reference_indices[0] >= 0 {
+            let list0 = input
+                .list0_references
+                .get(reference_indices[0] as usize)
+                .ok_or_else(|| invalid("B_Direct co-located reference is unavailable in list0"))?;
+            let tb = input
+                .current_picture_order_count
+                .checked_sub(list0.picture_order_count)
+                .ok_or_else(|| invalid("B_Direct picture order count arithmetic is invalid"))?;
+            let td = input.list1_references[0]
+                .picture_order_count
+                .checked_sub(list0.picture_order_count)
+                .ok_or_else(|| invalid("B_Direct picture order count arithmetic is invalid"))?;
+            let scale = if td == 0 { 0 } else { (tb << 2) / td };
+            motion_vectors[0] = crate::MotionVector {
+                x: i32::try_from((i64::from(colocated.motion_vector.x) * scale) >> 2)
+                    .map_err(|_| invalid("B_Direct scaled motion vector is out of range"))?,
+                y: i32::try_from((i64::from(colocated.motion_vector.y) * scale) >> 2)
+                    .map_err(|_| invalid("B_Direct scaled motion vector is out of range"))?,
+            };
+            motion_vectors[1] = crate::MotionVector {
+                x: motion_vectors[0].x - colocated.motion_vector.x,
+                y: motion_vectors[0].y - colocated.motion_vector.y,
+            };
+            prediction_flags[0] = true;
+        }
+        return Ok(CabacBDirectMacroblockResult {
+            skipped: false,
+            reference_indices,
+            motion_vectors,
+            prediction_flags,
+            luma: [0; 256],
+            cb: [0; 64],
+            cr: [0; 64],
+        });
     }
     let list_neighbors = [neighbors.list0, neighbors.list1];
     let candidate_index = |candidate: Option<crate::MotionVectorCandidate>| {
@@ -2704,16 +2743,23 @@ impl<'a> CabacArithmeticDecoder<'a> {
         let (macroblock_x, macroblock_y) = (input.macroblock_x, input.macroblock_y);
         let weights = input.weighting.select([0, -1], [None, None])?;
         let job: ReconstructionJob = Box::new(move || {
-            let mut samples = p_skip_samples(&reference, macroblock_x, macroblock_y, motion_vector)?;
+            let mut samples =
+                p_skip_samples(&reference, macroblock_x, macroblock_y, motion_vector)?;
             if weights.is_none() {
                 return Ok(samples);
             }
             for sample in &mut samples.0 {
-                *sample = crate::h264_weighted_prediction::combine(Some(*sample), None, weights, 0)?;
+                *sample =
+                    crate::h264_weighted_prediction::combine(Some(*sample), None, weights, 0)?;
             }
             for (component, plane) in [(1, &mut samples.1), (2, &mut samples.2)] {
                 for sample in plane {
-                    *sample = crate::h264_weighted_prediction::combine(Some(*sample), None, weights, component)?;
+                    *sample = crate::h264_weighted_prediction::combine(
+                        Some(*sample),
+                        None,
+                        weights,
+                        component,
+                    )?;
                 }
             }
             Ok(samples)
@@ -2961,10 +3007,15 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 .ok_or_else(|| invalid("B_Direct selected reference index is unavailable"))?;
             references[list_index] = Some((list[index].frame.clone(), motion_vectors[list_index]));
         }
-        let weights = input.weighting.select(reference_indices, [
-            (reference_indices[0] >= 0).then(|| &input.list0_references[reference_indices[0] as usize]),
-            (reference_indices[1] >= 0).then(|| &input.list1_references[reference_indices[1] as usize]),
-        ])?;
+        let weights = input.weighting.select(
+            reference_indices,
+            [
+                (reference_indices[0] >= 0)
+                    .then(|| &input.list0_references[reference_indices[0] as usize]),
+                (reference_indices[1] >= 0)
+                    .then(|| &input.list1_references[reference_indices[1] as usize]),
+            ],
+        )?;
         let mut result = CabacBDirectMacroblockResult {
             skipped,
             reference_indices,
@@ -4938,10 +4989,15 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 ));
             }
             partition_predictions.push(InterPartitionPrediction {
-                weights: input.weighting.select(references, [
-                    (references[0] >= 0).then(|| &input.reference_lists[0][references[0] as usize]),
-                    (references[1] >= 0).then(|| &input.reference_lists[1][references[1] as usize]),
-                ])?,
+                weights: input.weighting.select(
+                    references,
+                    [
+                        (references[0] >= 0)
+                            .then(|| &input.reference_lists[0][references[0] as usize]),
+                        (references[1] >= 0)
+                            .then(|| &input.reference_lists[1][references[1] as usize]),
+                    ],
+                )?,
                 x: specification.x,
                 y: specification.y,
                 width: specification.width,
@@ -6380,7 +6436,8 @@ fn inter_prediction_samples(
                 let sample = crate::h264_weighted_prediction::combine(
                     prediction0.map(|first| first.0[local_index]),
                     prediction1.map(|second| second.0[local_index]),
-                    partition.weights, 0,
+                    partition.weights,
+                    0,
                 )?;
                 luma[(partition.y + row) * 16 + partition.x + column] = sample;
             }
@@ -6398,8 +6455,10 @@ fn inter_prediction_samples(
                         }
                     };
                     crate::h264_weighted_prediction::combine(
-                        prediction0.map(sample), prediction1.map(sample),
-                        partition.weights, component,
+                        prediction0.map(sample),
+                        prediction1.map(sample),
+                        partition.weights,
+                        component,
                     )
                 };
                 cb[destination] = average(1)?;
@@ -6621,15 +6680,24 @@ fn b_direct_samples(
     let (mut luma, mut cb, mut cr) = ([0; 256], [0; 64], [0; 64]);
     for index in 0..256 {
         luma[index] = crate::h264_weighted_prediction::combine(
-            first.map(|p| p.0[index]), second.map(|p| p.0[index]), weights, 0,
+            first.map(|p| p.0[index]),
+            second.map(|p| p.0[index]),
+            weights,
+            0,
         )?;
     }
     for index in 0..64 {
         cb[index] = crate::h264_weighted_prediction::combine(
-            first.map(|p| p.1[index]), second.map(|p| p.1[index]), weights, 1,
+            first.map(|p| p.1[index]),
+            second.map(|p| p.1[index]),
+            weights,
+            1,
         )?;
         cr[index] = crate::h264_weighted_prediction::combine(
-            first.map(|p| p.2[index]), second.map(|p| p.2[index]), weights, 2,
+            first.map(|p| p.2[index]),
+            second.map(|p| p.2[index]),
+            weights,
+            2,
         )?;
     }
     Ok((luma, cb, cr))
@@ -6741,16 +6809,27 @@ mod tests {
             macroblock_type: 0,
             sub_macroblock_types: Vec::new(),
             partitions: vec![CabacInterMacroblockPartition {
-                x: 0, y: 0, width: 16, height: 16,
-                prediction_flags: [true, false], reference_indices: [1, -1],
+                x: 0,
+                y: 0,
+                width: 16,
+                height: 16,
+                prediction_flags: [true, false],
+                reference_indices: [1, -1],
                 motion_vectors: [crate::MotionVector::default(); 2],
                 motion_vector_differences: [crate::MotionVector { x: 10, y: 10 }; 2],
             }],
-            luma: [0; 256], cb: [0; 64], cr: [0; 64],
-            coded_block_pattern_luma: 0, coded_block_pattern_chroma: 0,
-            transform_size_8x8: false, qp_delta: 0, qpy: 26,
-            luma_4x4_coded_block_flags: [false; 16], luma_8x8_nonzero: [false; 4],
-            chroma_dc_coded: [false; 2], chroma_ac_coded_flags: [[false; 4]; 2],
+            luma: [0; 256],
+            cb: [0; 64],
+            cr: [0; 64],
+            coded_block_pattern_luma: 0,
+            coded_block_pattern_chroma: 0,
+            transform_size_8x8: false,
+            qp_delta: 0,
+            qpy: 26,
+            luma_4x4_coded_block_flags: [false; 16],
+            luma_8x8_nonzero: [false; 4],
+            chroma_dc_coded: [false; 2],
+            chroma_ac_coded_flags: [[false; 4]; 2],
         };
         for (b_slice, mb_type, sub_types, expected) in [
             (false, 0, Vec::new(), 1),
@@ -6763,16 +6842,31 @@ mod tests {
             let entry = CabacDecodedSliceMacroblock {
                 address: 0,
                 result: CabacSliceMacroblockResult::Inter(CabacPBMacroblockLayerResult {
-                    skipped: false, macroblock: CabacPBMacroblockPrediction::Inter(decoded.clone()),
+                    skipped: false,
+                    macroblock: CabacPBMacroblockPrediction::Inter(decoded.clone()),
                 }),
             };
             let (neighbor, candidate) = cabac_history_partition_fact(&entry, 0, 0, 0, b_slice);
-            assert_eq!(derive_cabac_reference_index_context_increment(
-                neighbor, CabacInterNeighbor::default(), false, false,
-            ), expected);
-            assert_eq!(derive_cabac_mvd_context_increment(
-                neighbor, CabacInterNeighbor::default(), 0, false, false,
-            ).unwrap(), expected);
+            assert_eq!(
+                derive_cabac_reference_index_context_increment(
+                    neighbor,
+                    CabacInterNeighbor::default(),
+                    false,
+                    false,
+                ),
+                expected
+            );
+            assert_eq!(
+                derive_cabac_mvd_context_increment(
+                    neighbor,
+                    CabacInterNeighbor::default(),
+                    0,
+                    false,
+                    false,
+                )
+                .unwrap(),
+                expected
+            );
             assert_eq!(candidate.unwrap().reference_index, Some(1));
         }
     }

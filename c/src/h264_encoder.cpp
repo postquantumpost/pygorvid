@@ -1,8 +1,10 @@
 #include "pygorvid/h264_encoder.hpp"
+#include "pygorvid/cabac.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 
 namespace pygorvid {
@@ -60,6 +62,200 @@ public:
         return result;
     }
 };
+
+constexpr std::array<std::array<std::uint8_t, 64>, 4> range_lps{{
+    {{128, 128, 128, 123, 116, 111, 105, 100, 95, 90, 85, 81, 77, 73, 69, 66,
+      62, 59, 56, 53, 51, 48, 46, 43, 41, 39, 37, 35, 33, 32, 30, 29, 27, 26,
+      24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 14, 13, 12, 12, 11, 11, 10,
+      10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 2}},
+    {{176, 167, 158, 150, 142, 135, 128, 122, 116, 110, 104, 99, 94, 89, 85,
+      80, 76, 72, 69, 65, 62, 59, 56, 53, 50, 48, 45, 43, 41, 39, 37, 35, 33,
+      31, 30, 28, 27, 26, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 14, 13,
+      12, 12, 11, 11, 10, 9, 9, 9, 8, 8, 7, 7, 2}},
+    {{208, 197, 187, 178, 169, 160, 152, 144, 137, 130, 123, 117, 111, 105,
+      100, 95, 90, 86, 81, 77, 73, 69, 66, 63, 59, 56, 54, 51, 48, 46, 43, 41,
+      39, 37, 35, 33, 32, 30, 29, 27, 26, 25, 23, 22, 21, 20, 19, 18, 17, 16,
+      15, 15, 14, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 2}},
+    {{240, 227, 216, 205, 195, 185, 175, 166, 158, 150, 142, 135, 128, 122,
+      116, 110, 104, 99, 94, 89, 85, 80, 76, 72, 69, 65, 62, 59, 56, 53, 50,
+      48, 45, 43, 41, 39, 37, 35, 33, 31, 30, 28, 27, 25, 24, 23, 22, 21, 20,
+      19, 18, 17, 16, 15, 14, 14, 13, 12, 12, 11, 11, 10, 9, 2}}
+}};
+
+class CabacWriter {
+public:
+    explicit CabacWriter(std::vector<CabacContextModel> contexts)
+        : contexts_(std::move(contexts)) {}
+
+    void decision(bool value, std::size_t context_index) {
+        auto& model = contexts_.at(context_index);
+        const auto lps =
+            range_lps[(range_ >> 6) & 3][model.state_index()];
+        if (value == model.mps()) {
+            range_ -= lps;
+            model.update(value);
+            renormalize();
+            return;
+        }
+        low_ += range_ - lps;
+        range_ = lps;
+        model.update(value);
+        renormalize();
+    }
+
+    void luma_cbp(int left, int top, int desired) {
+        auto context = !static_cast<bool>(left & 2) +
+                        2 * !static_cast<bool>(top & 4);
+        decision(desired & 1, 73 + context);
+        auto current = desired & 1;
+        context = !static_cast<bool>(current & 1) +
+                  2 * !static_cast<bool>(top & 8);
+        decision((desired >> 1) & 1, 73 + context);
+        current |= desired & 2;
+        context = !static_cast<bool>(left & 8) +
+                  2 * !static_cast<bool>(current & 1);
+        decision((desired >> 2) & 1, 73 + context);
+        current |= desired & 4;
+        context = !static_cast<bool>(current & 4) +
+                  2 * !static_cast<bool>(current & 2);
+        decision((desired >> 3) & 1, 73 + context);
+    }
+
+    void zero_luma_cbp(int left, int top) {
+        luma_cbp(left, top, 0);
+    }
+
+    void bypass(bool value) {
+        low_ <<= 1;
+        if (value) {
+            low_ += range_;
+        }
+        if (low_ >= 1024) {
+            low_ -= 1024;
+            put(1);
+        } else if (low_ < 512) {
+            put(0);
+        } else {
+            low_ -= 512;
+            ++bits_to_follow_;
+        }
+    }
+
+    void level(int magnitude, int first_context, int greater_context) {
+        if (magnitude == 1) {
+            decision(false, first_context);
+        } else {
+            decision(true, first_context);
+            for (int count = 0; count < std::min(magnitude - 2, 13); ++count) {
+                decision(true, greater_context + 5);
+            }
+            if (magnitude <= 14) {
+                decision(false, greater_context + 5);
+            }
+        }
+        bypass(false);
+    }
+
+    void end() {
+        range_ -= 2;
+        low_ += range_;
+        range_ = 2;
+        renormalize();
+        put((low_ >> 9) & 1);
+        bits_.push_back((low_ >> 8) & 1);
+        bits_.push_back(1);
+    }
+
+    void terminate(bool value) {
+        range_ -= 2;
+        if (!value) {
+            renormalize();
+            return;
+        }
+        low_ += range_;
+        range_ = 2;
+        renormalize();
+        put((low_ >> 9) & 1);
+        bits_.push_back((low_ >> 8) & 1);
+        bits_.push_back(1);
+    }
+
+    const std::vector<CabacContextModel>& contexts() const {
+        return contexts_;
+    }
+
+    void clear_trailing_bits(std::size_t bit_offset) {
+        for (std::size_t index = bit_offset; index < bits_.size(); ++index) {
+            bits_[index] = 0;
+        }
+    }
+
+    std::vector<std::uint8_t> data(int padding = 4) const {
+        std::vector<std::uint8_t> result((bits_.size() + 7) / 8);
+        for (std::size_t index = 0; index < bits_.size(); ++index) {
+            if (bits_[index]) {
+                result[index / 8] |= 0x80 >> (index % 8);
+            }
+        }
+        result.insert(result.end(), padding, 0);
+        return result;
+    }
+
+private:
+    void put(std::uint8_t bit) {
+        if (first_bit_) {
+            first_bit_ = false;
+        } else {
+            bits_.push_back(bit);
+        }
+        while (bits_to_follow_) {
+            bits_.push_back(bit ^ 1);
+            --bits_to_follow_;
+        }
+    }
+
+    void renormalize() {
+        while (range_ < 256) {
+            if (low_ < 256) {
+                put(0);
+            } else if (low_ >= 512) {
+                put(1);
+                low_ -= 512;
+            } else {
+                ++bits_to_follow_;
+                low_ -= 256;
+            }
+            low_ <<= 1;
+            range_ <<= 1;
+        }
+    }
+
+    std::vector<CabacContextModel> contexts_;
+    std::uint32_t low_ = 0;
+    std::uint32_t range_ = 510;
+    std::uint32_t bits_to_follow_ = 0;
+    std::vector<std::uint8_t> bits_;
+    bool first_bit_ = true;
+};
+
+std::vector<std::uint8_t> encode_picture_parameter_set(
+    std::uint32_t pps_id, bool cabac, std::uint32_t weighted_bipred_idc) {
+    BitWriter writer;
+    writer.ue(pps_id);
+    writer.ue(0);
+    writer.bits(cabac, 1);
+    writer.bits(0, 1);
+    for (int index = 0; index < 3; ++index) {
+        writer.ue(0);
+    }
+    writer.bits(1, 1);
+    writer.bits(weighted_bipred_idc, 2);
+    for (int index = 0; index < 3; ++index) {
+        writer.ue(0);
+    }
+    writer.bits(0b100, 3);
+    return writer.nal(0x68);
+}
 
 void write_prediction_weight_table(
     BitWriter& writer, int reference_count, bool explicit_weights) {
@@ -233,6 +429,333 @@ std::vector<std::uint8_t> encode_b_frame() {
     return sized_nal(writer, 0x01);
 }
 
+void write_b_macroblock(BitWriter& writer, int kind,
+                        const std::vector<int>& sub_types = {}) {
+    writer.ue(kind);
+    if (kind == 22) {
+        for (const auto sub_type : sub_types) {
+            writer.ue(sub_type);
+        }
+        writer.ue(0);
+        return;
+    }
+    if (kind == 0) {
+        writer.ue(0);
+        return;
+    }
+    if (kind >= 1 && kind <= 3) {
+        for (int list_index = 0; list_index < 2; ++list_index) {
+            if ((kind == 1 && list_index == 1) ||
+                (kind == 2 && list_index == 0)) {
+                continue;
+            }
+            writer.se(0);
+            writer.se(0);
+        }
+        writer.ue(0);
+        return;
+    }
+    if (kind >= 4 && kind <= 21) {
+        constexpr std::array<std::array<int, 2>, 18> flags_by_kind{{
+            {{1, 0}}, {{1, 0}}, {{0, 1}}, {{0, 1}}, {{1, 0}},
+            {{1, 0}}, {{0, 1}}, {{0, 1}}, {{1, 1}}, {{1, 1}},
+            {{0, 1}}, {{0, 1}}, {{1, 1}}, {{1, 1}}, {{0, 1}},
+            {{0, 1}}, {{1, 1}}, {{1, 1}},
+        }};
+        for (int partition = 0; partition < 2; ++partition) {
+            for (const auto active : flags_by_kind[kind - 4]) {
+                if (active) {
+                    writer.se(0);
+                    writer.se(0);
+                }
+            }
+        }
+        writer.ue(0);
+    }
+}
+
+void begin_b_slice(BitWriter& writer, int frame_num, bool spatial_direct,
+                   int pps_id = 0, bool explicit_weights = false) {
+    writer.ue(0);
+    writer.ue(1);
+    writer.ue(pps_id);
+    writer.bits(frame_num, 4);
+    writer.bits(spatial_direct, 1);
+    writer.bits(0, 1);
+    writer.bits(0, 1);
+    writer.bits(0, 1);
+    if (explicit_weights) {
+        writer.ue(0);
+        writer.ue(0);
+        for (int list = 0; list < 2; ++list) {
+            writer.bits(1, 1);
+            writer.se(2);
+            writer.se(-8);
+            writer.bits(1, 1);
+            writer.se(2);
+            writer.se(4);
+            writer.se(2);
+            writer.se(-4);
+        }
+    }
+    writer.bits(0, 1);
+    writer.ue(0);
+    writer.ue(1);
+}
+
+std::vector<std::uint8_t> encode_b_feature_frame(int frame_index) {
+    BitWriter writer;
+    const bool spatial_direct = frame_index != 22;
+    begin_b_slice(writer, (frame_index - 16) & 15, spatial_direct);
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        writer.ue(0);
+        if (frame_index == 23) {
+            write_b_macroblock(writer, 1 + (macroblock % 11) % 3);
+        } else if (frame_index == 21 && macroblock % 2) {
+            write_b_macroblock(writer, 22, {0, 0, 0, 0});
+        } else {
+            write_b_macroblock(writer, 0);
+        }
+    }
+    return sized_nal(writer, 0x21);
+}
+
+std::vector<std::uint8_t> encode_b_weighted_frame(bool explicit_weights) {
+    const int pps_id = explicit_weights ? 1 : 2;
+    BitWriter writer;
+    begin_b_slice(writer, explicit_weights ? 9 : 10, true, pps_id,
+                  explicit_weights);
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        writer.ue(0);
+        write_b_macroblock(writer, 3);
+    }
+    return sized_nal(writer, 0x21);
+}
+
+std::vector<std::uint8_t> encode_inter_residual_frame() {
+    BitWriter writer;
+    writer.ue(0);
+    writer.ue(0);
+    writer.ue(0);
+    writer.bits(11, 4);
+    writer.bits(0, 1);
+    writer.bits(0, 1);
+    write_prediction_weight_table(writer, 1, false);
+    writer.bits(0, 1);
+    writer.ue(0);
+    writer.ue(1);
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        writer.ue(0);
+        writer.ue(0);
+        writer.se(0);
+        writer.se(0);
+        if (macroblock == 0 || macroblock == 15) {
+            writer.ue(2);
+            writer.se(1);
+            for (int block = 0; block < 4; ++block) {
+                if (block == 0 || block == 3) {
+                    writer.bits(0b01, 2);
+                    writer.bits(0, 1);
+                    writer.bits(1, 1);
+                } else {
+                    writer.bits(1, 1);
+                }
+            }
+        } else {
+            writer.ue(0);
+        }
+    }
+    return sized_nal(writer, 0x21);
+}
+
+std::vector<std::uint8_t> cabac_nal(
+    std::uint8_t header, const std::vector<std::uint8_t>& rbsp) {
+    std::vector<std::uint8_t> result{header};
+    int zeros = 0;
+    for (const auto value : rbsp) {
+        if (zeros == 2 && value <= 3) {
+            result.push_back(3);
+            zeros = 0;
+        }
+        result.push_back(value);
+        zeros = value == 0 ? zeros + 1 : 0;
+    }
+    return result;
+}
+
+std::vector<std::uint8_t> sample_nal(std::vector<std::uint8_t> nal) {
+    std::vector<std::uint8_t> sample;
+    const auto size = static_cast<std::uint32_t>(nal.size());
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        sample.push_back(static_cast<std::uint8_t>(size >> shift));
+    }
+    sample.insert(sample.end(), nal.begin(), nal.end());
+    return sample;
+}
+
+std::vector<std::uint8_t> finish_cabac_frame(
+    BitWriter& header, CabacWriter& cabac) {
+    cabac.end();
+    auto rbsp = header.data;
+    const auto cabac_data = cabac.data();
+    rbsp.insert(rbsp.end(), cabac_data.begin(), cabac_data.end());
+    return sample_nal(cabac_nal(0x21, rbsp));
+}
+
+std::vector<std::uint8_t> encode_cabac_i_frame() {
+    BitWriter header;
+    header.ue(0);
+    header.ue(2);
+    header.ue(3);
+    header.bits(12, 4);
+    header.bits(0, 1);
+    header.ue(0);
+    header.ue(1);
+    while (header.bit_count % 8) {
+        header.bits(1, 1);
+    }
+    CabacWriter cabac(make_cabac_slice_contexts(2, 0, 26));
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        cabac.decision(false, 3);
+        for (int block = 0; block < 16; ++block) {
+            cabac.decision(true, 68);
+        }
+        cabac.decision(false, 64);
+        cabac.zero_luma_cbp(
+            macroblock % 4 == 0 ? 15 : 0, macroblock < 4 ? 15 : 0);
+        cabac.decision(false, 77);
+        if (macroblock != 15) {
+            cabac.terminate(false);
+        }
+    }
+    return finish_cabac_frame(header, cabac);
+}
+
+std::vector<std::uint8_t> encode_cabac_p_frame() {
+    BitWriter header;
+    header.ue(0);
+    header.ue(0);
+    header.ue(3);
+    header.bits(13, 4);
+    header.bits(0, 1);
+    header.bits(0, 1);
+    header.ue(0);
+    header.ue(0);
+    header.bits(0, 1);
+    header.bits(0, 1);
+    header.bits(0, 1);
+    header.ue(0);
+    header.ue(0);
+    header.ue(1);
+    while (header.bit_count % 8) {
+        header.bits(1, 1);
+    }
+    CabacWriter cabac(make_cabac_slice_contexts(0, 0, 26));
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        const bool skipped = macroblock % 3 == 1;
+        const bool left_skip =
+            macroblock % 4 != 0 && (macroblock - 1) % 3 == 1;
+        const bool top_skip =
+            macroblock >= 4 && (macroblock - 4) % 3 == 1;
+        const int increment =
+            static_cast<int>(macroblock % 4 != 0 && !left_skip) +
+            static_cast<int>(macroblock >= 4 && !top_skip);
+        cabac.decision(skipped, 11 + increment);
+        if (skipped) {
+            if (macroblock != 15) {
+                cabac.terminate(false);
+            }
+            continue;
+        }
+        cabac.decision(false, 14);
+        cabac.decision(false, 15);
+        cabac.decision(false, 16);
+        cabac.decision(false, 40);
+        cabac.decision(false, 47);
+        cabac.zero_luma_cbp(
+            macroblock % 4 == 0 ? 15 : 0, macroblock < 4 ? 15 : 0);
+        cabac.decision(false, 77);
+        if (macroblock != 15) {
+            cabac.terminate(false);
+        }
+    }
+    return finish_cabac_frame(header, cabac);
+}
+
+std::vector<std::uint8_t> encode_cabac_b_frame() {
+    BitWriter header;
+    header.ue(0);
+    header.ue(1);
+    header.ue(3);
+    header.bits(14, 4);
+    header.bits(1, 1);
+    header.bits(0, 1);
+    header.bits(0, 1);
+    header.bits(0, 1);
+    header.bits(0, 1);
+    header.ue(0);
+    header.ue(0);
+    header.ue(1);
+    while (header.bit_count % 8) {
+        header.bits(1, 1);
+    }
+    CabacWriter cabac(make_cabac_slice_contexts(1, 0, 26));
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        cabac.decision(
+            false, 24 + static_cast<int>(macroblock % 4 != 0) +
+                       static_cast<int>(macroblock >= 4));
+        cabac.decision(false, 27);
+        cabac.zero_luma_cbp(
+            macroblock % 4 == 0 ? 15 : 0, macroblock < 4 ? 15 : 0);
+        cabac.decision(false, 77);
+        if (macroblock != 15) {
+            cabac.terminate(false);
+        }
+    }
+    return finish_cabac_frame(header, cabac);
+}
+
+std::vector<std::uint8_t> encode_cabac_residual_frame() {
+    BitWriter header;
+    header.ue(0);
+    header.ue(2);
+    header.ue(3);
+    header.bits(15, 4);
+    header.bits(0, 1);
+    header.ue(0);
+    header.ue(1);
+    while (header.bit_count % 8) {
+        header.bits(1, 1);
+    }
+    CabacWriter cabac(make_cabac_slice_contexts(2, 0, 26));
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        cabac.decision(false, 3);
+        for (int block = 0; block < 16; ++block) {
+            cabac.decision(true, 68);
+        }
+        cabac.decision(false, 64);
+        cabac.luma_cbp(
+            macroblock % 4 == 0 ? 15 : 0, macroblock < 4 ? 15 : 0,
+            macroblock == 15 ? 1 : 0);
+        cabac.decision(false, 77);
+        if (macroblock == 15) {
+            cabac.decision(false, 60);
+            cabac.decision(true, 93);
+            cabac.decision(true, 134);
+            cabac.decision(true, 195);
+            cabac.decision(false, 248);
+            cabac.bypass(false);
+            cabac.decision(false, 94);
+            cabac.decision(false, 95);
+            cabac.decision(false, 93);
+        }
+        if (macroblock != 15) {
+            cabac.terminate(false);
+        }
+    }
+    return finish_cabac_frame(header, cabac);
+}
+
 } // namespace
 
 std::vector<std::uint8_t> H264Encoder::sequence_parameter_set() const {
@@ -257,19 +780,7 @@ std::vector<std::uint8_t> H264Encoder::sequence_parameter_set() const {
 }
 
 std::vector<std::uint8_t> H264Encoder::picture_parameter_set() const {
-    BitWriter writer;
-    writer.ue(0);
-    writer.ue(0);
-    writer.bits(0, 2);
-    for (int index = 0; index < 3; ++index) {
-        writer.ue(0);
-    }
-    writer.bits(0b100, 3);
-    for (int index = 0; index < 3; ++index) {
-        writer.ue(0);
-    }
-    writer.bits(0b100, 3);
-    return writer.nal(0x68);
+    return encode_picture_parameter_set(0, false, 0);
 }
 
 std::vector<std::uint8_t> H264Encoder::encode_grey_frame(std::uint16_t idr_pic_id) const {
@@ -491,6 +1002,30 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
     }
     if (frame_index == 20) {
         return encode_b_frame();
+    }
+    if (frame_index >= 21 && frame_index <= 23) {
+        return encode_b_feature_frame(frame_index);
+    }
+    if (frame_index == 24) {
+        return encode_b_weighted_frame(true);
+    }
+    if (frame_index == 25) {
+        return encode_b_weighted_frame(false);
+    }
+    if (frame_index == 26) {
+        return encode_inter_residual_frame();
+    }
+    if (frame_index == 27) {
+        return encode_cabac_i_frame();
+    }
+    if (frame_index == 28) {
+        return encode_cabac_p_frame();
+    }
+    if (frame_index == 29) {
+        return encode_cabac_b_frame();
+    }
+    if (frame_index == 30) {
+        return encode_cabac_residual_frame();
     }
     return encode_pcm_frame(frame_index, frame_index == 1);
 }

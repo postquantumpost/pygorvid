@@ -330,15 +330,30 @@ def main() -> None:
             for frame_index, expected_hash in enumerate(feature_hashes, 10):
                 start = frame_index * frame_size
                 assert hashlib.sha256(decoded[start:start + frame_size]).hexdigest() == expected_hash
+            late_feature_hashes = (
+                "ae6cd10725fa57240445b4904b7c607f785f3a43a3743c2f78546e8426e3478f",
+                "ae6cd10725fa57240445b4904b7c607f785f3a43a3743c2f78546e8426e3478f",
+                "ae6cd10725fa57240445b4904b7c607f785f3a43a3743c2f78546e8426e3478f",
+                "ae6cd10725fa57240445b4904b7c607f785f3a43a3743c2f78546e8426e3478f",
+                "a0ffffecd14a3c12d437032204e8096d32bc54ea9e28cc8fa3a3140d88c3e410",
+                "7c910977bd22b95fc3cd715a752d1f24c8772909fcf9a719d63211b76b3ad2d3",
+                "fa997aa4bb9a65e10c75baf32bd44aa4c6fa0d9bc518fe4bf4705deae3031267",
+                "cb11e05cb5da949c0e0f5b5a7cb310df35a96a22c45d1ada70d950859fe697d1",
+                "cb11e05cb5da949c0e0f5b5a7cb310df35a96a22c45d1ada70d950859fe697d1",
+                "cb11e05cb5da949c0e0f5b5a7cb310df35a96a22c45d1ada70d950859fe697d1",
+                "fd300ab64d06b1badd003e64b6bace71baa42cf06eff7d27eb47e330da352c55",
+            )
+            for frame_index, expected_hash in enumerate(late_feature_hashes, 20):
+                start = frame_index * frame_size
+                assert hashlib.sha256(decoded[start:start + frame_size]).hexdigest() == expected_hash
+            feature_indices = set(range(4, 31)) - {5}
             decoded_gray_frames = b"".join(
                 decoded[index * frame_size:(index + 1) * frame_size]
-                for index in range(60) if index not in
-                (4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+                for index in range(60) if index not in feature_indices
             )
             expected_gray_frames = b"".join(
                 expected_video[index * frame_size:(index + 1) * frame_size]
-                for index in range(60) if index not in
-                (4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+                for index in range(60) if index not in feature_indices
             )
             assert decoded_gray_frames == expected_gray_frames
             assert b"\x00\x00\x03\x01" in payload

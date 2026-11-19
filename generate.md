@@ -120,6 +120,17 @@ prediction family and signals explicit non-default luma and chroma weights.
 Frame 20 is decoded after a shifted future P reference and before it in
 presentation order; it contains B_L0, B_L1, and bi-predicted 16×16
 macroblocks and is timed with signed MP4 composition offsets.
+Frames 21–30 extend the B and entropy paths. Frame 21 uses spatial direct
+16×16/8×8 prediction, frame 22 uses temporal direct derivation, and frame 23
+selects explicit L0, L1, and bi-predicted B partitions. Frame 24 carries
+explicit luma and chroma weight tables for both lists; frame 25 switches to
+POC-derived implicit weighting with unequal distances. Frame 26 adds sparse
+P-macroblock CAVLC residuals after stable inter motion. Frame 27 switches a
+picture parameter set to CABAC and exercises I macroblock type, prediction,
+CBP, and termination. Frame 28 adds CABAC P skip, type, motion, and CBP
+contexts; frame 29 covers CABAC B skip/direct and direct prediction. Frame 30
+adds CABAC significance, last-significance, coefficient-level, sign, and block
+termination paths, with deterministic sparse residual reconstruction.
 Gray IDR padding follows through frame 60; the padded duration is at least one
 second. All current pictures use High-profile I_PCM, I_16x16, Intra_4x4, P, or
 B syntax. The plan changes the

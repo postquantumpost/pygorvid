@@ -157,7 +157,11 @@ frames 12–16 cover skip runs, motion differences, 16×8/8×16 partitions, 8×8
 subpartitions, and fractional quarter-pel motion. Frames 17–19 add reference
 selection, list modification and adaptive marking, and explicit luma/chroma
 weights. Frame 20 is a B picture with L0, L1, and bi-prediction in reordered
-decode/presentation order. The remaining 39 frames are gray IDR padding. All
+decode/presentation order. Frames 21–23 add spatial and temporal direct B
+prediction plus B partition choices. Frames 24–25 use explicit and implicit
+weighted bi-prediction. Frame 26 adds P-slice CAVLC residual reconstruction.
+Frames 27–30 switch selected slices to CABAC and cover I, P, B/direct, and
+residual syntax. The remaining 29 frames are gray IDR padding. All
 pictures use High H.264 Level 2.0, with four-byte MP4 NAL lengths and signed
 composition offsets for the B-picture reorder. The audio
 track is uncompressed signed 16-bit

@@ -1265,10 +1265,6 @@ class H264Decoder:
             )
             b_skip_input = None
             if header.slice_type % 5 == 1:
-                if not header.direct_spatial_mv_pred:
-                    raise DecoderError(
-                        "temporal B direct requires co-located motion metadata in the reference buffer"
-                    )
                 direct_neighbors = derive_cabac_inter_macroblock_neighbor_state_from_history(
                     macroblock_address,
                     width_in_mbs,
@@ -1297,7 +1293,7 @@ class H264Decoder:
                     slice_type=header.slice_type,
                     macroblock_x=inter_input.macroblock_x,
                     macroblock_y=inter_input.macroblock_y,
-                    direct_spatial=True,
+                    direct_spatial=header.direct_spatial_mv_pred,
                     left_available=direct_neighbors.left_available,
                     left_skipped=direct_neighbors.left_skipped,
                     top_available=direct_neighbors.top_available,

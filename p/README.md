@@ -31,7 +31,7 @@ window stops the current slideshow. It cannot be combined with `--generate`,
 
 The `--generate` option natively writes exactly one second of 64x64 H.264 video
 (60 fps, High Level 2.0), including the progressive feature
-frames through frame 20 and gray padding through frame 60. Frame 2 tests
+frames through frame 30 and gray padding through frame 60. Frame 2 tests
 emulation prevention. It includes silent
 stereo 48 kHz 16-bit PCM audio (`sowt`, requiring a PCM-capable MP4 player).
 The initial `H264Encoder` and `Mp4Writer` objects are also exported:

@@ -1366,7 +1366,35 @@ def _derive_spatial_b_direct_partition(
     direct_8x8_inference: bool = False,
 ) -> CABACBDirectMacroblockResult:
     if not input.direct_spatial:
-        raise CABACError("temporal B direct requires co-located partition metadata")
+        if not input.colocated_motion_field:
+            raise CABACError("temporal B direct requires co-located partition metadata")
+        from .h264_reconstruction import ColocatedMotionFact
+        colocated = input.colocated_motion_field[
+            (partition_y // 4) * 4 + partition_x // 4
+        ]
+        if not isinstance(colocated, ColocatedMotionFact):
+            raise CABACError("B_Direct co-located motion field is invalid")
+        reference_indices = [colocated.reference_index, 0]
+        prediction_flags = [False, True]
+        motion_vectors = [(0, 0), (0, 0)]
+        if reference_indices[0] >= 0:
+            list0 = input.list0_references[colocated.reference_index]
+            tb = input.current_picture_order_count - list0.picture_order_count
+            td = input.list1_references[0].picture_order_count - list0.picture_order_count
+            scale = 0 if not td else (tb << 2) // td
+            motion_vectors[0] = (
+                colocated.vector.x * scale >> 2,
+                colocated.vector.y * scale >> 2,
+            )
+            motion_vectors[1] = (
+                motion_vectors[0][0] - colocated.vector.x,
+                motion_vectors[0][1] - colocated.vector.y,
+            )
+            prediction_flags[0] = True
+        return CABACBDirectMacroblockResult(
+            False, tuple(reference_indices), tuple(motion_vectors),
+            tuple(prediction_flags), (), (), (),
+        )
     from .h264_reconstruction import MotionVector, MotionVectorCandidate, predict_motion_vector
 
     def minimum_positive(left: int, right: int) -> int:

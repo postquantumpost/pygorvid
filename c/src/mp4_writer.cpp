@@ -13,7 +13,7 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::uint32_t kVideoFrameRate = 60;
 constexpr std::uint32_t kMinimumVideoFrameCount = kVideoFrameRate;
-constexpr std::uint32_t kGeneratedFeatureFrameCount = 21;
+constexpr std::uint32_t kGeneratedFeatureFrameCount = 31;
 constexpr std::uint32_t kAudioSampleRate = 48000;
 
 Bytes u32s(std::initializer_list<std::uint32_t> values) {
@@ -58,6 +58,52 @@ Bytes box(const std::string& kind, std::initializer_list<Bytes> parts) {
 
 Bytes full_box(const std::string& kind, std::uint32_t flags, Bytes payload = {}) {
     return box(kind, {u32s({flags}), payload});
+}
+
+Bytes picture_parameter_set(std::uint32_t pps_id, bool cabac,
+                            std::uint32_t weighted_bipred_idc) {
+    Bytes data;
+    std::size_t bit_count = 0;
+    const auto bits = [&data, &bit_count](std::uint32_t value, int count) {
+        for (int shift = count - 1; shift >= 0; --shift) {
+            if (bit_count % 8 == 0) {
+                data.push_back(0);
+            }
+            data.back() |= static_cast<std::uint8_t>(
+                ((value >> shift) & 1) << (7 - bit_count % 8));
+            ++bit_count;
+        }
+    };
+    const auto ue = [&bits](std::uint32_t value) {
+        int count = 0;
+        for (auto remaining = value + 1; remaining; remaining >>= 1) {
+            ++count;
+        }
+        bits(0, count - 1);
+        bits(value + 1, count);
+    };
+    ue(pps_id);
+    ue(0);
+    bits(cabac, 1);
+    bits(0, 1);
+    for (int index = 0; index < 3; ++index) ue(0);
+    bits(1, 1);
+    bits(weighted_bipred_idc, 2);
+    for (int index = 0; index < 3; ++index) ue(0);
+    bits(0b100, 3);
+    bits(1, 1);
+    while (bit_count % 8) bits(0, 1);
+    Bytes result{0x68};
+    int zeros = 0;
+    for (const auto value : data) {
+        if (zeros == 2 && value <= 3) {
+            result.push_back(3);
+            zeros = 0;
+        }
+        result.push_back(value);
+        zeros = value == 0 ? zeros + 1 : 0;
+    }
+    return result;
 }
 
 Bytes matrix() {
@@ -384,11 +430,21 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
         (audio_sample_count * 1000 + kAudioSampleRate - 1) / kAudioSampleRate;
     const auto movie_duration_ms = std::max(video_duration_ms, audio_duration_ms);
     const auto sps = encoder.sequence_parameter_set();
-    const auto pps = encoder.picture_parameter_set();
+    const std::array<Bytes, 4> pps_sets{{
+        encoder.picture_parameter_set(),
+        picture_parameter_set(1, false, 1),
+        picture_parameter_set(2, false, 2),
+        picture_parameter_set(3, true, 0),
+    }};
+    Bytes pps_payload{static_cast<std::uint8_t>(pps_sets.size())};
+    for (const auto& pps : pps_sets) {
+        const auto length = u16s({static_cast<std::uint16_t>(pps.size())});
+        pps_payload.insert(pps_payload.end(), length.begin(), length.end());
+        pps_payload.insert(pps_payload.end(), pps.begin(), pps.end());
+    }
     const auto avcc = box("avcC", {
         Bytes{1, sps[1], sps[2], sps[3], 0xff, 0xe1},
-        u16s({static_cast<std::uint16_t>(sps.size())}), sps, Bytes{1},
-        u16s({static_cast<std::uint16_t>(pps.size())}), pps,
+        u16s({static_cast<std::uint16_t>(sps.size())}), sps, pps_payload,
     });
     const auto visual = box("avc1", {
         Bytes(6), u16s({1}), Bytes(16), u16s({64, 64}),
@@ -401,7 +457,7 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
     const auto offset = static_cast<std::uint32_t>(ftyp.size()) + 8;
     std::vector<std::uint32_t> sync_samples;
     for (std::uint32_t sample = 1; sample <= frame_count; ++sample) {
-        if (sample <= 2 || sample > 21) {
+        if (sample <= 2 || sample > 31) {
             sync_samples.push_back(sample);
         }
     }
