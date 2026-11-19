@@ -113,6 +113,33 @@ int main() {
     }
     assert(residual_frame.chroma_u == directional_frame.chroma_u);
     assert(residual_frame.chroma_v == directional_frame.chroma_v);
+    const auto chroma_sample = encoder.encode_generated_frame(8);
+    const auto chroma_nal = std::vector<std::uint8_t>(
+        chroma_sample.begin() + 4, chroma_sample.end());
+    const auto chroma_header =
+        pygorvid::parse_idr_i_slice_header(chroma_nal, sps, pps);
+    assert(chroma_header.frame_num == 7);
+    assert(pygorvid::parse_nal_header(chroma_nal).unit_type == 1);
+    const auto chroma_frame =
+        pygorvid::decode_h264_reference_frame({chroma_nal}, sps, pps);
+    assert(chroma_frame.luma == residual_frame.luma);
+    bool chroma_u_changed = false;
+    bool chroma_v_changed = false;
+    for (int row = 0; row < 32; ++row) {
+        for (int column = 0; column < 32; ++column) {
+            const auto index = static_cast<std::size_t>(row * 32 + column);
+            if (row < 24 || column < 24) {
+                assert(chroma_frame.chroma_u[index] == residual_frame.chroma_u[index]);
+                assert(chroma_frame.chroma_v[index] == residual_frame.chroma_v[index]);
+            } else {
+                chroma_u_changed |=
+                    chroma_frame.chroma_u[index] != residual_frame.chroma_u[index];
+                chroma_v_changed |=
+                    chroma_frame.chroma_v[index] != residual_frame.chroma_v[index];
+            }
+        }
+    }
+    assert(chroma_u_changed && chroma_v_changed);
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));

@@ -99,6 +99,11 @@ Frame 8 is a reference non-IDR Intra_4x4 directional picture with one sparse
 4x4 luma residual in the final macroblock. Its CAVLC data uses a luma-only
 coded-block pattern, `mb_qp_delta=1`, one positive trailing-one coefficient,
 and zero-coefficient tokens for the other blocks in that 8x8 quadrant.
+Frame 9 preserves frame 8's luma content and adds CAVLC residuals to both 4:2:0
+chroma planes in the final macroblock. Each plane uses a one-coefficient 2x2
+DC block and a sparse 4x4 AC block, exercising chroma QP derivation, the chroma
+DC inverse transform, AC scan reconstruction, and positive and negative
+coefficient signs while leaving all other macroblocks unchanged.
 Gray IDR padding follows through frame 60; the padded duration is at least one
 second. All current pictures are Constrained Baseline I_PCM, I_16x16, or
 Intra_4x4. The plan changes the

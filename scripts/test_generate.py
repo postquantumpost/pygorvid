@@ -305,13 +305,18 @@ def main() -> None:
             assert hashlib.sha256(actual_frame8).hexdigest() == (
                 "f83d279e90e823b19c2950203ded192e9964eff998763210d4ff5242fd8d824c"
             )
+            frame9_start = 8 * frame_size
+            actual_frame9 = decoded[frame9_start:frame9_start + frame_size]
+            assert hashlib.sha256(actual_frame9).hexdigest() == (
+                "326dacef4f4277eceb45bcb38aba3bbc5cccab3b99e30eb12fc5ff2539dbec89"
+            )
             decoded_gray_frames = b"".join(
                 decoded[index * frame_size:(index + 1) * frame_size]
-                for index in range(60) if index not in (4, 6, 7)
+                for index in range(60) if index not in (4, 6, 7, 8)
             )
             expected_gray_frames = b"".join(
                 expected_video[index * frame_size:(index + 1) * frame_size]
-                for index in range(60) if index not in (4, 6, 7)
+                for index in range(60) if index not in (4, 6, 7, 8)
             )
             assert decoded_gray_frames == expected_gray_frames
             assert b"\x00\x00\x03\x01" in payload

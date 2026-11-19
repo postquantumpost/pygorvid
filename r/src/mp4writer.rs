@@ -3,7 +3,7 @@ use std::io;
 
 const VIDEO_FRAME_RATE: u32 = 60;
 const MIN_VIDEO_FRAME_COUNT: u32 = VIDEO_FRAME_RATE;
-const GENERATED_FEATURE_FRAME_COUNT: u32 = 8;
+const GENERATED_FEATURE_FRAME_COUNT: u32 = 9;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
 #[derive(Clone, Debug, Default)]
@@ -577,7 +577,7 @@ impl Mp4Writer {
         let ftyp = mp4_box(b"ftyp", &[b"isom", &u32s(&[0x200]), b"isomiso2avc1qt  "]);
         let offset = ftyp.len() as u32 + 8;
         let sync_samples: Vec<u32> = (1..=frame_count)
-            .filter(|sample| !matches!(*sample, 3 | 4 | 5 | 6 | 7 | 8))
+            .filter(|sample| !matches!(*sample, 3 | 4 | 5 | 6 | 7 | 8 | 9))
             .collect();
         let video_track = track(
             1,

@@ -81,10 +81,12 @@ class H264Encoder:
             return self._encode_intra4x4_directional_frame()
         if frame_index == 7:
             return self._encode_intra4x4_directional_frame(6, True)
+        if frame_index == 8:
+            return self._encode_intra4x4_directional_frame(7, True, True)
         return self._encode_pcm_frame(frame_index, frame_index == 1)
 
     def _encode_intra4x4_directional_frame(
-        self, frame_num: int = 5, residual: bool = False
+        self, frame_num: int = 5, residual: bool = False, chroma_residual: bool = False
     ) -> bytes:
         writer = _BitWriter()
         for value in (0, 2, 0):
@@ -133,7 +135,7 @@ class H264Encoder:
                     writer.bits(desired - (desired >= predicted), 3)
             writer.ue(0)
             if residual and macroblock == 15:
-                writer.ue(29)
+                writer.ue(42 if chroma_residual else 29)
                 writer.se(1)
                 # Positive trailing-one token, zero runs, then three empty blocks.
                 writer.bits(0b01, 2)
@@ -142,6 +144,16 @@ class H264Encoder:
                 writer.bits(1, 1)
                 writer.bits(1, 1)
                 writer.bits(1, 1)
+                if chroma_residual:
+                    # Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
+                    writer.bits(0b101, 3)
+                    writer.bits(0b111, 3)
+                    # One Cb and one Cr AC coefficient; remaining AC blocks are empty.
+                    for sign in (0, 1):
+                        writer.bits(0b01, 2)
+                        writer.bits(sign, 1)
+                        writer.bits(1, 1)
+                        writer.bits(0b111, 3)
             else:
                 writer.ue(3)
             macroblock_modes.append(list(modes))

@@ -116,6 +116,9 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 7 {
 		return e.encodeIntra4x4DirectionalFrame(6, true)
 	}
+	if frameIndex == 8 {
+		return e.encodeIntra4x4DirectionalFrameWithChromaResidual(7)
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
 }
 
@@ -159,6 +162,16 @@ func (e H264Encoder) encodeIntra4x4DCFrame() []byte {
 }
 
 func (e H264Encoder) encodeIntra4x4DirectionalFrame(frameNum uint32, residual bool) []byte {
+	return e.encodeIntra4x4DirectionalFrameInternal(frameNum, residual, false)
+}
+
+func (e H264Encoder) encodeIntra4x4DirectionalFrameWithChromaResidual(frameNum uint32) []byte {
+	return e.encodeIntra4x4DirectionalFrameInternal(frameNum, true, true)
+}
+
+func (e H264Encoder) encodeIntra4x4DirectionalFrameInternal(
+	frameNum uint32, residual, chromaResidual bool,
+) []byte {
 	w := h264BitWriter{}
 	for _, value := range []uint32{0, 2, 0} {
 		w.ue(value)
@@ -222,7 +235,11 @@ func (e H264Encoder) encodeIntra4x4DirectionalFrame(frameNum uint32, residual bo
 		}
 		w.ue(0)
 		if residual && mb == 15 {
-			w.ue(29)
+			cbpCode := uint32(29)
+			if chromaResidual {
+				cbpCode = 42
+			}
+			w.ue(cbpCode)
 			w.se(1)
 			// Positive trailing-one token, zero runs, then three empty blocks.
 			w.bits(0b01, 2)
@@ -231,6 +248,18 @@ func (e H264Encoder) encodeIntra4x4DirectionalFrame(frameNum uint32, residual bo
 			w.bits(1, 1)
 			w.bits(1, 1)
 			w.bits(1, 1)
+			if chromaResidual {
+				// Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
+				w.bits(0b101, 3)
+				w.bits(0b111, 3)
+				// One Cb and one Cr AC coefficient; remaining AC blocks are empty.
+				for _, sign := range []uint32{0, 1} {
+					w.bits(0b01, 2)
+					w.bits(sign, 1)
+					w.bits(1, 1)
+					w.bits(0b111, 3)
+				}
+			}
 		} else {
 			w.ue(3)
 		}

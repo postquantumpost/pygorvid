@@ -184,12 +184,12 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
         sample.insert(sample.end(), nal.begin(), nal.end());
         return sample;
     }
-    if (frame_index == 6 || frame_index == 7) {
+    if (frame_index == 6 || frame_index == 7 || frame_index == 8) {
         BitWriter writer;
         for (const auto value : {0u, 2u, 0u}) {
             writer.ue(value);
         }
-        writer.bits(frame_index == 6 ? 5 : 6, 4);
+        writer.bits(frame_index == 6 ? 5 : frame_index - 1, 4);
         writer.bits(0, 1);
         writer.ue(0);
         writer.ue(1);
@@ -256,8 +256,8 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
                 }
             }
             writer.ue(0);
-            if (frame_index == 7 && macroblock == 15) {
-                writer.ue(29);
+            if (frame_index >= 7 && macroblock == 15) {
+                writer.ue(frame_index == 8 ? 42 : 29);
                 writer.se(1);
                 // Positive trailing-one token, zero runs, then three empty blocks.
                 writer.bits(0b01, 2);
@@ -266,6 +266,18 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
                 writer.bits(1, 1);
                 writer.bits(1, 1);
                 writer.bits(1, 1);
+                if (frame_index == 8) {
+                    // Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
+                    writer.bits(0b101, 3);
+                    writer.bits(0b111, 3);
+                    // One Cb and one Cr AC coefficient; remaining AC blocks are empty.
+                    for (const std::uint32_t sign : {0u, 1u}) {
+                        writer.bits(0b01, 2);
+                        writer.bits(sign, 1);
+                        writer.bits(1, 1);
+                        writer.bits(0b111, 3);
+                    }
+                }
             } else {
                 writer.ue(3);
             }

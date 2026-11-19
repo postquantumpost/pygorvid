@@ -29,10 +29,10 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
     try:
         assert reader.sample_count == 60
         decoder = H264Decoder(reader, threads=1)
-        for index in (0, 1, 2, 3, 4, 5, 6, 7, 59):
+        for index in (0, 1, 2, 3, 4, 5, 6, 7, 8, 59):
             sample = reader.sample_at(index)
             assert (sample.dts_ticks, sample.pts_ticks, sample.duration_ticks) == (index, index, 1)
-            assert sample.is_sync == (index not in (2, 3, 4, 5, 6, 7))
+            assert sample.is_sync == (index not in (2, 3, 4, 5, 6, 7, 8))
             if index == 1:
                 assert b"\x00\x00\x03\x01" in sample.data
             if index == 2:
@@ -78,6 +78,14 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
                 )
                 assert (header.frame_num, header.slice_type) == (6, 2)
                 assert not header.idr and header.nal_ref_idc == 1
+            if index == 8:
+                header = parse_slice_header(
+                    sample.data[4:],
+                    parse_sps(H264Encoder().sequence_parameter_set()),
+                    parse_pps(H264Encoder().picture_parameter_set()),
+                )
+                assert (header.frame_num, header.slice_type) == (7, 2)
+                assert not header.idr and header.nal_ref_idc == 1
             frame = decoder.decode_frame(index)
             assert (frame.width, frame.height) == (64, 64)
             expected_luma = bytearray([128] * 4096)
@@ -107,6 +115,23 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
                     for column in range(48, 64)
                 )
                 assert frame.u == directional.u and frame.v == directional.v
+            elif index == 8:
+                luma_residual = decoder.decode_frame(7)
+                assert frame.y == luma_residual.y
+                for row in range(32):
+                    for column in range(32):
+                        if row < 24 or column < 24:
+                            offset = row * 32 + column
+                            assert frame.u[offset] == luma_residual.u[offset]
+                            assert frame.v[offset] == luma_residual.v[offset]
+                assert any(
+                    frame.u[row * 32 + column] != luma_residual.u[row * 32 + column]
+                    for row in range(24, 32) for column in range(24, 32)
+                )
+                assert any(
+                    frame.v[row * 32 + column] != luma_residual.v[row * 32 + column]
+                    for row in range(24, 32) for column in range(24, 32)
+                )
             else:
                 assert bytes(frame.y) == expected_luma
                 assert bytes(frame.u) == bytes(frame.v) == bytes([128]) * 1024

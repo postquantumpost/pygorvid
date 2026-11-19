@@ -108,10 +108,13 @@ impl H264Encoder {
             return self.encode_intra4x4_dc_frame();
         }
         if frame_index == 6 {
-            return self.encode_intra4x4_directional_frame(5, false);
+            return self.encode_intra4x4_directional_frame(5, false, false);
         }
         if frame_index == 7 {
-            return self.encode_intra4x4_directional_frame(6, true);
+            return self.encode_intra4x4_directional_frame(6, true, false);
+        }
+        if frame_index == 8 {
+            return self.encode_intra4x4_directional_frame(7, true, true);
         }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
@@ -192,7 +195,12 @@ impl H264Encoder {
         sample
     }
 
-    fn encode_intra4x4_directional_frame(&self, frame_num: u32, residual: bool) -> Vec<u8> {
+    fn encode_intra4x4_directional_frame(
+        &self,
+        frame_num: u32,
+        residual: bool,
+        chroma_residual: bool,
+    ) -> Vec<u8> {
         let mut writer = BitWriter::default();
         for value in [0, 2, 0] {
             writer.ue(value);
@@ -257,7 +265,7 @@ impl H264Encoder {
             }
             writer.ue(0);
             if residual && macroblock == 15 {
-                writer.ue(29);
+                writer.ue(if chroma_residual { 42 } else { 29 });
                 writer.se(1);
                 // Positive trailing-one token, zero runs, then three empty blocks.
                 writer.bits(0b01, 2);
@@ -266,6 +274,18 @@ impl H264Encoder {
                 writer.bits(1, 1);
                 writer.bits(1, 1);
                 writer.bits(1, 1);
+                if chroma_residual {
+                    // Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
+                    writer.bits(0b101, 3);
+                    writer.bits(0b111, 3);
+                    // One Cb and one Cr AC coefficient; remaining AC blocks are empty.
+                    for sign in [0, 1] {
+                        writer.bits(0b01, 2);
+                        writer.bits(sign, 1);
+                        writer.bits(1, 1);
+                        writer.bits(0b111, 3);
+                    }
+                }
             } else {
                 writer.ue(3);
             }
