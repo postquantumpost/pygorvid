@@ -104,6 +104,11 @@ chroma planes in the final macroblock. Each plane uses a one-coefficient 2x2
 DC block and a sparse 4x4 AC block, exercising chroma QP derivation, the chroma
 DC inverse transform, AC scan reconstruction, and positive and negative
 coefficient signs while leaving all other macroblocks unchanged.
+Frame 10 preserves frame 9's prediction and chroma residuals while expanding
+the final macroblock's luma CAVLC stream. Its four coded 4x4 blocks include a
+dense 16-coefficient block, alternating positive and negative levels, trailing
+ones, `total_zeros` and `run_before` syntax, and empty-block tokens selected
+from different neighboring `nC` contexts.
 Gray IDR padding follows through frame 60; the padded duration is at least one
 second. All current pictures are Constrained Baseline I_PCM, I_16x16, or
 Intra_4x4. The plan changes the

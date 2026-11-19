@@ -108,13 +108,16 @@ impl H264Encoder {
             return self.encode_intra4x4_dc_frame();
         }
         if frame_index == 6 {
-            return self.encode_intra4x4_directional_frame(5, false, false);
+            return self.encode_intra4x4_directional_frame(5, false, false, false);
         }
         if frame_index == 7 {
-            return self.encode_intra4x4_directional_frame(6, true, false);
+            return self.encode_intra4x4_directional_frame(6, true, false, false);
         }
         if frame_index == 8 {
-            return self.encode_intra4x4_directional_frame(7, true, true);
+            return self.encode_intra4x4_directional_frame(7, true, true, false);
+        }
+        if frame_index == 9 {
+            return self.encode_intra4x4_directional_frame(8, true, true, true);
         }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
@@ -200,6 +203,7 @@ impl H264Encoder {
         frame_num: u32,
         residual: bool,
         chroma_residual: bool,
+        expanded_cavlc: bool,
     ) -> Vec<u8> {
         let mut writer = BitWriter::default();
         for value in [0, 2, 0] {
@@ -267,13 +271,29 @@ impl H264Encoder {
             if residual && macroblock == 15 {
                 writer.ue(if chroma_residual { 42 } else { 29 });
                 writer.se(1);
-                // Positive trailing-one token, zero runs, then three empty blocks.
-                writer.bits(0b01, 2);
-                writer.bits(0, 1);
-                writer.bits(1, 1);
-                writer.bits(1, 1);
-                writer.bits(1, 1);
-                writer.bits(1, 1);
+                if expanded_cavlc {
+                    // nC = 0: sixteen alternating +2/-2 coefficients.
+                    writer.bits(0b0000_0000_0000_0100, 16);
+                    for index in 0..16 {
+                        writer.bits(if index % 2 == 0 { 2 } else { 3 }, 2);
+                    }
+                    // nC >= 8: three trailing ones and two total zeros.
+                    writer.bits(0b001011, 6);
+                    writer.bits(0b010, 3);
+                    writer.bits(0b110, 3);
+                    writer.bits(0b010, 3);
+                    // nC >= 8 followed by nC = 2 select different empty-block tables.
+                    writer.bits(0b000011, 6);
+                    writer.bits(0b11, 2);
+                } else {
+                    // Positive trailing-one token, zero runs, then three empty blocks.
+                    writer.bits(0b01, 2);
+                    writer.bits(0, 1);
+                    writer.bits(1, 1);
+                    writer.bits(1, 1);
+                    writer.bits(1, 1);
+                    writer.bits(1, 1);
+                }
                 if chroma_residual {
                     // Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
                     writer.bits(0b101, 3);

@@ -150,7 +150,9 @@ the remaining macroblocks, including modes derived from coded neighbors.
 Frame 8 retains that prediction family and adds a single sparse 4x4 CAVLC
 luma residual with a QP delta in the final macroblock. Frame 9 preserves that
 luma content and adds 4:2:0 chroma DC and AC residuals, exercising chroma QP
-derivation and DC transformation. The remaining 51 frames are gray IDR
+derivation and DC transformation. Frame 10 retains Frame 9's chroma and expands the final macroblock's
+luma CAVLC data to dense coefficients, trailing ones, signed levels, zero runs,
+and changing neighbor `nC` contexts. The remaining 50 frames are gray IDR
 padding. All pictures use
 Constrained Baseline H.264 Level 2.0, with four-byte MP4 NAL lengths. The audio
 track is uncompressed signed 16-bit

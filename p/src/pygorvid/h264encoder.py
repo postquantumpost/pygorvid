@@ -83,10 +83,13 @@ class H264Encoder:
             return self._encode_intra4x4_directional_frame(6, True)
         if frame_index == 8:
             return self._encode_intra4x4_directional_frame(7, True, True)
+        if frame_index == 9:
+            return self._encode_intra4x4_directional_frame(8, True, True, True)
         return self._encode_pcm_frame(frame_index, frame_index == 1)
 
     def _encode_intra4x4_directional_frame(
-        self, frame_num: int = 5, residual: bool = False, chroma_residual: bool = False
+        self, frame_num: int = 5, residual: bool = False,
+        chroma_residual: bool = False, expanded_cavlc: bool = False,
     ) -> bytes:
         writer = _BitWriter()
         for value in (0, 2, 0):
@@ -137,13 +140,27 @@ class H264Encoder:
             if residual and macroblock == 15:
                 writer.ue(42 if chroma_residual else 29)
                 writer.se(1)
-                # Positive trailing-one token, zero runs, then three empty blocks.
-                writer.bits(0b01, 2)
-                writer.bits(0, 1)
-                writer.bits(1, 1)
-                writer.bits(1, 1)
-                writer.bits(1, 1)
-                writer.bits(1, 1)
+                if expanded_cavlc:
+                    # nC = 0: sixteen non-trailing coefficients.
+                    writer.bits(0b0000000000000100, 16)
+                    for sign in (0, 1) * 8:
+                        writer.bits(2 if sign == 0 else 3, 2)
+                    # nC >= 8: three trailing ones, then two total zeros.
+                    writer.bits(0b001011, 6)
+                    writer.bits(0b010, 3)
+                    writer.bits(0b110, 3)
+                    writer.bits(0b010, 3)
+                    # nC >= 8 and then nC = 2 select different empty-block tables.
+                    writer.bits(0b000011, 6)
+                    writer.bits(0b11, 2)
+                else:
+                    # Positive trailing-one token, zero runs, then three empty blocks.
+                    writer.bits(0b01, 2)
+                    writer.bits(0, 1)
+                    writer.bits(1, 1)
+                    writer.bits(1, 1)
+                    writer.bits(1, 1)
+                    writer.bits(1, 1)
                 if chroma_residual:
                     # Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
                     writer.bits(0b101, 3)

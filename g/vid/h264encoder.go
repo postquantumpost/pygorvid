@@ -119,6 +119,9 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 8 {
 		return e.encodeIntra4x4DirectionalFrameWithChromaResidual(7)
 	}
+	if frameIndex == 9 {
+		return e.encodeIntra4x4DirectionalFrameInternal(8, true, true, true)
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
 }
 
@@ -162,15 +165,15 @@ func (e H264Encoder) encodeIntra4x4DCFrame() []byte {
 }
 
 func (e H264Encoder) encodeIntra4x4DirectionalFrame(frameNum uint32, residual bool) []byte {
-	return e.encodeIntra4x4DirectionalFrameInternal(frameNum, residual, false)
+	return e.encodeIntra4x4DirectionalFrameInternal(frameNum, residual, false, false)
 }
 
 func (e H264Encoder) encodeIntra4x4DirectionalFrameWithChromaResidual(frameNum uint32) []byte {
-	return e.encodeIntra4x4DirectionalFrameInternal(frameNum, true, true)
+	return e.encodeIntra4x4DirectionalFrameInternal(frameNum, true, true, false)
 }
 
 func (e H264Encoder) encodeIntra4x4DirectionalFrameInternal(
-	frameNum uint32, residual, chromaResidual bool,
+	frameNum uint32, residual, chromaResidual, expandedCAVLC bool,
 ) []byte {
 	w := h264BitWriter{}
 	for _, value := range []uint32{0, 2, 0} {
@@ -241,13 +244,33 @@ func (e H264Encoder) encodeIntra4x4DirectionalFrameInternal(
 			}
 			w.ue(cbpCode)
 			w.se(1)
-			// Positive trailing-one token, zero runs, then three empty blocks.
-			w.bits(0b01, 2)
-			w.bits(0, 1)
-			w.bits(1, 1)
-			w.bits(1, 1)
-			w.bits(1, 1)
-			w.bits(1, 1)
+			if expandedCAVLC {
+				// nC = 0: sixteen alternating +2/-2 coefficients.
+				w.bits(0b0000000000000100, 16)
+				for index := 0; index < 16; index++ {
+					value := uint32(2)
+					if index%2 != 0 {
+						value = 3
+					}
+					w.bits(value, 2)
+				}
+				// nC >= 8: three trailing ones and two total zeros.
+				w.bits(0b001011, 6)
+				w.bits(0b010, 3)
+				w.bits(0b110, 3)
+				w.bits(0b010, 3)
+				// nC >= 8 followed by nC = 2 select different empty-block tables.
+				w.bits(0b000011, 6)
+				w.bits(0b11, 2)
+			} else {
+				// Positive trailing-one token, zero runs, then three empty blocks.
+				w.bits(0b01, 2)
+				w.bits(0, 1)
+				w.bits(1, 1)
+				w.bits(1, 1)
+				w.bits(1, 1)
+				w.bits(1, 1)
+			}
 			if chromaResidual {
 				// Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
 				w.bits(0b101, 3)

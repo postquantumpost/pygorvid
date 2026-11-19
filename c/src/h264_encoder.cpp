@@ -184,7 +184,7 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
         sample.insert(sample.end(), nal.begin(), nal.end());
         return sample;
     }
-    if (frame_index == 6 || frame_index == 7 || frame_index == 8) {
+    if (frame_index >= 6 && frame_index <= 9) {
         BitWriter writer;
         for (const auto value : {0u, 2u, 0u}) {
             writer.ue(value);
@@ -257,16 +257,32 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
             }
             writer.ue(0);
             if (frame_index >= 7 && macroblock == 15) {
-                writer.ue(frame_index == 8 ? 42 : 29);
+                writer.ue(frame_index >= 8 ? 42 : 29);
                 writer.se(1);
-                // Positive trailing-one token, zero runs, then three empty blocks.
-                writer.bits(0b01, 2);
-                writer.bits(0, 1);
-                writer.bits(1, 1);
-                writer.bits(1, 1);
-                writer.bits(1, 1);
-                writer.bits(1, 1);
-                if (frame_index == 8) {
+                if (frame_index == 9) {
+                    // nC = 0: sixteen alternating +2/-2 coefficients.
+                    writer.bits(0b0000000000000100, 16);
+                    for (int index = 0; index < 16; ++index) {
+                        writer.bits(index % 2 == 0 ? 2 : 3, 2);
+                    }
+                    // nC >= 8: three trailing ones and two total zeros.
+                    writer.bits(0b001011, 6);
+                    writer.bits(0b010, 3);
+                    writer.bits(0b110, 3);
+                    writer.bits(0b010, 3);
+                    // nC >= 8 followed by nC = 2 select different empty-block tables.
+                    writer.bits(0b000011, 6);
+                    writer.bits(0b11, 2);
+                } else {
+                    // Positive trailing-one token, zero runs, then three empty blocks.
+                    writer.bits(0b01, 2);
+                    writer.bits(0, 1);
+                    writer.bits(1, 1);
+                    writer.bits(1, 1);
+                    writer.bits(1, 1);
+                    writer.bits(1, 1);
+                }
+                if (frame_index >= 8) {
                     // Cb DC +1 and Cr DC -1, each at the sole 2x2 DC coefficient.
                     writer.bits(0b101, 3);
                     writer.bits(0b111, 3);

@@ -140,6 +140,29 @@ int main() {
         }
     }
     assert(chroma_u_changed && chroma_v_changed);
+    const auto expanded_sample = encoder.encode_generated_frame(9);
+    const auto expanded_nal = std::vector<std::uint8_t>(
+        expanded_sample.begin() + 4, expanded_sample.end());
+    const auto expanded_header =
+        pygorvid::parse_idr_i_slice_header(expanded_nal, sps, pps);
+    assert(expanded_header.frame_num == 8);
+    assert(pygorvid::parse_nal_header(expanded_nal).unit_type == 1);
+    const auto expanded_frame =
+        pygorvid::decode_h264_reference_frame({expanded_nal}, sps, pps);
+    assert(expanded_frame.chroma_u == chroma_frame.chroma_u);
+    assert(expanded_frame.chroma_v == chroma_frame.chroma_v);
+    bool luma_changed = false;
+    for (int row = 0; row < 64; ++row) {
+        for (int column = 0; column < 64; ++column) {
+            const auto index = static_cast<std::size_t>(row * 64 + column);
+            if (row < 48 || column < 48) {
+                assert(expanded_frame.luma[index] == chroma_frame.luma[index]);
+            } else {
+                luma_changed |= expanded_frame.luma[index] != chroma_frame.luma[index];
+            }
+        }
+    }
+    assert(luma_changed);
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));
