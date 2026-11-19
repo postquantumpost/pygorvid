@@ -11,7 +11,7 @@ import (
 const (
 	generatedVideoFrameRate     = uint32(60)
 	minGeneratedVideoFrameCount = uint32(generatedVideoFrameRate)
-	generatedFeatureFrameCount  = uint32(10)
+	generatedFeatureFrameCount  = uint32(21)
 	generatedAudioSampleRate    = uint32(48000)
 )
 
@@ -267,7 +267,7 @@ func mp4Matrix() []byte {
 	return mp4U32(0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
 }
 
-func mp4Track(id uint32, entry, sizes []byte, count, timescale, durationMS, offset uint32, video bool, syncSamples []uint32) []byte {
+func mp4Track(id uint32, entry, sizes []byte, count, timescale, durationMS, offset uint32, video bool, syncSamples []uint32, compositionOffsets [][2]int32) []byte {
 	var dimension uint32
 	var volume uint16 = 0x100
 	handler, name := "soun", "Audio\x00"
@@ -283,8 +283,15 @@ func mp4Track(id uint32, entry, sizes []byte, count, timescale, durationMS, offs
 	hdlr := mp4FullBox("hdlr", 0, mp4U32(0), []byte(handler), make([]byte, 12), []byte(name))
 	dinf := mp4Box("dinf", mp4FullBox("dref", 0, mp4U32(1), mp4FullBox("url ", 1)))
 	stblParts := [][]byte{mp4FullBox("stsd", 0, mp4U32(1), entry),
-		mp4FullBox("stts", 0, mp4U32(1, count, 1)),
-		mp4FullBox("stsc", 0, mp4U32(1, 1, count, 1)), sizes}
+		mp4FullBox("stts", 0, mp4U32(1, count, 1))}
+	if len(compositionOffsets) != 0 {
+		parts := [][]byte{mp4U32(0x01000000, uint32(len(compositionOffsets)))}
+		for _, entry := range compositionOffsets {
+			parts = append(parts, mp4U32(uint32(entry[0]), uint32(entry[1])))
+		}
+		stblParts = append(stblParts, mp4Box("ctts", parts...))
+	}
+	stblParts = append(stblParts, mp4FullBox("stsc", 0, mp4U32(1, 1, count, 1)), sizes)
 	if len(syncSamples) != 0 {
 		stblParts = append(stblParts, mp4FullBox("stss", 0,
 			mp4U32(append([]uint32{uint32(len(syncSamples))}, syncSamples...)...)))
@@ -349,14 +356,15 @@ func (w Mp4Writer) EncodeWithMetadata(encoder H264Encoder, metadata *Mp4Metadata
 	offset := uint32(len(ftyp) + 8)
 	syncSamples := make([]uint32, 0, frameCount-1)
 	for sample := uint32(1); sample <= frameCount; sample++ {
-		if sample != 3 && sample != 4 && sample != 5 && sample != 6 && sample != 7 && sample != 8 && sample != 9 && sample != 10 {
+		if sample <= 2 || sample > 21 {
 			syncSamples = append(syncSamples, sample)
 		}
 	}
 	videoTrack := mp4Track(1, visual, mp4FullBox("stsz", 0, mp4U32(sampleSizes...)),
-		frameCount, generatedVideoFrameRate, videoDurationMS, offset, true, syncSamples)
+		frameCount, generatedVideoFrameRate, videoDurationMS, offset, true, syncSamples,
+		[][2]int32{{19, 0}, {1, 1}, {1, -1}, {int32(frameCount - 21), 0}})
 	audioTrack := mp4Track(2, sound, mp4FullBox("stsz", 0, mp4U32(4, audioSampleCount)),
-		audioSampleCount, generatedAudioSampleRate, audioDurationMS, offset+uint32(len(video)), false, nil)
+		audioSampleCount, generatedAudioSampleRate, audioDurationMS, offset+uint32(len(video)), false, nil, nil)
 	mvhd := mp4FullBox("mvhd", 0, mp4U32(0, 0, 1000, movieDurationMS, 0x10000), mp4U16(0x100, 0),
 		make([]byte, 8), mp4Matrix(), make([]byte, 24), mp4U32(3))
 	result := append(ftyp, mp4Box("mdat", video, audio)...)

@@ -41,10 +41,15 @@ class H264Encoder:
 
     def sequence_parameter_set(self) -> bytes:
         writer = _BitWriter()
-        writer.bits(66, 8)
-        writer.bits(0xC0, 8)
+        writer.bits(100, 8)
+        writer.bits(0, 8)
         writer.bits(20, 8)
-        for value in (0, 0, 2, 1):
+        writer.ue(0)
+        for value in (1, 0, 0):
+            writer.ue(value)
+        writer.bits(0, 1)
+        writer.bits(0, 1)
+        for value in (0, 2, 2):
             writer.ue(value)
         writer.bits(0, 1)
         writer.ue(3)
@@ -59,7 +64,8 @@ class H264Encoder:
         writer.bits(0, 2)
         for _ in range(3):
             writer.ue(0)
-        writer.bits(0, 3)
+        writer.bits(1, 1)
+        writer.bits(0, 2)
         for _ in range(3):
             writer.ue(0)  # Signed Exp-Golomb zero has the same representation.
         writer.bits(0b100, 3)
@@ -85,7 +91,154 @@ class H264Encoder:
             return self._encode_intra4x4_directional_frame(7, True, True)
         if frame_index == 9:
             return self._encode_intra4x4_directional_frame(8, True, True, True)
+        if 10 <= frame_index <= 18:
+            return self._encode_p_frame(frame_index)
+        if frame_index == 19:
+            return self._encode_p_frame(19, future_reference=True)
+        if frame_index == 20:
+            return self._encode_b_frame()
         return self._encode_pcm_frame(frame_index, frame_index == 1)
+
+    @staticmethod
+    def _prediction_weight_table(writer: _BitWriter, reference_count: int,
+                                 explicit: bool = False) -> None:
+        writer.ue(0)
+        writer.ue(0)
+        for _ in range(reference_count):
+            if explicit:
+                writer.bits(1, 1)
+                writer.se(2)
+                writer.se(-16)
+                writer.bits(1, 1)
+                writer.se(2)
+                writer.se(8)
+                writer.se(2)
+                writer.se(-8)
+            else:
+                writer.bits(0, 1)
+                writer.bits(0, 1)
+
+    @staticmethod
+    def _write_p_macroblock(writer: _BitWriter, kind: int, vectors: tuple[tuple[int, int], ...],
+                            references: tuple[int, ...] = (), multiple_references: bool = False,
+                            sub_types: tuple[int, ...] = ()) -> None:
+        writer.ue(kind)
+        if kind in (3, 4):
+            for sub_type in sub_types or (0, 1, 2, 3):
+                writer.ue(sub_type)
+        for partition, vector in enumerate(vectors):
+            if multiple_references and kind != 4:
+                writer.bits(int(references[partition] == 0), 1)
+            writer.se(vector[0])
+            writer.se(vector[1])
+        writer.ue(0)
+
+    def _encode_p_frame(self, frame_index: int, future_reference: bool = False) -> bytes:
+        writer = _BitWriter()
+        writer.ue(0)
+        writer.ue(0)
+        writer.ue(0)
+        writer.bits((frame_index - 1) & 15, 4)
+
+        multiple_references = frame_index in (16, 17)
+        writer.bits(int(multiple_references), 1)
+        reference_count = 2 if multiple_references else 1
+        if multiple_references:
+            writer.ue(1)
+
+        reordered = frame_index == 17
+        writer.bits(int(reordered), 1)
+        if reordered:
+            writer.ue(0)
+            writer.ue(1)
+            writer.ue(3)
+
+        self._prediction_weight_table(writer, reference_count, frame_index == 18)
+        adaptive_marking = reordered
+        writer.bits(int(adaptive_marking), 1)
+        if adaptive_marking:
+            writer.ue(1)
+            writer.ue(0)
+            writer.ue(0)
+        writer.ue(0)
+        writer.ue(1)
+
+        if frame_index == 10:
+            for _ in range(16):
+                writer.ue(0)
+                self._write_p_macroblock(writer, 0, ((0, 0),))
+        elif frame_index == 11:
+            writer.ue(0)
+            self._write_p_macroblock(writer, 0, ((0, 0),))
+            writer.ue(14)
+            self._write_p_macroblock(writer, 0, ((0, 0),))
+        elif frame_index == 12:
+            motion = ((0, 0), (4, 0), (-4, 0), (0, 4), (0, -4))
+            for macroblock in range(16):
+                writer.ue(0)
+                self._write_p_macroblock(writer, 0, (motion[macroblock % len(motion)],))
+        elif frame_index == 13:
+            for macroblock in range(16):
+                writer.ue(0)
+                kind = 1 if macroblock % 2 == 0 else 2
+                self._write_p_macroblock(writer, kind, ((4, 0), (-4, 4)))
+        elif frame_index == 14:
+            for macroblock in range(16):
+                writer.ue(0)
+                kind = 3 if macroblock % 2 == 0 else 4
+                sub_types = (0, 1, 2, 3)
+                counts = (1, 2, 2, 4)
+                vectors = tuple(
+                    ((sub_index - 1) * 4, (part - 1) * 4)
+                    for sub_index, sub_type in enumerate(sub_types)
+                    for part in range(counts[sub_type])
+                )
+                self._write_p_macroblock(writer, kind, vectors, sub_types=sub_types)
+        elif frame_index == 15:
+            vectors = ((1, 0), (-1, 2), (2, -1), (-2, 1))
+            for macroblock in range(16):
+                writer.ue(0)
+                self._write_p_macroblock(writer, 0, (vectors[macroblock % 4],))
+        elif frame_index in (16, 17):
+            references = tuple(macroblock % 2 for macroblock in range(16))
+            for macroblock, reference in enumerate(references):
+                writer.ue(0)
+                self._write_p_macroblock(
+                    writer, 0, ((0, 0),), (reference,), True
+                )
+        elif frame_index == 19:
+            for _ in range(16):
+                writer.ue(0)
+                self._write_p_macroblock(writer, 0, ((4, 0),))
+        else:
+            for _ in range(16):
+                writer.ue(0)
+                self._write_p_macroblock(writer, 0, ((0, 0),))
+        nal = writer.nal(0x21)
+        return len(nal).to_bytes(4, "big") + nal
+
+    def _encode_b_frame(self) -> bytes:
+        writer = _BitWriter()
+        writer.ue(0)
+        writer.ue(1)
+        writer.ue(0)
+        writer.bits(2, 4)
+        writer.bits(1, 1)
+        writer.bits(0, 1)
+        writer.bits(0, 1)
+        writer.bits(0, 1)
+        writer.ue(0)
+        writer.ue(1)
+        for macroblock in range(16):
+            writer.ue(0)
+            writer.ue(1 + macroblock % 3)
+            active_lists = 1 if macroblock % 3 < 2 else 2
+            for _ in range(active_lists):
+                writer.se(0)
+                writer.se(0)
+            writer.ue(0)
+        nal = writer.nal(0x01)
+        return len(nal).to_bytes(4, "big") + nal
 
     def _encode_intra4x4_directional_frame(
         self, frame_num: int = 5, residual: bool = False,

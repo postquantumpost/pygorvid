@@ -272,7 +272,7 @@ def main() -> None:
             assert len(metadata["streams"]) == 2
             video, audio = metadata["streams"]
             assert video["codec_type"] == "video" and video["codec_name"] == "h264"
-            assert video["profile"] == "Constrained Baseline" and video["level"] == 20
+            assert video["profile"] == "High" and video["level"] == 20
             assert (video["width"], video["height"]) == (64, 64)
             assert video["r_frame_rate"] == "60/1" and video["nb_frames"] == "60"
             assert video["pix_fmt"] == "yuv420p"
@@ -315,13 +315,30 @@ def main() -> None:
             assert hashlib.sha256(actual_frame10).hexdigest() == (
                 "933763e337d48f56df83168a8c9433055da5b678030c2fe960d95c1f18102d0a"
             )
+            feature_hashes = (
+                "933763e337d48f56df83168a8c9433055da5b678030c2fe960d95c1f18102d0a",
+                "933763e337d48f56df83168a8c9433055da5b678030c2fe960d95c1f18102d0a",
+                "7637b3980ea7fb06252271dc958407b87b2cacfa6374e2444a6c8f4b1b559d1d",
+                "41f328c477bc45edee60be8e89d479c38cfcb9cbb82764f988bbb6227a971a03",
+                "aacfeb1c648b93c228b6d64b9cc4b6eb04770f1fffdc51fc7a8dc78d9972aeb6",
+                "544adffe8485d436818520d96c12516afa353b9440e7a473b6377e4729267a66",
+                "b734e9472ad83efaf0ec4a0f3837ca1d5605628bee92130d6132deb59c2d625d",
+                "b734e9472ad83efaf0ec4a0f3837ca1d5605628bee92130d6132deb59c2d625d",
+                "c5b8b1ea8f99af7485fea7ee382384caa819fdc502b545a49ce07cff098ed29e",
+                "d306eb7724c005acb32db2ddc9e248493356f9d87df8e1085834e90e92e1200d",
+            )
+            for frame_index, expected_hash in enumerate(feature_hashes, 10):
+                start = frame_index * frame_size
+                assert hashlib.sha256(decoded[start:start + frame_size]).hexdigest() == expected_hash
             decoded_gray_frames = b"".join(
                 decoded[index * frame_size:(index + 1) * frame_size]
-                for index in range(60) if index not in (4, 6, 7, 8, 9)
+                for index in range(60) if index not in
+                (4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
             )
             expected_gray_frames = b"".join(
                 expected_video[index * frame_size:(index + 1) * frame_size]
-                for index in range(60) if index not in (4, 6, 7, 8, 9)
+                for index in range(60) if index not in
+                (4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
             )
             assert decoded_gray_frames == expected_gray_frames
             assert b"\x00\x00\x03\x01" in payload

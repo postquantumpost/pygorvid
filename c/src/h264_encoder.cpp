@@ -61,14 +61,192 @@ public:
     }
 };
 
+void write_prediction_weight_table(
+    BitWriter& writer, int reference_count, bool explicit_weights) {
+    writer.ue(0);
+    writer.ue(0);
+    for (int index = 0; index < reference_count; ++index) {
+        if (explicit_weights) {
+            writer.bits(1, 1);
+            writer.se(2);
+            writer.se(-16);
+            writer.bits(1, 1);
+            writer.se(2);
+            writer.se(8);
+            writer.se(2);
+            writer.se(-8);
+        } else {
+            writer.bits(0, 1);
+            writer.bits(0, 1);
+        }
+    }
+}
+
+void write_p_macroblock(
+    BitWriter& writer, int kind,
+    const std::vector<std::array<std::int32_t, 2>>& vectors,
+    const std::vector<int>& references = {},
+    bool multiple_references = false,
+    const std::vector<int>& sub_types = {}) {
+    writer.ue(kind);
+    if (kind == 3 || kind == 4) {
+        for (const int sub_type : sub_types) {
+            writer.ue(sub_type);
+        }
+    }
+    for (std::size_t partition = 0; partition < vectors.size(); ++partition) {
+        if (multiple_references && kind != 4) {
+            writer.bits(references[partition] == 0, 1);
+        }
+        writer.se(vectors[partition][0]);
+        writer.se(vectors[partition][1]);
+    }
+    writer.ue(0);
+}
+
+std::vector<std::uint8_t> sized_nal(BitWriter& writer, std::uint8_t header) {
+    const auto nal = writer.nal(header);
+    const auto size = static_cast<std::uint32_t>(nal.size());
+    std::vector<std::uint8_t> sample;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        sample.push_back(static_cast<std::uint8_t>(size >> shift));
+    }
+    sample.insert(sample.end(), nal.begin(), nal.end());
+    return sample;
+}
+
+std::vector<std::uint8_t> encode_p_frame(std::uint16_t frame_index) {
+    BitWriter writer;
+    writer.ue(0);
+    writer.ue(0);
+    writer.ue(0);
+    writer.bits((frame_index - 1) & 15, 4);
+    const bool multiple_references = frame_index == 16 || frame_index == 17;
+    writer.bits(multiple_references, 1);
+    const int reference_count = multiple_references ? 2 : 1;
+    if (multiple_references) {
+        writer.ue(1);
+    }
+    const bool reordered = frame_index == 17;
+    writer.bits(reordered, 1);
+    if (reordered) {
+        writer.ue(0);
+        writer.ue(1);
+        writer.ue(3);
+    }
+    write_prediction_weight_table(writer, reference_count, frame_index == 18);
+    writer.bits(reordered, 1);
+    if (reordered) {
+        writer.ue(1);
+        writer.ue(0);
+        writer.ue(0);
+    }
+    writer.ue(0);
+    writer.ue(1);
+    if (frame_index == 10) {
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 0, {{{0, 0}}});
+        }
+    } else if (frame_index == 11) {
+        writer.ue(0);
+        write_p_macroblock(writer, 0, {{{0, 0}}});
+        writer.ue(14);
+        write_p_macroblock(writer, 0, {{{0, 0}}});
+    } else if (frame_index == 12) {
+        const std::array<std::array<std::int32_t, 2>, 5> motion{{
+            {{0, 0}}, {{4, 0}}, {{-4, 0}}, {{0, 4}}, {{0, -4}},
+        }};
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 0, {motion[macroblock % motion.size()]});
+        }
+    } else if (frame_index == 13) {
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 1 + macroblock % 2,
+                               {{{4, 0}}, {{-4, 4}}});
+        }
+    } else if (frame_index == 14) {
+        const std::vector<int> sub_types{0, 1, 2, 3};
+        const std::array<int, 4> counts{{1, 2, 2, 4}};
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            std::vector<std::array<std::int32_t, 2>> vectors;
+            for (std::size_t sub = 0; sub < sub_types.size(); ++sub) {
+                for (int part = 0; part < counts[sub_types[sub]]; ++part) {
+                    vectors.push_back({{(static_cast<int>(sub) - 1) * 4,
+                                        (part - 1) * 4}});
+                }
+            }
+            write_p_macroblock(writer, 3 + macroblock % 2, vectors,
+                               {}, false, sub_types);
+        }
+    } else if (frame_index == 15) {
+        const std::array<std::array<std::int32_t, 2>, 4> motion{{
+            {{1, 0}}, {{-1, 2}}, {{2, -1}}, {{-2, 1}},
+        }};
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 0, {motion[macroblock % 4]});
+        }
+    } else if (frame_index == 16 || frame_index == 17) {
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 0, {{{0, 0}}}, {macroblock % 2}, true);
+        }
+    } else if (frame_index == 19) {
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 0, {{{4, 0}}});
+        }
+    } else {
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(0);
+            write_p_macroblock(writer, 0, {{{0, 0}}});
+        }
+    }
+    return sized_nal(writer, 0x21);
+}
+
+std::vector<std::uint8_t> encode_b_frame() {
+    BitWriter writer;
+    writer.ue(0);
+    writer.ue(1);
+    writer.ue(0);
+    writer.bits(2, 4);
+    writer.bits(1, 1);
+    writer.bits(0, 1);
+    writer.bits(0, 1);
+    writer.bits(0, 1);
+    writer.ue(0);
+    writer.ue(1);
+    for (int macroblock = 0; macroblock < 16; ++macroblock) {
+        writer.ue(0);
+        writer.ue(1 + macroblock % 3);
+        for (int list = 0; list < (macroblock % 3 == 2 ? 2 : 1); ++list) {
+            writer.se(0);
+            writer.se(0);
+        }
+        writer.ue(0);
+    }
+    return sized_nal(writer, 0x01);
+}
+
 } // namespace
 
 std::vector<std::uint8_t> H264Encoder::sequence_parameter_set() const {
     BitWriter writer;
-    writer.bits(66, 8);
-    writer.bits(0xc0, 8);
+    writer.bits(100, 8);
+    writer.bits(0, 8);
     writer.bits(20, 8);
-    for (const auto value : {0u, 0u, 2u, 1u}) {
+    writer.ue(0);
+    for (const auto value : {1u, 0u, 0u}) {
+        writer.ue(value);
+    }
+    writer.bits(0, 1);
+    writer.bits(0, 1);
+    for (const auto value : {0u, 2u, 2u}) {
         writer.ue(value);
     }
     writer.bits(0, 1);
@@ -86,7 +264,7 @@ std::vector<std::uint8_t> H264Encoder::picture_parameter_set() const {
     for (int index = 0; index < 3; ++index) {
         writer.ue(0);
     }
-    writer.bits(0, 3);
+    writer.bits(0b100, 3);
     for (int index = 0; index < 3; ++index) {
         writer.ue(0);
     }
@@ -307,6 +485,12 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
         }
         sample.insert(sample.end(), nal.begin(), nal.end());
         return sample;
+    }
+    if (frame_index >= 10 && frame_index <= 19) {
+        return encode_p_frame(frame_index);
+    }
+    if (frame_index == 20) {
+        return encode_b_frame();
     }
     return encode_pcm_frame(frame_index, frame_index == 1);
 }

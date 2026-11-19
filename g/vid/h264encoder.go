@@ -67,10 +67,16 @@ func NewH264Encoder() H264Encoder { return H264Encoder{} }
 
 func (e H264Encoder) SequenceParameterSet() []byte {
 	w := h264BitWriter{}
-	w.bits(66, 8)
-	w.bits(0xc0, 8)
+	w.bits(100, 8)
+	w.bits(0, 8)
 	w.bits(20, 8)
-	for _, value := range []uint32{0, 0, 2, 1} {
+	w.ue(0)
+	for _, value := range []uint32{1, 0, 0} {
+		w.ue(value)
+	}
+	w.bits(0, 1)
+	w.bits(0, 1)
+	for _, value := range []uint32{0, 2, 2} {
 		w.ue(value)
 	}
 	w.bits(0, 1)
@@ -88,7 +94,7 @@ func (e H264Encoder) PictureParameterSet() []byte {
 	for i := 0; i < 3; i++ {
 		w.ue(0)
 	}
-	w.bits(0, 3)
+	w.bits(0b100, 3)
 	for i := 0; i < 3; i++ {
 		w.ue(0)
 	}
@@ -122,7 +128,182 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex == 9 {
 		return e.encodeIntra4x4DirectionalFrameInternal(8, true, true, true)
 	}
+	if frameIndex >= 10 && frameIndex <= 18 {
+		return e.encodePFrame(frameIndex)
+	}
+	if frameIndex == 19 {
+		return e.encodePFrame(19)
+	}
+	if frameIndex == 20 {
+		return e.encodeBFrame()
+	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
+}
+
+func (w *h264BitWriter) predictionWeightTable(referenceCount int, explicit bool) {
+	w.ue(0)
+	w.ue(0)
+	for index := 0; index < referenceCount; index++ {
+		if explicit {
+			w.bits(1, 1)
+			w.se(2)
+			w.se(-16)
+			w.bits(1, 1)
+			w.se(2)
+			w.se(8)
+			w.se(2)
+			w.se(-8)
+		} else {
+			w.bits(0, 1)
+			w.bits(0, 1)
+		}
+	}
+}
+
+func (w *h264BitWriter) pMacroblock(kind int, vectors [][2]int32, references []int, multipleReferences bool, subTypes []int) {
+	w.ue(uint32(kind))
+	if kind == 3 || kind == 4 {
+		for _, subType := range subTypes {
+			w.ue(uint32(subType))
+		}
+	}
+	for partition, vector := range vectors {
+		if multipleReferences && kind != 4 {
+			if references[partition] == 0 {
+				w.bits(1, 1)
+			} else {
+				w.bits(0, 1)
+			}
+		}
+		w.se(vector[0])
+		w.se(vector[1])
+	}
+	w.ue(0)
+}
+
+func (e H264Encoder) encodePFrame(frameIndex uint16) []byte {
+	w := h264BitWriter{}
+	w.ue(0)
+	w.ue(0)
+	w.ue(0)
+	w.bits(uint32(frameIndex-1)&15, 4)
+	multipleReferences := frameIndex == 16 || frameIndex == 17
+	referenceCount := 1
+	w.bits(boolUint32(multipleReferences), 1)
+	if multipleReferences {
+		w.ue(1)
+		referenceCount = 2
+	}
+	reordered := frameIndex == 17
+	w.bits(boolUint32(reordered), 1)
+	if reordered {
+		w.ue(0)
+		w.ue(1)
+		w.ue(3)
+	}
+	w.predictionWeightTable(referenceCount, frameIndex == 18)
+	w.bits(boolUint32(reordered), 1)
+	if reordered {
+		w.ue(1)
+		w.ue(0)
+		w.ue(0)
+	}
+	w.ue(0)
+	w.ue(1)
+
+	switch frameIndex {
+	case 10:
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(0, [][2]int32{{0, 0}}, nil, false, nil)
+		}
+	case 11:
+		w.ue(0)
+		w.pMacroblock(0, [][2]int32{{0, 0}}, nil, false, nil)
+		w.ue(14)
+		w.pMacroblock(0, [][2]int32{{0, 0}}, nil, false, nil)
+	case 12:
+		motion := [][2]int32{{0, 0}, {4, 0}, {-4, 0}, {0, 4}, {0, -4}}
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(0, [][2]int32{motion[mb%len(motion)]}, nil, false, nil)
+		}
+	case 13:
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(1+mb%2, [][2]int32{{4, 0}, {-4, 4}}, nil, false, nil)
+		}
+	case 14:
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			subTypes := []int{0, 1, 2, 3}
+			counts := []int{1, 2, 2, 4}
+			vectors := make([][2]int32, 0, 9)
+			for sub, subType := range subTypes {
+				for part := 0; part < counts[subType]; part++ {
+					vectors = append(vectors, [2]int32{int32((sub - 1) * 4), int32((part - 1) * 4)})
+				}
+			}
+			w.pMacroblock(3+mb%2, vectors, nil, false, subTypes)
+		}
+	case 15:
+		motion := [][2]int32{{1, 0}, {-1, 2}, {2, -1}, {-2, 1}}
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(0, [][2]int32{motion[mb%4]}, nil, false, nil)
+		}
+	case 16, 17:
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(0, [][2]int32{{0, 0}}, []int{mb % 2}, true, nil)
+		}
+	case 19:
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(0, [][2]int32{{4, 0}}, nil, false, nil)
+		}
+	default:
+		for mb := 0; mb < 16; mb++ {
+			w.ue(0)
+			w.pMacroblock(0, [][2]int32{{0, 0}}, nil, false, nil)
+		}
+	}
+	return prependH264NALSize(w.nal(0x21))
+}
+
+func (e H264Encoder) encodeBFrame() []byte {
+	w := h264BitWriter{}
+	w.ue(0)
+	w.ue(1)
+	w.ue(0)
+	w.bits(2, 4)
+	w.bits(1, 1)
+	w.bits(0, 1)
+	w.bits(0, 1)
+	w.bits(0, 1)
+	w.ue(0)
+	w.ue(1)
+	for mb := 0; mb < 16; mb++ {
+		w.ue(0)
+		w.ue(uint32(1 + mb%3))
+		lists := 1
+		if mb%3 == 2 {
+			lists = 2
+		}
+		for list := 0; list < lists; list++ {
+			w.se(0)
+			w.se(0)
+		}
+		w.ue(0)
+	}
+	return prependH264NALSize(w.nal(0x01))
+}
+
+func boolUint32(value bool) uint32 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (e H264Encoder) encodeIntra16x16DCFrame() []byte {

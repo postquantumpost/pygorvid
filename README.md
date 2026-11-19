@@ -152,9 +152,14 @@ luma residual with a QP delta in the final macroblock. Frame 9 preserves that
 luma content and adds 4:2:0 chroma DC and AC residuals, exercising chroma QP
 derivation and DC transformation. Frame 10 retains Frame 9's chroma and expands the final macroblock's
 luma CAVLC data to dense coefficients, trailing ones, signed levels, zero runs,
-and changing neighbor `nC` contexts. The remaining 50 frames are gray IDR
-padding. All pictures use
-Constrained Baseline H.264 Level 2.0, with four-byte MP4 NAL lengths. The audio
+and changing neighbor `nC` contexts. Frame 11 starts P-slice prediction;
+frames 12–16 cover skip runs, motion differences, 16×8/8×16 partitions, 8×8
+subpartitions, and fractional quarter-pel motion. Frames 17–19 add reference
+selection, list modification and adaptive marking, and explicit luma/chroma
+weights. Frame 20 is a B picture with L0, L1, and bi-prediction in reordered
+decode/presentation order. The remaining 39 frames are gray IDR padding. All
+pictures use High H.264 Level 2.0, with four-byte MP4 NAL lengths and signed
+composition offsets for the B-picture reorder. The audio
 track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must
 support PCM in MP4, not only AAC.

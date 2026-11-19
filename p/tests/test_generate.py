@@ -28,6 +28,8 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
     reader = VideoSampleReader(output)
     try:
         assert reader.sample_count == 60
+        assert [(reader.sample_at(index).dts_ticks, reader.sample_at(index).pts_ticks)
+                for index in (18, 19, 20, 21)] == [(18, 18), (19, 20), (20, 19), (21, 21)]
         decoder = H264Decoder(reader, threads=1)
         for index in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 59):
             sample = reader.sample_at(index)
@@ -155,6 +157,30 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
             else:
                 assert bytes(frame.y) == expected_luma
                 assert bytes(frame.u) == bytes(frame.v) == bytes([128]) * 1024
+        sps = parse_sps(H264Encoder().sequence_parameter_set())
+        pps = parse_pps(H264Encoder().picture_parameter_set())
+        for sample_index in range(10, 19):
+            header = parse_slice_header(reader.sample_at(sample_index).data[4:], sps, pps)
+            assert header.slice_type == 0
+            assert header.frame_num == (sample_index - 1) & 15
+        future = parse_slice_header(reader.sample_at(19).data[4:], sps, pps)
+        b_picture = parse_slice_header(reader.sample_at(20).data[4:], sps, pps)
+        multi_reference = parse_slice_header(reader.sample_at(16).data[4:], sps, pps)
+        reordered = parse_slice_header(reader.sample_at(17).data[4:], sps, pps)
+        weighted = parse_slice_header(reader.sample_at(18).data[4:], sps, pps)
+        assert multi_reference.num_ref_idx_active_override
+        assert multi_reference.num_ref_idx_l0_active_minus1 == 1
+        assert reordered.ref_pic_list_reordering_l0
+        assert reordered.adaptive_ref_pic_marking
+        assert reordered.memory_management_operations
+        assert weighted.prediction_weight_table is not None
+        weight = weighted.prediction_weight_table.lists[0][0]
+        assert weight.weights == (2, 2, 2)
+        assert weight.offsets == (-16, 8, -8)
+        assert (future.frame_num, future.slice_type) == (2, 0)
+        assert (b_picture.frame_num, b_picture.slice_type) == (2, 1)
+        assert reader.sample_at(20).data[4] == 0x01
+        assert decoder.decode_frame(19).y != decoder.decode_frame(20).y
     finally:
         reader.close()
     assert list(tmp_path.iterdir()) == [output]

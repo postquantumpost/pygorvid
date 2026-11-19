@@ -109,9 +109,20 @@ the final macroblock's luma CAVLC stream. Its four coded 4x4 blocks include a
 dense 16-coefficient block, alternating positive and negative levels, trailing
 ones, `total_zeros` and `run_before` syntax, and empty-block tokens selected
 from different neighboring `nC` contexts.
+Frames 11–20 extend the current 64×64 stream into inter prediction. Frame 11
+uses P_L0_16×16 zero motion and residual. Frame 12 includes a 14-macroblock
+P-skip run, frame 13 uses integer motion-vector differences, and frame 14 uses
+16×8 and 8×16 partitions. Frame 15 cycles through 8×8, 8×4, 4×8, and 4×4
+subpartitions. Frame 16 uses quarter-luma-sample motion. Frames 17 and 18 retain
+two references, select both reference indices, and then exercise L0
+reordering plus adaptive short-term marking. Frame 19 retains the same
+prediction family and signals explicit non-default luma and chroma weights.
+Frame 20 is decoded after a shifted future P reference and before it in
+presentation order; it contains B_L0, B_L1, and bi-predicted 16×16
+macroblocks and is timed with signed MP4 composition offsets.
 Gray IDR padding follows through frame 60; the padded duration is at least one
-second. All current pictures are Constrained Baseline I_PCM, I_16x16, or
-Intra_4x4. The plan changes the
+second. All current pictures use High-profile I_PCM, I_16x16, Intra_4x4, P, or
+B syntax. The plan changes the
 eventual core video sequence to Progressive High, 8-bit 4:2:0, progressive,
 so CAVLC, CABAC, B pictures, and 8x8 transform tools can be introduced
 without changing profile halfway through the core sequence. Frame 1 remains

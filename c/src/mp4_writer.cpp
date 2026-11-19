@@ -13,7 +13,7 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::uint32_t kVideoFrameRate = 60;
 constexpr std::uint32_t kMinimumVideoFrameCount = kVideoFrameRate;
-constexpr std::uint32_t kGeneratedFeatureFrameCount = 10;
+constexpr std::uint32_t kGeneratedFeatureFrameCount = 21;
 constexpr std::uint32_t kAudioSampleRate = 48000;
 
 Bytes u32s(std::initializer_list<std::uint32_t> values) {
@@ -295,7 +295,9 @@ Bytes compatibility_metadata_box(const Mp4Metadata* metadata) {
 Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
             std::uint32_t count, std::uint32_t timescale,
             std::uint32_t duration_ms, std::uint32_t offset, bool video,
-            const std::vector<std::uint32_t>& sync_samples = {}) {
+            const std::vector<std::uint32_t>& sync_samples = {},
+            const std::vector<std::pair<std::uint32_t, std::int32_t>>&
+                composition_offsets = {}) {
     const std::uint32_t dimension = video ? 64u << 16 : 0;
     const std::uint16_t volume = video ? 0 : 0x100;
     const auto tkhd = full_box("tkhd", 7, join({
@@ -317,8 +319,19 @@ Bytes track(std::uint32_t id, const Bytes& entry, const Bytes& sizes,
     std::vector<Bytes> sample_tables{
         full_box("stsd", 0, join({u32s({1}), entry})),
         full_box("stts", 0, u32s({1, count, 1})),
-        full_box("stsc", 0, u32s({1, 1, count, 1})), sizes,
     };
+    if (!composition_offsets.empty()) {
+        Bytes values = u32s({static_cast<std::uint32_t>(composition_offsets.size())});
+        for (const auto& [sample_count, sample_offset] : composition_offsets) {
+            const auto entry = u32s({
+                sample_count, static_cast<std::uint32_t>(sample_offset),
+            });
+            values.insert(values.end(), entry.begin(), entry.end());
+        }
+        sample_tables.push_back(full_box("ctts", 0x01000000, values));
+    }
+    sample_tables.push_back(full_box("stsc", 0, u32s({1, 1, count, 1})));
+    sample_tables.push_back(sizes);
     if (!sync_samples.empty()) {
         auto values = u32s({static_cast<std::uint32_t>(sync_samples.size())});
         Bytes samples;
@@ -388,14 +401,15 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
     const auto offset = static_cast<std::uint32_t>(ftyp.size()) + 8;
     std::vector<std::uint32_t> sync_samples;
     for (std::uint32_t sample = 1; sample <= frame_count; ++sample) {
-        if (sample != 3 && sample != 4 && sample != 5 && sample != 6 &&
-            sample != 7 && sample != 8 && sample != 9 && sample != 10) {
+        if (sample <= 2 || sample > 21) {
             sync_samples.push_back(sample);
         }
     }
     const auto video_track = track(
         1, visual, full_box("stsz", 0, sizes), frame_count, kVideoFrameRate,
-        video_duration_ms, offset, true, sync_samples);
+        video_duration_ms, offset, true, sync_samples,
+        {{19, 0}, {1, 1}, {1, -1},
+         {static_cast<std::uint32_t>(frame_count - 21), 0}});
     const auto audio_track = track(
         2, sound, full_box("stsz", 0, u32s({4, audio_sample_count})),
         audio_sample_count, kAudioSampleRate, audio_duration_ms,

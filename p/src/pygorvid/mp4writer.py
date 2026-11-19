@@ -6,7 +6,7 @@ from .h264encoder import H264Encoder
 
 _VIDEO_FRAME_RATE = 60
 _MIN_VIDEO_FRAME_COUNT = _VIDEO_FRAME_RATE
-_GENERATED_FEATURE_FRAME_COUNT = 10
+_GENERATED_FEATURE_FRAME_COUNT = 21
 _AUDIO_SAMPLE_RATE = 48000
 
 
@@ -159,7 +159,8 @@ def _matrix() -> bytes:
 
 def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
            sample_count: int, timescale: int, duration_ms: int,
-           chunk_offset: int, video: bool, sync_samples: Sequence[int] = ()) -> bytes:
+           chunk_offset: int, video: bool, sync_samples: Sequence[int] = (),
+           composition_offsets: Sequence[tuple[int, int]] = ()) -> bytes:
     tkhd = _full_box(
         b"tkhd", _u32(0, 0, track_id, 0, duration_ms), bytes(8),
         _u16(0, 0, 0 if video else 0x100, 0), _matrix(),
@@ -177,6 +178,10 @@ def _track(track_id: int, sample_entry: bytes, sample_sizes: bytes,
         b"stbl",
         _full_box(b"stsd", _u32(1), sample_entry),
         _full_box(b"stts", _u32(1, sample_count, 1)),
+        (_box(
+             b"ctts", bytes([1, 0, 0, 0]), _u32(len(composition_offsets)),
+             *(_u32(count, offset & 0xFFFFFFFF) for count, offset in composition_offsets),
+         ) if composition_offsets else b""),
         _full_box(b"stsc", _u32(1, 1, sample_count, 1)),
         sample_sizes,
         (_full_box(b"stss", _u32(len(sync_samples)), _u32(*sync_samples))
@@ -229,7 +234,8 @@ class Mp4Writer:
             1, visual, sizes, frame_count, _VIDEO_FRAME_RATE, video_duration_ms,
             video_offset, True,
             tuple(index + 1 for index in range(frame_count)
-                  if index not in (2, 3, 4, 5, 6, 7, 8, 9)),
+                  if index not in range(2, 21)),
+            ((19, 0), (1, 1), (1, -1), (frame_count - 21, 0)),
         )
         audio_sizes = _full_box(b"stsz", _u32(4, audio_sample_count))
         audio_track = _track(

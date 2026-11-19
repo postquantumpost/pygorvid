@@ -64,10 +64,16 @@ impl H264Encoder {
 
     pub fn sequence_parameter_set(&self) -> Vec<u8> {
         let mut writer = BitWriter::default();
-        writer.bits(66, 8);
-        writer.bits(0xc0, 8);
+        writer.bits(100, 8);
+        writer.bits(0, 8);
         writer.bits(20, 8);
-        for value in [0, 0, 2, 1] {
+        writer.ue(0);
+        for value in [1, 0, 0] {
+            writer.ue(value);
+        }
+        writer.bits(0, 1);
+        writer.bits(0, 1);
+        for value in [0, 2, 2] {
             writer.ue(value);
         }
         writer.bits(0, 1);
@@ -85,7 +91,7 @@ impl H264Encoder {
         for _ in 0..3 {
             writer.ue(0);
         }
-        writer.bits(0, 3);
+        writer.bits(0b100, 3);
         for _ in 0..3 {
             writer.ue(0);
         }
@@ -119,7 +125,226 @@ impl H264Encoder {
         if frame_index == 9 {
             return self.encode_intra4x4_directional_frame(8, true, true, true);
         }
+        if (10..=19).contains(&frame_index) {
+            return self.encode_p_frame(frame_index);
+        }
+        if frame_index == 20 {
+            return self.encode_b_frame();
+        }
         self.encode_pcm_frame(frame_index, frame_index == 1)
+    }
+
+    fn write_prediction_weight_table(
+        writer: &mut BitWriter,
+        reference_count: usize,
+        explicit: bool,
+    ) {
+        writer.ue(0);
+        writer.ue(0);
+        for _ in 0..reference_count {
+            if explicit {
+                writer.bits(1, 1);
+                writer.se(2);
+                writer.se(-16);
+                writer.bits(1, 1);
+                writer.se(2);
+                writer.se(8);
+                writer.se(2);
+                writer.se(-8);
+            } else {
+                writer.bits(0, 1);
+                writer.bits(0, 1);
+            }
+        }
+    }
+
+    fn write_p_macroblock(
+        writer: &mut BitWriter,
+        kind: u32,
+        vectors: &[(i32, i32)],
+        references: &[usize],
+        multiple_references: bool,
+        sub_types: &[u32],
+    ) {
+        writer.ue(kind);
+        if matches!(kind, 3 | 4) {
+            for sub_type in sub_types {
+                writer.ue(*sub_type);
+            }
+        }
+        for (partition, (x, y)) in vectors.iter().enumerate() {
+            if multiple_references && kind != 4 {
+                writer.bits(u32::from(references[partition] == 0), 1);
+            }
+            writer.se(*x);
+            writer.se(*y);
+        }
+        writer.ue(0);
+    }
+
+    fn encode_p_frame(&self, frame_index: u16) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.bits(u32::from((frame_index - 1) & 15), 4);
+        let multiple_references = matches!(frame_index, 16 | 17);
+        writer.bits(u32::from(multiple_references), 1);
+        let reference_count = if multiple_references {
+            writer.ue(1);
+            2
+        } else {
+            1
+        };
+        let reordered = frame_index == 17;
+        writer.bits(u32::from(reordered), 1);
+        if reordered {
+            writer.ue(0);
+            writer.ue(1);
+            writer.ue(3);
+        }
+        Self::write_prediction_weight_table(&mut writer, reference_count, frame_index == 18);
+        writer.bits(u32::from(reordered), 1);
+        if reordered {
+            writer.ue(1);
+            writer.ue(0);
+            writer.ue(0);
+        }
+        writer.ue(0);
+        writer.ue(1);
+
+        match frame_index {
+            10 => {
+                for _ in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(&mut writer, 0, &[(0, 0)], &[], false, &[]);
+                }
+            }
+            11 => {
+                writer.ue(0);
+                Self::write_p_macroblock(&mut writer, 0, &[(0, 0)], &[], false, &[]);
+                writer.ue(14);
+                Self::write_p_macroblock(&mut writer, 0, &[(0, 0)], &[], false, &[]);
+            }
+            12 => {
+                let motion = [(0, 0), (4, 0), (-4, 0), (0, 4), (0, -4)];
+                for macroblock in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(
+                        &mut writer,
+                        0,
+                        &[motion[macroblock % motion.len()]],
+                        &[],
+                        false,
+                        &[],
+                    );
+                }
+            }
+            13 => {
+                for macroblock in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(
+                        &mut writer,
+                        1 + (macroblock % 2) as u32,
+                        &[(4, 0), (-4, 4)],
+                        &[],
+                        false,
+                        &[],
+                    );
+                }
+            }
+            14 => {
+                let sub_types = [0_u32, 1, 2, 3];
+                let counts = [1, 2, 2, 4];
+                for macroblock in 0..16 {
+                    writer.ue(0);
+                    let mut vectors = Vec::with_capacity(9);
+                    for (sub_index, sub_type) in sub_types.iter().enumerate() {
+                        for part in 0..counts[*sub_type as usize] {
+                            vectors.push(((sub_index as i32 - 1) * 4, (part as i32 - 1) * 4));
+                        }
+                    }
+                    Self::write_p_macroblock(
+                        &mut writer,
+                        3 + (macroblock % 2) as u32,
+                        &vectors,
+                        &[],
+                        false,
+                        &sub_types,
+                    );
+                }
+            }
+            15 => {
+                let motion = [(1, 0), (-1, 2), (2, -1), (-2, 1)];
+                for macroblock in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(
+                        &mut writer,
+                        0,
+                        &[motion[macroblock % 4]],
+                        &[],
+                        false,
+                        &[],
+                    );
+                }
+            }
+            16 | 17 => {
+                for macroblock in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(
+                        &mut writer,
+                        0,
+                        &[(0, 0)],
+                        &[macroblock % 2],
+                        true,
+                        &[],
+                    );
+                }
+            }
+            19 => {
+                for _ in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(&mut writer, 0, &[(4, 0)], &[], false, &[]);
+                }
+            }
+            _ => {
+                for _ in 0..16 {
+                    writer.ue(0);
+                    Self::write_p_macroblock(&mut writer, 0, &[(0, 0)], &[], false, &[]);
+                }
+            }
+        }
+        let nal = writer.nal(0x21);
+        let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
+        sample.extend(nal);
+        sample
+    }
+
+    fn encode_b_frame(&self) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        writer.ue(0);
+        writer.ue(1);
+        writer.ue(0);
+        writer.bits(2, 4);
+        writer.bits(1, 1);
+        writer.bits(0, 1);
+        writer.bits(0, 1);
+        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(1);
+        for macroblock in 0..16 {
+            writer.ue(0);
+            writer.ue(1 + (macroblock % 3) as u32);
+            for _ in 0..if macroblock % 3 == 2 { 2 } else { 1 } {
+                writer.se(0);
+                writer.se(0);
+            }
+            writer.ue(0);
+        }
+        let nal = writer.nal(0x01);
+        let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
+        sample.extend(nal);
+        sample
     }
 
     fn encode_intra16x16_dc_frame(&self) -> Vec<u8> {
