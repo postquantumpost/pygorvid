@@ -200,6 +200,10 @@ std::size_t decode_video(
     std::vector<std::optional<std::uint32_t>>
         reference_long_term_frame_idxs;
     std::vector<std::int64_t> reference_picture_order;
+    std::int64_t previous_poc_msb = 0;
+    std::int64_t previous_poc_lsb = 0;
+    std::uint32_t previous_poc_frame_num = 0;
+    std::int64_t previous_poc_frame_num_offset = 0;
     std::optional<std::uint32_t> maximum_long_term_frame_idx;
     std::optional<pygorvid::Yuv420Frame> decoded_frame;
     std::size_t decoded_count = 0;
@@ -284,6 +288,54 @@ std::size_t decode_video(
             slice_header
                 ? slice_header->frame_num
                 : idr_header->frame_num;
+        const auto current_nal_ref_idc =
+            pygorvid::parse_nal_header(slices.front()).reference_idc;
+        const auto maximum_frame_num =
+            std::uint32_t{1}
+            << (selected_sps_info.log2_max_frame_num_minus4 + 4);
+        std::int64_t current_picture_order_count = 0;
+        if (selected_sps_info.pic_order_cnt_type == 0) {
+            const auto maximum_poc_lsb = std::int64_t{1} <<
+                (*selected_sps_info.log2_max_pic_order_cnt_lsb_minus4 + 4);
+            const auto prior_msb = is_idr_slice ? 0 : previous_poc_msb;
+            const auto prior_lsb = is_idr_slice ? 0 : previous_poc_lsb;
+            const auto poc_lsb = slice_header
+                ? slice_header->pic_order_cnt_lsb
+                : idr_header->pic_order_cnt_lsb;
+            auto current_msb = prior_msb;
+            if (poc_lsb < prior_lsb &&
+                prior_lsb - poc_lsb >= maximum_poc_lsb / 2) {
+                current_msb += maximum_poc_lsb;
+            } else if (poc_lsb > prior_lsb &&
+                       poc_lsb - prior_lsb > maximum_poc_lsb / 2) {
+                current_msb -= maximum_poc_lsb;
+            }
+            current_picture_order_count = current_msb + poc_lsb;
+            if (current_nal_ref_idc != 0) {
+                previous_poc_msb = current_msb;
+                previous_poc_lsb = poc_lsb;
+            }
+        } else {
+            if (is_idr_slice) {
+                previous_poc_frame_num = 0;
+                previous_poc_frame_num_offset = 0;
+            }
+            auto frame_num_offset = previous_poc_frame_num_offset;
+            if (previous_poc_frame_num > current_frame_num) {
+                frame_num_offset += maximum_frame_num;
+            }
+            if (selected_sps_info.pic_order_cnt_type == 2 && !is_idr_slice) {
+                current_picture_order_count =
+                    2 * (frame_num_offset + current_frame_num);
+                if (current_nal_ref_idc == 0) {
+                    --current_picture_order_count;
+                }
+            }
+            if (current_nal_ref_idc != 0) {
+                previous_poc_frame_num = current_frame_num;
+                previous_poc_frame_num_offset = frame_num_offset;
+            }
+        }
         if (is_idr_slice) {
             reference_frames.clear();
             reference_frame_nums.clear();
@@ -294,9 +346,6 @@ std::size_t decode_video(
                     ? std::optional<std::uint32_t>{0}
                     : std::nullopt;
         }
-        const auto maximum_frame_num =
-            std::uint32_t{1}
-            << (selected_sps_info.log2_max_frame_num_minus4 + 4);
         const auto picture_number = [&](std::uint32_t reference_frame_num) {
             return reference_frame_num > current_frame_num
                        ? static_cast<std::int64_t>(reference_frame_num) -
@@ -503,7 +552,9 @@ std::size_t decode_video(
         }
         auto decoded = pygorvid::decode_h264_reference_frame(
             slices, selected_sps_info, selected_pps_info, reference_list_l0,
-            reference_list_l1, display_indices[sample_index]);
+            reference_list_l1, display_indices[sample_index],
+            current_picture_order_count);
+        decoded.picture_order_count = current_picture_order_count;
 #ifdef PYGORVID_SLIDESHOW
         if (window) {
             pending.emplace(display_indices[sample_index], std::make_pair(decoded, sample.duration_ticks));

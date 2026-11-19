@@ -779,9 +779,6 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
             }
         }
         result.prediction_weight_table = std::move(table);
-    } else if (normalized_slice_type == 1 &&
-               pps.weighted_bipred_idc == 2) {
-        invalid("B decoding does not support implicit weighted biprediction");
     }
     if (header.reference_idc != 0 &&
         read_flag(reader, "P slice",

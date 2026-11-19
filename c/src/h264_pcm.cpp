@@ -32,6 +32,7 @@ Yuv420Frame crop_decoded_frame(Yuv420Frame frame, const SpsInfo& sps) {
     output.width = sps.width;
     output.height = sps.height;
     output.long_term_reference = frame.long_term_reference;
+    output.picture_order_count = frame.picture_order_count;
     const auto crop_plane = [&](const std::vector<std::uint8_t>& source,
                                 std::vector<std::uint8_t>& destination,
                                 std::uint32_t divisor) {
@@ -3421,7 +3422,8 @@ Yuv420Frame decode_p_frame_with_lists(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& input_frames_l0,
-    const std::vector<const Yuv420Frame*>& input_frames_l1) {
+    const std::vector<const Yuv420Frame*>& input_frames_l1,
+    std::optional<std::int64_t> picture_order_count = std::nullopt) {
     if (slice_nals.empty()) {
         throw std::invalid_argument("P picture contains no slice NAL units");
     }
@@ -4066,6 +4068,126 @@ Yuv420Frame decode_p_frame_with_lists(
             }
         }
     };
+    const auto derive_temporal_direct =
+        [&](std::size_t macroblock_address,
+            std::int32_t partition_x, std::int32_t partition_y,
+            std::int32_t partition_width, std::int32_t partition_height,
+            const PSliceHeader& slice_header,
+            std::array<std::array<std::int32_t, 16>, 2>&
+                output_reference_indices,
+            std::array<std::uint8_t, 16>& output_prediction_flags,
+            MacroblockMotionVectors& output_motion,
+            MacroblockMotionVectors& output_motion_l1) {
+        if (reference_frames_l1.empty() ||
+            reference_frames_l1.front() == nullptr ||
+            macroblock_address >=
+                reference_frames_l1.front()
+                    ->colocated_motion_field.size()) {
+            throw std::runtime_error(
+                "B-slice temporal direct prediction requires co-located motion facts");
+        }
+        const auto inference_step = sps.direct_8x8_inference ? 2 : 1;
+        const auto current_picture_order_count =
+            picture_order_count.value_or(
+                sps.pic_order_cnt_type == 2
+                    ? static_cast<std::int64_t>(slice_header.frame_num) * 2
+                    : static_cast<std::int64_t>(
+                          slice_header.pic_order_cnt_lsb));
+        for (std::int32_t group_y = partition_y;
+             group_y < partition_y + partition_height;
+             group_y += inference_step) {
+            for (std::int32_t group_x = partition_x;
+                 group_x < partition_x + partition_width;
+                 group_x += inference_step) {
+                const auto colocated_x = sps.direct_8x8_inference
+                    ? (group_x / 2) * 3
+                    : group_x;
+                const auto colocated_y = sps.direct_8x8_inference
+                    ? (group_y / 2) * 3
+                    : group_y;
+                const auto colocated_block =
+                    static_cast<std::size_t>(colocated_y) * 4 +
+                    static_cast<std::size_t>(colocated_x);
+                const auto& colocated =
+                    reference_frames_l1.front()
+                        ->colocated_motion_field[macroblock_address]
+                                                [colocated_block];
+                std::int32_t reference_index = -1;
+                for (std::size_t index = 0;
+                     index < reference_frames_l0.size(); ++index) {
+                    if (reference_frames_l0[index] != nullptr &&
+                        reference_frames_l0[index]->picture_order_count ==
+                            colocated.reference_picture_order_count) {
+                        reference_index = static_cast<std::int32_t>(index);
+                        break;
+                    }
+                }
+                if (colocated.reference_picture_order_count ==
+                    std::numeric_limits<std::int64_t>::min()) {
+                    reference_index = -1;
+                }
+                std::array<std::int32_t, 2> reference_indices{
+                    std::max(reference_index, 0), 0};
+                MotionVector group_motion_l0{};
+                MotionVector group_motion_l1{};
+                constexpr std::uint8_t prediction_mask = 3;
+                if (reference_index >= 0) {
+                    if (static_cast<std::size_t>(reference_index) >=
+                        reference_frames_l0.size()) {
+                        throw std::runtime_error(
+                            "B_Direct temporal reference index is unavailable");
+                    }
+                    reference_indices[0] = reference_index;
+                    const auto& reference =
+                        *reference_frames_l0[reference_index];
+                    auto td =
+                        reference_frames_l1.front()->picture_order_count -
+                        reference.picture_order_count;
+                    auto tb =
+                        current_picture_order_count -
+                        reference.picture_order_count;
+                    if (td != 0) {
+                        td = std::clamp<std::int64_t>(td, -128, 127);
+                        tb = std::clamp<std::int64_t>(tb, -128, 127);
+                        const auto tx =
+                            (16384 + std::abs(td / 2)) / td;
+                        const auto scale = std::clamp<std::int64_t>(
+                            (tb * tx + 32) >> 6, -1024, 1023);
+                        group_motion_l0 = {
+                            static_cast<std::int64_t>(
+                                (scale * colocated.motion_vector[0] + 128) >>
+                                8),
+                            static_cast<std::int64_t>(
+                                (scale * colocated.motion_vector[1] + 128) >>
+                                8)};
+                    }
+                    group_motion_l1 = {
+                        group_motion_l0[0] - colocated.motion_vector[0],
+                        group_motion_l0[1] - colocated.motion_vector[1]};
+                }
+                for (std::int32_t block_offset_y = 0;
+                     block_offset_y < inference_step; ++block_offset_y) {
+                    for (std::int32_t block_offset_x = 0;
+                         block_offset_x < inference_step;
+                         ++block_offset_x) {
+                        const auto block_index = static_cast<std::size_t>(
+                            (group_y + block_offset_y) * 4 +
+                            group_x + block_offset_x);
+                        output_prediction_flags[block_index] =
+                            prediction_mask;
+                        output_reference_indices[0][block_index] =
+                            reference_indices[0];
+                        output_reference_indices[1][block_index] =
+                            reference_indices[1];
+                        output_motion[block_index] = group_motion_l0;
+                        output_motion_l1[block_index] = group_motion_l1;
+                        motion_vector_valid[macroblock_address][block_index] =
+                            1;
+                    }
+                }
+            }
+        }
+    };
     const auto reconstruct_macroblock =
         [&](std::size_t macroblock_address,
             const MacroblockMotionVectors& motion_vectors,
@@ -4175,6 +4297,46 @@ Yuv420Frame decode_p_frame_with_lists(
                     std::uint8_t prediction = sample_l0;
                     if ((flags & 3) == 2 && weight_table == nullptr) {
                         prediction = sample_l1;
+                    } else if (
+                        (flags & 3) == 3 && weight_table == nullptr &&
+                        pps.weighted_bipred_idc == 2 &&
+                        motion_vectors_l1 != nullptr) {
+                        const auto l0_index = active_reference(0);
+                        const auto l1_index = active_reference(1);
+                        const auto& l0 = *reference_frames_l0[l0_index];
+                        const auto& l1 = *reference_frames_l1[l1_index];
+                        auto td = std::clamp<std::int64_t>(
+                            l1.picture_order_count -
+                                l0.picture_order_count,
+                            -128, 127);
+                        std::int32_t weight_l1 = 32;
+                        if (td != 0 && !l0.long_term_reference &&
+                            !l1.long_term_reference) {
+                            const auto current =
+                                picture_order_count.value_or(0);
+                            const auto tb = std::clamp<std::int64_t>(
+                                current - l0.picture_order_count, -128, 127);
+                            const auto tx =
+                                (16384 + std::abs(td / 2)) / td;
+                            const auto candidate =
+                                std::clamp<std::int64_t>(
+                                    (tb * tx + 32) >> 6, -1024, 1023) >>
+                                2;
+                            if (candidate >= -64 && candidate <= 128) {
+                                weight_l1 =
+                                    static_cast<std::int32_t>(candidate);
+                            }
+                        }
+                        const auto value =
+                            (static_cast<std::int64_t>(sample_l0) *
+                                 (64 - weight_l1) +
+                             static_cast<std::int64_t>(sample_l1) *
+                                 weight_l1 +
+                             32) >>
+                            6;
+                        prediction = static_cast<std::uint8_t>(
+                            std::max<std::int64_t>(
+                                0, std::min<std::int64_t>(255, value)));
                     } else if ((flags & 3) == 3 && weight_table == nullptr) {
                         prediction = static_cast<std::uint8_t>(
                             (static_cast<std::uint32_t>(sample_l0) +
@@ -4321,13 +4483,16 @@ Yuv420Frame decode_p_frame_with_lists(
                     reference_indices{};
                 if (b_slice) {
                     if (!slice_header.direct_spatial_mv_pred) {
-                        throw std::runtime_error(
-                            "B-slice temporal direct prediction is unsupported");
+                        derive_temporal_direct(
+                            address, 0, 0, 4, 4, slice_header,
+                            reference_indices, prediction_flags,
+                            macroblock_motion, macroblock_motion_l1);
+                    } else {
+                        derive_spatial_direct(
+                            address, slice_id, 0, 0, 4, 4, reference_indices,
+                            prediction_flags, macroblock_motion,
+                            macroblock_motion_l1);
                     }
-                    derive_spatial_direct(
-                        address, slice_id, 0, 0, 4, 4, reference_indices,
-                        prediction_flags, macroblock_motion,
-                        macroblock_motion_l1);
                     reconstruct_macroblock(address, macroblock_motion,
                                            &macroblock_motion_l1,
                                            &prediction_flags,
@@ -5047,11 +5212,15 @@ Yuv420Frame decode_p_frame_with_lists(
                 if (!partition_direct[partition_index]) {
                     continue;
                 }
-                if (!slice_header.direct_spatial_mv_pred) {
-                    throw std::runtime_error(
-                        "B-slice temporal direct prediction is unsupported");
-                }
                 const auto& partition = partitions[partition_index];
+                if (!slice_header.direct_spatial_mv_pred) {
+                    derive_temporal_direct(
+                        macroblock_address, partition.x, partition.y,
+                        partition.width, partition.height, slice_header,
+                        reference_indices, prediction_flags, motion,
+                        motion_l1);
+                    continue;
+                }
                 derive_spatial_direct(
                     macroblock_address, slice_id, partition.x, partition.y,
                     partition.width, partition.height, reference_indices,
@@ -5911,13 +6080,25 @@ Yuv420Frame decode_p_frame_with_lists(
             const auto flags =
                 macroblock_prediction_flags[address][block_index];
             if ((flags & 1) != 0) {
+                const auto reference_index =
+                    macroblock_reference_indices[address][0][block_index];
                 frame.colocated_motion_field[address][block_index] = {
-                    macroblock_reference_indices[address][0][block_index],
-                    macroblock_motion_vectors[address][block_index]};
+                    reference_index,
+                    macroblock_motion_vectors[address][block_index],
+                    reference_frames_l0
+                        [static_cast<std::size_t>(
+                            std::max(reference_index, 0))]
+                        ->picture_order_count};
             } else if ((flags & 2) != 0) {
+                const auto reference_index =
+                    macroblock_reference_indices[address][1][block_index];
                 frame.colocated_motion_field[address][block_index] = {
-                    macroblock_reference_indices[address][1][block_index],
-                    macroblock_motion_vectors_l1[address][block_index]};
+                    reference_index,
+                    macroblock_motion_vectors_l1[address][block_index],
+                    reference_frames_l1
+                        [static_cast<std::size_t>(
+                            std::max(reference_index, 0))]
+                        ->picture_order_count};
             }
         }
     }
@@ -6000,7 +6181,8 @@ Yuv420Frame decode_h264_reference_frame_impl(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
-    const std::vector<const Yuv420Frame*>& reference_frames_l1) {
+    const std::vector<const Yuv420Frame*>& reference_frames_l1,
+    std::optional<std::int64_t> picture_order_count = std::nullopt) {
     if (slice_nals.empty()) {
         throw std::invalid_argument("H.264 picture contains no slice NAL units");
     }
@@ -6030,7 +6212,8 @@ Yuv420Frame decode_h264_reference_frame_impl(
         }
         return decode_p_frame_with_lists(slice_nals, sps, pps,
                                          reference_frames_l0,
-                                         reference_frames_l1);
+                                         reference_frames_l1,
+                                         picture_order_count);
     }
     throw std::runtime_error(
         "H.264 frame decoding supports I and restricted P/B pictures only");
@@ -6041,10 +6224,12 @@ Yuv420Frame decode_h264_reference_frame(
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
     const std::vector<const Yuv420Frame*>& reference_frames_l1,
-    std::optional<std::size_t> presentation_frame) {
+    std::optional<std::size_t> presentation_frame,
+    std::optional<std::int64_t> picture_order_count) {
     try {
         return decode_h264_reference_frame_impl(
-            slice_nals, sps, pps, reference_frames_l0, reference_frames_l1);
+            slice_nals, sps, pps, reference_frames_l0, reference_frames_l1,
+            picture_order_count);
     } catch (const std::exception& error) {
         if (!presentation_frame) {
             throw;
@@ -6070,7 +6255,8 @@ Yuv420Frame decode_h264_reference_frame(
     }
     return decode_h264_reference_frame(slice_nals, sps, pps,
                                        reference_frames_l0,
-                                       reference_frames_l1);
+                                       reference_frames_l1,
+                                       std::nullopt, std::nullopt);
 }
 
 } // namespace pygorvid

@@ -49,7 +49,7 @@ execute_process(
     COMMAND "${VIDPROBE}" --readall --input
             "${FIXTURE_DIR}/cabac-b-temporal.mp4"
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
-if(result EQUAL 0 OR NOT error MATCHES "B-slice temporal direct prediction is unsupported")
-    message(FATAL_ERROR "temporal-direct stream was not explicitly rejected: ${error}")
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "temporal-direct stream failed: ${error}")
 endif()
 file(REMOVE_RECURSE "${test_dir}")

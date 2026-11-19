@@ -4,6 +4,7 @@
 #include "pygorvid/pygorvid.hpp"
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <optional>
 
@@ -140,12 +141,15 @@ struct PSliceHeader {
 struct ColocatedMotionFact {
     std::int32_t reference_index = -1;
     std::array<std::int64_t, 2> motion_vector{};
+    std::int64_t reference_picture_order_count =
+        std::numeric_limits<std::int64_t>::min();
 };
 
 struct Yuv420Frame {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     bool long_term_reference = false;
+    std::int64_t picture_order_count = 0;
     std::vector<std::uint8_t> luma;
     std::vector<std::uint8_t> chroma_u;
     std::vector<std::uint8_t> chroma_v;
@@ -198,7 +202,8 @@ Yuv420Frame decode_h264_reference_frame(
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
     const std::vector<const Yuv420Frame*>& reference_frames_l1,
-    std::optional<std::size_t> presentation_frame = std::nullopt);
+    std::optional<std::size_t> presentation_frame = std::nullopt,
+    std::optional<std::int64_t> picture_order_count = std::nullopt);
 
 } // namespace pygorvid
 
