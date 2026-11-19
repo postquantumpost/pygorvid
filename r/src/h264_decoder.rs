@@ -1126,7 +1126,8 @@ impl H264Decoder {
                     header,
                 };
                 if pictures.last().is_none_or(|picture| {
-                    !crate::same_primary_picture(&picture[0].header, &slice.header)
+                    picture[0].sample_index != slice.sample_index
+                        || !crate::same_primary_picture(&picture[0].header, &slice.header)
                 }) {
                     pictures.push(vec![slice]);
                 } else if let Some(picture) = pictures.last_mut() {

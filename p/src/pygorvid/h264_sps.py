@@ -20,6 +20,9 @@ class SPSInfo:
     separate_colour_plane: bool
     bit_depth_luma: int
     bit_depth_chroma: int
+    qpprime_y_zero_transform_bypass: bool
+    seq_scaling_matrix_present: bool
+    seq_scaling_list_present: tuple[bool, ...]
     coded_width: int
     coded_height: int
     width: int
@@ -40,6 +43,7 @@ class SPSInfo:
     frame_mbs_only: bool
     mb_adaptive_frame_field: bool
     direct_8x8_inference: bool
+    vui_parameters_present: bool
 
 
 _PROFILES_WITH_CHROMA_DEPTH_SYNTAX = {
@@ -105,6 +109,9 @@ def parse_sps(nal: bytes) -> SPSInfo:
     separate_colour_plane = False
     bit_depth_luma = 8
     bit_depth_chroma = 8
+    transform_bypass = False
+    scaling_matrix_present = False
+    scaling_list_present: tuple[bool, ...] = ()
     if profile_idc in _PROFILES_WITH_CHROMA_DEPTH_SYNTAX:
         chroma_format_idc = _read_ue(reader, "chroma_format_idc")
         if chroma_format_idc > 3:
@@ -122,10 +129,12 @@ def parse_sps(nal: bytes) -> SPSInfo:
         bit_depth_chroma = 8 + chroma_minus_8
 
         try:
-            reader.read_bit()  # qpprime_y_zero_transform_bypass_flag
+            transform_bypass = bool(reader.read_bit())
         except BitstreamError as error:
             raise SPSParseError(f"SPS qpprime_y_zero_transform_bypass_flag: {error}") from error
-        _skip_scaling_lists(reader, chroma_format_idc)
+        scaling_matrix_present, scaling_list_present = _read_scaling_lists(
+            reader, chroma_format_idc
+        )
 
     log2_max_frame_num_minus4 = _read_ue(reader, "log2_max_frame_num_minus4")
     if log2_max_frame_num_minus4 > 12:
@@ -183,7 +192,7 @@ def parse_sps(nal: bytes) -> SPSInfo:
             _read_ue(reader, "frame_crop_bottom_offset"),
         ]
     try:
-        reader.read_bit()  # vui_parameters_present_flag
+        vui_parameters_present = bool(reader.read_bit())
     except BitstreamError as error:
         raise SPSParseError(f"SPS vui_parameters_present_flag: {error}") from error
     dimensions = _dimensions(
@@ -204,6 +213,9 @@ def parse_sps(nal: bytes) -> SPSInfo:
         separate_colour_plane=separate_colour_plane,
         bit_depth_luma=bit_depth_luma,
         bit_depth_chroma=bit_depth_chroma,
+        qpprime_y_zero_transform_bypass=transform_bypass,
+        seq_scaling_matrix_present=scaling_matrix_present,
+        seq_scaling_list_present=scaling_list_present,
         log2_max_frame_num_minus4=log2_max_frame_num_minus4,
         pic_order_cnt_type=poc_type,
         log2_max_pic_order_cnt_lsb_minus4=log2_max_pic_order_cnt_lsb_minus4,
@@ -216,6 +228,7 @@ def parse_sps(nal: bytes) -> SPSInfo:
         frame_mbs_only=frame_mbs_only,
         mb_adaptive_frame_field=mb_adaptive_frame_field,
         direct_8x8_inference=direct_8x8_inference,
+        vui_parameters_present=vui_parameters_present,
         **dimensions,
     )
     _validate_supported_sps(info)
@@ -243,19 +256,23 @@ def _read_se(reader: BitReader, field: str) -> int:
         raise SPSParseError(f"SPS {field}: {error}") from error
 
 
-def _skip_scaling_lists(reader: BitReader, chroma_format_idc: int) -> None:
+def _read_scaling_lists(
+    reader: BitReader, chroma_format_idc: int
+) -> tuple[bool, tuple[bool, ...]]:
     try:
         matrix_present = reader.read_bit()
     except BitstreamError as error:
         raise SPSParseError(f"SPS seq_scaling_matrix_present_flag: {error}") from error
     if not matrix_present:
-        return
+        return False, ()
     list_count = 12 if chroma_format_idc == 3 else 8
+    present_lists = []
     for list_index in range(list_count):
         try:
             list_present = reader.read_bit()
         except BitstreamError as error:
             raise SPSParseError(f"SPS seq_scaling_list_present_flag[{list_index}]: {error}") from error
+        present_lists.append(bool(list_present))
         if not list_present:
             continue
         last_scale = next_scale = 8
@@ -265,6 +282,7 @@ def _skip_scaling_lists(reader: BitReader, chroma_format_idc: int) -> None:
                 next_scale = (last_scale + delta_scale + 256) % 256
             if next_scale:
                 last_scale = next_scale
+    return True, tuple(present_lists)
 
 
 def _dimensions(

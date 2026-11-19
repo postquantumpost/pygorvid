@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <stdexcept>
@@ -163,6 +164,51 @@ int main() {
         }
     }
     assert(luma_changed);
+    const std::vector<std::uint32_t> feature_nal_counts{
+        1, 2, 2, 1, 1, 1, 1, 1, 5,
+    };
+    const std::array<std::uint32_t, 9> feature_pps{4, 9, 9, 6, 5, 5, 7, 8, 8};
+    for (std::uint16_t frame_index = 31; frame_index <= 39; ++frame_index) {
+        const auto sample = encoder.encode_generated_frame(frame_index);
+        const auto nals = pygorvid::split_h264_sample_nals(sample, 4);
+        assert(nals.size() == feature_nal_counts[frame_index - 31]);
+        const auto& picture = nals[frame_index == 39 ? 2 : 0];
+        const auto rbsp = pygorvid::ebsp_to_rbsp(
+            std::vector<std::uint8_t>(picture.begin() + 1, picture.end()));
+        auto bit = [&rbsp](std::size_t& offset) {
+            const auto value = (rbsp[offset / 8] >> (7 - offset % 8)) & 1;
+            ++offset;
+            return value;
+        };
+        auto ue = [&bit](std::size_t& offset) {
+            std::uint32_t zeros = 0;
+            while (!bit(offset)) {
+                ++zeros;
+            }
+            std::uint32_t value = 1;
+            for (std::uint32_t index = 0; index < zeros; ++index) {
+                value = (value << 1) | bit(offset);
+            }
+            return value - 1;
+        };
+        std::size_t offset = 0;
+        (void)ue(offset);
+        assert(ue(offset) == 2);
+        assert(ue(offset) == feature_pps[frame_index - 31]);
+        assert(sample == encoder.encode_generated_frame(frame_index));
+        if (frame_index == 39) {
+            assert(pygorvid::parse_nal_header(nals[0]).unit_type == 9);
+            assert(pygorvid::parse_nal_header(nals[1]).unit_type == 6);
+            assert(pygorvid::parse_nal_header(nals[3]).unit_type == 10);
+            assert(pygorvid::parse_nal_header(nals[4]).unit_type == 11);
+            const auto sei_rbsp = pygorvid::ebsp_to_rbsp(
+                std::vector<std::uint8_t>(nals[1].begin() + 1, nals[1].end()));
+            assert(sei_rbsp[0] == 5 && sei_rbsp[1] == 0x12);
+            const std::string marker(sei_rbsp.begin() + 2,
+                                     sei_rbsp.begin() + 2 + 0x12);
+            assert(marker == "PYGORVID-FRAME-39!");
+        }
+    }
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));

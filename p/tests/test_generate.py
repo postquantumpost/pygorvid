@@ -13,6 +13,7 @@ from pygorvid import (
     parse_sps,
 )
 from pygorvid.cli import _generation_metadata, main
+from pygorvid.h264_nal import split_h264_sample_nals
 from pygorvid.mp4writer import _metadata_box
 
 
@@ -211,6 +212,74 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
             )
             assert header.picture_parameter_set_id == 3
             assert header.slice_data_bit_offset == 24
+            frame = decoder.decode_frame(index)
+            assert (frame.width, frame.height) == (64, 64)
+        feature_sps = {
+            0: sps,
+            1: parse_sps(H264Encoder()._sequence_parameter_set(
+                1, 1, gaps_allowed=True
+            )),
+            3: parse_sps(H264Encoder()._sequence_parameter_set(
+                3, scaling_lists=True
+            )),
+            4: parse_sps(H264Encoder()._sequence_parameter_set(
+                4, transform_bypass=True, vui=True
+            )),
+        }
+        feature_pps = {
+            4: parse_pps(H264Encoder()._picture_parameter_set(4, True)),
+            5: parse_pps(H264Encoder()._picture_parameter_set(
+                5, True, transform_8x8=True
+            )),
+            6: parse_pps(H264Encoder()._picture_parameter_set(
+                6, sps_id=1
+            )),
+            7: parse_pps(H264Encoder()._picture_parameter_set(
+                7, True, sps_id=3, transform_8x8=True
+            )),
+            8: parse_pps(H264Encoder()._picture_parameter_set(
+                8, True, sps_id=4, transform_8x8=True
+            )),
+            9: parse_pps(H264Encoder()._picture_parameter_set(9)),
+        }
+
+        def feature_header(index, pps_id, nal_index=0):
+            nals = split_h264_sample_nals(
+                reader.sample_at(index).data, reader.configuration.nal_length_size
+            )
+            nal = nals[nal_index]
+            return parse_slice_header(
+                nal, feature_sps[feature_pps[pps_id].sequence_parameter_set_id],
+                feature_pps[pps_id],
+            )
+
+        deblocking = feature_header(31, 4)
+        assert (deblocking.disable_deblocking_filter_idc,
+                deblocking.slice_alpha_c0_offset_div2,
+                deblocking.slice_beta_offset_div2) == (0, 2, -3)
+        boundary = [feature_header(32, 9, index) for index in range(2)]
+        assert [header.first_macroblock_in_slice for header in boundary] == [0, 8]
+        assert [header.disable_deblocking_filter_idc for header in boundary] == [0, 1]
+        multiple = [feature_header(33, 9, index) for index in range(2)]
+        assert [header.slice_qp_delta for header in multiple] == [1, -1]
+        poc_one = feature_header(34, 6)
+        assert poc_one.idr and poc_one.pic_order_cnt_type == 1
+        assert feature_sps[1].gaps_in_frame_num_value_allowed
+        assert feature_pps[5].transform_8x8_mode
+        feature_header(35, 5)
+        feature_header(36, 5)
+        assert feature_sps[3].seq_scaling_list_present == (
+            True, False, False, False, False, False, True, False
+        )
+        feature_header(37, 7)
+        assert feature_sps[4].qpprime_y_zero_transform_bypass
+        assert feature_sps[4].vui_parameters_present
+        feature_header(38, 8)
+        signaling = split_h264_sample_nals(
+            reader.sample_at(39).data, reader.configuration.nal_length_size
+        )
+        assert [nal[0] & 0x1F for nal in signaling] == [9, 6, 5, 10, 11]
+        for index in range(31, 40):
             frame = decoder.decode_frame(index)
             assert (frame.width, frame.height) == (64, 64)
     finally:

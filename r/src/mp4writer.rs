@@ -3,7 +3,7 @@ use std::io;
 
 const VIDEO_FRAME_RATE: u32 = 60;
 const MIN_VIDEO_FRAME_COUNT: u32 = VIDEO_FRAME_RATE;
-const GENERATED_FEATURE_FRAME_COUNT: u32 = 31;
+const GENERATED_FEATURE_FRAME_COUNT: u32 = 40;
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
 #[derive(Clone, Debug, Default)]
@@ -556,13 +556,30 @@ impl Mp4Writer {
         let audio_duration_ms =
             (audio_sample_count * 1000 + AUDIO_SAMPLE_RATE - 1) / AUDIO_SAMPLE_RATE;
         let movie_duration_ms = video_duration_ms.max(audio_duration_ms);
-        let sps = encoder.sequence_parameter_set();
+        let sps_sets = [
+            encoder.sequence_parameter_set(),
+            encoder.sequence_parameter_set_with(1, 1, false, false, true, false),
+            encoder.sequence_parameter_set_with(3, 2, false, true, false, false),
+            encoder.sequence_parameter_set_with(4, 2, true, false, false, true),
+        ];
         let pps_sets = [
             encoder.picture_parameter_set(),
             encoder.picture_parameter_set_with(1, false, 1),
             encoder.picture_parameter_set_with(2, false, 2),
             encoder.picture_parameter_set_with(3, true, 0),
+            encoder.picture_parameter_set_custom(4, 0, true, 0, false),
+            encoder.picture_parameter_set_custom(5, 0, true, 0, true),
+            encoder.picture_parameter_set_custom(6, 1, false, 0, false),
+            encoder.picture_parameter_set_custom(7, 3, true, 0, true),
+            encoder.picture_parameter_set_custom(8, 4, true, 0, true),
+            encoder.picture_parameter_set_custom(9, 0, false, 0, false),
         ];
+        let mut sps_payload = Vec::new();
+        sps_payload.push(0xe0 | sps_sets.len() as u8);
+        for sps in &sps_sets {
+            sps_payload.extend(u16s(&[sps.len() as u16]));
+            sps_payload.extend(sps);
+        }
         let mut pps_payload = Vec::new();
         pps_payload.push(pps_sets.len() as u8);
         for pps in pps_sets {
@@ -572,9 +589,8 @@ impl Mp4Writer {
         let avcc = mp4_box(
             b"avcC",
             &[
-                &[1, sps[1], sps[2], sps[3], 0xff, 0xe1],
-                &u16s(&[sps.len() as u16]),
-                &sps,
+                &[1, sps_sets[0][1], sps_sets[0][2], sps_sets[0][3], 0xff],
+                &sps_payload,
                 &pps_payload,
             ],
         );

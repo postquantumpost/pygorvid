@@ -161,7 +161,10 @@ decode/presentation order. Frames 21–23 add spatial and temporal direct B
 prediction plus B partition choices. Frames 24–25 use explicit and implicit
 weighted bi-prediction. Frame 26 adds P-slice CAVLC residual reconstruction.
 Frames 27–30 switch selected slices to CABAC and cover I, P, B/direct, and
-residual syntax. The remaining 29 frames are gray IDR padding. All
+residual syntax. Frames 31–33 exercise deblocking and slice boundaries,
+frame 34 activates POC type 1, frames 35–38 cover 8x8 transforms,
+Intra_8x8, scaling matrices, and transform bypass, and frame 39 adds VUI,
+SEI, AUD, and end markers. The remaining 21 frames are gray IDR padding. All
 pictures use High H.264 Level 2.0, with four-byte MP4 NAL lengths and signed
 composition offsets for the B-picture reorder. The audio
 track is uncompressed signed 16-bit

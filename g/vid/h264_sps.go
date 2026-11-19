@@ -30,6 +30,11 @@ type SPSInfo struct {
 	OffsetForNonRefPic          int64
 	OffsetForTopToBottomField   int64
 	OffsetForRefFrame           []int64
+	QPPrimeYZeroTransformBypass bool
+	SeqScalingMatrixPresent     bool
+	SeqScalingListPresent       [8]bool
+	SeqScalingLists             [8][64]uint8
+	VUIParametersPresent        bool
 	MaxNumRefFrames             uint32
 	GapsInFrameNumValueAllowed  bool
 	FrameMbsOnly                bool
@@ -118,10 +123,11 @@ func ParseSPS(nal []byte) (SPSInfo, error) {
 		}
 		info.BitDepthLuma = uint8(8 + lumaDepth)
 		info.BitDepthChroma = uint8(8 + chromaDepth)
-		if _, err := reader.ReadBit(); err != nil {
+		info.QPPrimeYZeroTransformBypass, err = reader.ReadBit()
+		if err != nil {
 			return SPSInfo{}, fmt.Errorf("SPS qpprime_y_zero_transform_bypass_flag: %w", err)
 		}
-		if err := skipSPSScalingLists(reader, chromaFormat); err != nil {
+		if err := readSPSScalingLists(reader, chromaFormat, &info); err != nil {
 			return SPSInfo{}, err
 		}
 	}
@@ -232,7 +238,8 @@ func ParseSPS(nal []byte) (SPSInfo, error) {
 			return SPSInfo{}, err
 		}
 	}
-	if _, err := reader.ReadBit(); err != nil {
+	info.VUIParametersPresent, err = reader.ReadBit()
+	if err != nil {
 		return SPSInfo{}, fmt.Errorf("SPS vui_parameters_present_flag: %w", err)
 	}
 	if err := setSPSDimensions(&info, widthMbsMinus1, heightMapUnitsMinus1, info.FrameMbsOnly, cropLeft, cropRight, cropTop, cropBottom); err != nil {
@@ -274,11 +281,12 @@ func readSPSUE(reader *BitReader, field string) (uint32, error) {
 	return value, nil
 }
 
-func skipSPSScalingLists(reader *BitReader, chromaFormat uint32) error {
+func readSPSScalingLists(reader *BitReader, chromaFormat uint32, info *SPSInfo) error {
 	seqScalingMatrixPresent, err := reader.ReadBit()
 	if err != nil {
 		return fmt.Errorf("SPS seq_scaling_matrix_present_flag: %w", err)
 	}
+	info.SeqScalingMatrixPresent = seqScalingMatrixPresent
 	if !seqScalingMatrixPresent {
 		return nil
 	}
@@ -294,6 +302,7 @@ func skipSPSScalingLists(reader *BitReader, chromaFormat uint32) error {
 		if !present {
 			continue
 		}
+		info.SeqScalingListPresent[index] = true
 		size := 16
 		if index >= 6 {
 			size = 64
@@ -310,6 +319,7 @@ func skipSPSScalingLists(reader *BitReader, chromaFormat uint32) error {
 			if nextScale != 0 {
 				lastScale = nextScale
 			}
+			info.SeqScalingLists[index][listIndex] = uint8(lastScale)
 		}
 	}
 	return nil

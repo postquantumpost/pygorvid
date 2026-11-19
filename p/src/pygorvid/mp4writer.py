@@ -6,7 +6,7 @@ from .h264encoder import H264Encoder
 
 _VIDEO_FRAME_RATE = 60
 _MIN_VIDEO_FRAME_COUNT = _VIDEO_FRAME_RATE
-_GENERATED_FEATURE_FRAME_COUNT = 31
+_GENERATED_FEATURE_FRAME_COUNT = 40
 _AUDIO_SAMPLE_RATE = 48000
 
 
@@ -213,16 +213,39 @@ class Mp4Writer:
         video_duration_ms = (frame_count * 1000 + _VIDEO_FRAME_RATE - 1) // _VIDEO_FRAME_RATE
         audio_duration_ms = (audio_sample_count * 1000 + _AUDIO_SAMPLE_RATE - 1) // _AUDIO_SAMPLE_RATE
         movie_duration_ms = max(video_duration_ms, audio_duration_ms)
-        sps = encoder.sequence_parameter_set()
+        sps_sets = (
+            encoder.sequence_parameter_set(),
+            encoder._sequence_parameter_set(1, 1, gaps_allowed=True),
+            encoder._sequence_parameter_set(3, scaling_lists=True),
+            encoder._sequence_parameter_set(
+                4, transform_bypass=True, vui=True
+            ),
+        )
         pps_sets = (
             encoder.picture_parameter_set(),
             encoder._picture_parameter_set(1, False, 1),
             encoder._picture_parameter_set(2, False, 2),
             encoder._picture_parameter_set(3, True, 0),
+            encoder._picture_parameter_set(4, True, 0),
+            encoder._picture_parameter_set(5, True, 0, transform_8x8=True),
+            encoder._picture_parameter_set(6, False, 0, sps_id=1),
+            encoder._picture_parameter_set(
+                7, True, 0, sps_id=3, transform_8x8=True
+            ),
+            encoder._picture_parameter_set(
+                8, True, 0, sps_id=4, transform_8x8=True
+            ),
+            encoder._picture_parameter_set(9, False, 0),
         )
+        sps = sps_sets[0]
         avcc = _box(
-            b"avcC", bytes([1, sps[1], sps[2], sps[3], 0xFF, 0xE1]),
-            _u16(len(sps)), sps, bytes([len(pps_sets)]),
+            b"avcC", bytes([1, sps[1], sps[2], sps[3], 0xFF, 0xE0 | len(sps_sets)]),
+            *(
+                part
+                for sequence_set in sps_sets
+                for part in (_u16(len(sequence_set)), sequence_set)
+            ),
+            bytes([len(pps_sets)]),
             *(_u16(len(pps)) + pps for pps in pps_sets),
         )
         visual = _box(

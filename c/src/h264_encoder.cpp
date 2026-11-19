@@ -239,10 +239,12 @@ private:
 };
 
 std::vector<std::uint8_t> encode_picture_parameter_set(
-    std::uint32_t pps_id, bool cabac, std::uint32_t weighted_bipred_idc) {
+    std::uint32_t pps_id, bool cabac, std::uint32_t weighted_bipred_idc,
+    std::uint32_t sps_id = 0, bool transform_8x8_mode = false,
+    std::int32_t pic_init_qp_minus26 = 0) {
     BitWriter writer;
     writer.ue(pps_id);
-    writer.ue(0);
+    writer.ue(sps_id);
     writer.bits(cabac, 1);
     writer.bits(0, 1);
     for (int index = 0; index < 3; ++index) {
@@ -250,11 +252,80 @@ std::vector<std::uint8_t> encode_picture_parameter_set(
     }
     writer.bits(1, 1);
     writer.bits(weighted_bipred_idc, 2);
-    for (int index = 0; index < 3; ++index) {
-        writer.ue(0);
-    }
+    writer.se(pic_init_qp_minus26);
+    writer.se(0);
+    writer.se(0);
     writer.bits(0b100, 3);
+    if (transform_8x8_mode) {
+        writer.bits(1, 1);
+        writer.bits(0, 1);
+        writer.se(0);
+    }
     return writer.nal(0x68);
+}
+
+std::vector<std::uint8_t> sequence_parameter_set(
+    std::uint32_t sps_id, std::uint32_t poc_type,
+    bool transform_bypass, bool scaling_matrices,
+    bool gaps_allowed = false, bool vui = false) {
+    BitWriter writer;
+    writer.bits(100, 8);
+    writer.bits(0, 8);
+    writer.bits(20, 8);
+    writer.ue(sps_id);
+    writer.ue(1);
+    writer.ue(0);
+    writer.ue(0);
+    writer.bits(transform_bypass, 1);
+    writer.bits(scaling_matrices, 1);
+    if (scaling_matrices) {
+        for (int index = 0; index < 8; ++index) {
+            const bool present = index == 0 || index == 6;
+            writer.bits(present, 1);
+            if (present) {
+                writer.se(index < 6 ? 4 : 12);
+                for (int item = 1; item < (index < 6 ? 16 : 64); ++item) {
+                    writer.se(0);
+                }
+            }
+        }
+    }
+    writer.ue(0);
+    writer.ue(poc_type);
+    if (poc_type == 0) {
+        writer.ue(0);
+    } else if (poc_type == 1) {
+        writer.bits(0, 1);
+        writer.se(0);
+        writer.se(0);
+        writer.ue(1);
+        writer.se(2);
+    }
+    writer.ue(2);
+    writer.bits(gaps_allowed, 1);
+    writer.ue(3);
+    writer.ue(3);
+    writer.bits(0b110, 3);
+    writer.bits(vui, 1);
+    if (vui) {
+        writer.bits(1, 1);
+        writer.bits(1, 8);
+        writer.bits(0, 1);
+        writer.bits(1, 1);
+        writer.bits(5, 3);
+        writer.bits(1, 1);
+        writer.bits(1, 1);
+        writer.bits(1, 8);
+        writer.bits(1, 8);
+        writer.bits(1, 8);
+        writer.bits(0, 1);
+        writer.bits(1, 1);
+        writer.bits(1, 32);
+        writer.bits(120, 32);
+        writer.bits(1, 1);
+        writer.bits(0, 4);
+    }
+    return writer.nal(0x67);
 }
 
 void write_prediction_weight_table(
@@ -756,27 +827,136 @@ std::vector<std::uint8_t> encode_cabac_residual_frame() {
     return finish_cabac_frame(header, cabac);
 }
 
+std::vector<std::uint8_t> encode_cabac_i_slice(
+    std::uint32_t first_macroblock, std::uint32_t macroblock_count,
+    std::uint32_t pps_id, std::int32_t qp_delta,
+    std::uint32_t disable_deblocking, std::int32_t alpha_offset = 0,
+    std::int32_t beta_offset = 0, bool transform_8x8 = false,
+    bool explicit_prediction_modes = false, bool idr = false) {
+    BitWriter header;
+    header.ue(first_macroblock);
+    header.ue(2);
+    header.ue(pps_id);
+    header.bits(0, 4);
+    if (idr) {
+        header.ue(0);
+        header.bits(0, 2);
+    } else {
+        header.bits(0, 1);
+    }
+    header.se(qp_delta);
+    header.ue(disable_deblocking);
+    if (disable_deblocking != 1) {
+        header.se(alpha_offset);
+        header.se(beta_offset);
+    }
+    while (header.bit_count % 8) {
+        header.bits(1, 1);
+    }
+
+    CabacWriter cabac(make_cabac_slice_contexts(2, 0, 26 + qp_delta));
+    for (std::uint32_t macroblock = 0; macroblock < macroblock_count; ++macroblock) {
+        cabac.decision(false, 3);
+        const bool use_8x8 = transform_8x8;
+        if (transform_8x8) {
+            cabac.decision(true, 399 +
+                static_cast<std::size_t>(macroblock % 4 != 0) +
+                static_cast<std::size_t>(macroblock >= 4));
+        }
+        const int block_count = use_8x8 ? 4 : 16;
+        for (int block = 0; block < block_count; ++block) {
+            const std::uint8_t desired = explicit_prediction_modes
+                ? (macroblock >= 4 ? block
+                    : macroblock != 0 ? 1 + block % 2 : 2)
+                : 2;
+            if (desired != 2) {
+                cabac.decision(false, 68);
+                const int remaining = desired - (desired > 2 ? 1 : 0);
+                for (int bit = 0; bit < 3; ++bit) {
+                    cabac.decision((remaining >> bit) & 1, 69);
+                }
+            } else {
+                cabac.decision(true, 68);
+            }
+        }
+        cabac.decision(false, 64);
+        const int left = macroblock % 4 == 0 ? 15 : 0;
+        const int top = macroblock < 4 ? 15 : 0;
+        const bool has_residual = false;
+        cabac.luma_cbp(left, top, has_residual ? 1 : 0);
+        cabac.decision(false, 77);
+        if (has_residual) {
+            cabac.decision(false, 60);
+            cabac.decision(true, 93);
+            cabac.decision(true, 134);
+            cabac.decision(true, 195);
+            cabac.decision(false, 248);
+            cabac.bypass(false);
+            cabac.decision(false, 94);
+            cabac.decision(false, 95);
+            cabac.decision(false, 93);
+        }
+
+        if (macroblock + 1 != macroblock_count) {
+            cabac.terminate(false);
+        }
+    }
+    cabac.end();
+    auto rbsp = header.data;
+    const auto data = cabac.data();
+    rbsp.insert(rbsp.end(), data.begin(), data.end());
+    return cabac_nal(idr ? 0x65 : 0x21, rbsp);
+}
+
+std::vector<std::uint8_t> encode_cavlc_i_slice(
+    std::uint32_t first_macroblock, std::uint32_t macroblock_count,
+    std::int32_t qp_delta, std::uint32_t disable_deblocking,
+    std::int32_t alpha_offset, std::int32_t beta_offset) {
+    BitWriter writer;
+    writer.ue(first_macroblock);
+    writer.ue(2);
+    writer.ue(9);
+    writer.bits(0, 4);
+    writer.bits(0, 1);
+    writer.se(qp_delta);
+    writer.ue(disable_deblocking);
+    if (disable_deblocking != 1) {
+        writer.se(alpha_offset);
+        writer.se(beta_offset);
+    }
+    for (std::uint32_t index = 0; index < macroblock_count; ++index) {
+        writer.ue(0);
+        writer.bits(0xffff, 16);
+        writer.ue(0);
+        writer.ue(3);
+    }
+    return writer.nal(0x21);
+}
+
+std::vector<std::uint8_t> sample_nals(
+    const std::vector<std::vector<std::uint8_t>>& nals) {
+    std::vector<std::uint8_t> sample;
+    for (const auto& nal : nals) {
+        const auto value = static_cast<std::uint32_t>(nal.size());
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            sample.push_back(static_cast<std::uint8_t>(value >> shift));
+        }
+        sample.insert(sample.end(), nal.begin(), nal.end());
+    }
+    return sample;
+}
+
+std::vector<std::uint8_t> marker_nal(std::uint8_t header,
+                                      std::vector<std::uint8_t> payload = {}) {
+    payload.push_back(0x80);
+    return cabac_nal(header, payload);
+}
+
 } // namespace
 
 std::vector<std::uint8_t> H264Encoder::sequence_parameter_set() const {
-    BitWriter writer;
-    writer.bits(100, 8);
-    writer.bits(0, 8);
-    writer.bits(20, 8);
-    writer.ue(0);
-    for (const auto value : {1u, 0u, 0u}) {
-        writer.ue(value);
-    }
-    writer.bits(0, 1);
-    writer.bits(0, 1);
-    for (const auto value : {0u, 2u, 2u}) {
-        writer.ue(value);
-    }
-    writer.bits(0, 1);
-    writer.ue(3);
-    writer.ue(3);
-    writer.bits(0b1100, 4);
-    return writer.nal(0x67);
+    return ::pygorvid::sequence_parameter_set(
+        0, 2, false, false, false, false);
 }
 
 std::vector<std::uint8_t> H264Encoder::picture_parameter_set() const {
@@ -1026,6 +1206,68 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
     }
     if (frame_index == 30) {
         return encode_cabac_residual_frame();
+    }
+    if (frame_index == 31) {
+        return sample_nals({encode_cabac_i_slice(
+            0, 16, 4, 0, 0, 2, -3)});
+    }
+    if (frame_index == 32) {
+        return sample_nals({
+            encode_cavlc_i_slice(0, 8, 0, 0, 2, -2),
+            encode_cavlc_i_slice(8, 8, 0, 1, 0, 0),
+        });
+    }
+    if (frame_index == 33) {
+        return sample_nals({
+            encode_cavlc_i_slice(0, 8, 1, 0, 1, -1),
+            encode_cavlc_i_slice(8, 8, -1, 0, 1, -1),
+        });
+    }
+    if (frame_index == 34) {
+        BitWriter writer;
+        for (const auto value : {0u, 2u, 6u}) writer.ue(value);
+        writer.bits(0, 4);
+        writer.ue(0);
+        writer.se(0);
+        writer.bits(0, 2);
+        writer.se(0);
+        writer.ue(0);
+        writer.se(0);
+        writer.se(0);
+        for (int macroblock = 0; macroblock < 16; ++macroblock) {
+            writer.ue(25);
+            writer.align();
+            writer.data.insert(writer.data.end(), 384, 128);
+            writer.bit_count += 384 * 8;
+        }
+        return sample_nals({writer.nal(0x65)});
+    }
+    if (frame_index == 35) {
+        return sample_nals({encode_cabac_i_slice(
+            0, 16, 5, 0, 0, 0, 0, true)});
+    }
+    if (frame_index == 36) {
+        return sample_nals({encode_cabac_i_slice(
+            0, 16, 5, 0, 0, 0, 0, true, true)});
+    }
+    if (frame_index == 37) {
+        return sample_nals({encode_cabac_i_slice(
+            0, 16, 7, 0, 0, 0, 0, true, false, true)});
+    }
+    if (frame_index == 38) {
+        return sample_nals({encode_cabac_i_slice(
+            0, 16, 8, 0, 0, 0, 0, true, false, true)});
+    }
+    if (frame_index == 39) {
+        return sample_nals({
+            marker_nal(0x09, {0x10}),
+            marker_nal(0x06, {5, 0x12, 'P', 'Y', 'G', 'O', 'R', 'V', 'I',
+                              'D', '-', 'F', 'R', 'A', 'M', 'E', '-', '3',
+                              '9', '!'}),
+            encode_cabac_i_slice(0, 16, 8, 0, 0, 0, 0, true, false, true),
+            marker_nal(0x0a),
+            marker_nal(0x0b),
+        });
     }
     return encode_pcm_frame(frame_index, frame_index == 1);
 }

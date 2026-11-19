@@ -131,9 +131,17 @@ CBP, and termination. Frame 28 adds CABAC P skip, type, motion, and CBP
 contexts; frame 29 covers CABAC B skip/direct and direct prediction. Frame 30
 adds CABAC significance, last-significance, coefficient-level, sign, and block
 termination paths, with deterministic sparse residual reconstruction.
+Frames 31–39 complete the deblocking and High-profile core path. Frames 31–33
+signal deblocking strengths/offsets and split pictures into independently
+controlled raster slices. Frame 34 activates a POC type-1 sequence with
+permitted frame-number gaps. Frames 35 and 36 select 8x8 transforms and
+Intra_8x8 prediction modes. Frame 37 signals non-default sequence scaling
+lists, frame 38 enables transform bypass, and frame 39 adds VUI, SEI, access
+unit delimiters, and end-of-sequence/end-of-stream NAL units around unchanged
+picture content.
 Gray IDR padding follows through frame 60; the padded duration is at least one
-second. All current pictures use High-profile I_PCM, I_16x16, Intra_4x4, P, or
-B syntax. The plan changes the
+second. All current pictures use progressive 8-bit 4:2:0 High-profile syntax,
+including I_PCM, I_16x16, Intra_4x4, Intra_8x8, P, and B pictures. The plan changes the
 eventual core video sequence to Progressive High, 8-bit 4:2:0, progressive,
 so CAVLC, CABAC, B pictures, and 8x8 transform tools can be introduced
 without changing profile halfway through the core sequence. Frame 1 remains

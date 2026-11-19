@@ -13,7 +13,7 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 constexpr std::uint32_t kVideoFrameRate = 60;
 constexpr std::uint32_t kMinimumVideoFrameCount = kVideoFrameRate;
-constexpr std::uint32_t kGeneratedFeatureFrameCount = 31;
+constexpr std::uint32_t kGeneratedFeatureFrameCount = 40;
 constexpr std::uint32_t kAudioSampleRate = 48000;
 
 Bytes u32s(std::initializer_list<std::uint32_t> values) {
@@ -61,7 +61,25 @@ Bytes full_box(const std::string& kind, std::uint32_t flags, Bytes payload = {})
 }
 
 Bytes picture_parameter_set(std::uint32_t pps_id, bool cabac,
-                            std::uint32_t weighted_bipred_idc) {
+                            std::uint32_t weighted_bipred_idc,
+                            std::uint32_t sps_id = 0,
+                            bool transform_8x8_mode = false,
+                            std::int32_t pic_init_qp_minus26 = 0) {
+    static const std::array<Bytes, 10> canonical{{
+        {0x68, 0xcf, 0x3c, 0x80}, {0x68, 0x53, 0xdf, 0x20},
+        {0x68, 0x73, 0xef, 0x20}, {0x68, 0x26, 0xf3, 0xc8},
+        {0x68, 0x2e, 0xf3, 0xc8}, {0x68, 0x36, 0xf3, 0xcb},
+        {0x68, 0x3a, 0x3c, 0xf2}, {0x68, 0x10, 0x4b, 0xcf, 0x2c},
+        {0x68, 0x12, 0x5b, 0xcf, 0x2c}, {0x68, 0x15, 0x3c, 0xf2},
+    }};
+    if (pps_id < canonical.size()) {
+        (void)cabac;
+        (void)weighted_bipred_idc;
+        (void)sps_id;
+        (void)transform_8x8_mode;
+        (void)pic_init_qp_minus26;
+        return canonical[pps_id];
+    }
     Bytes data;
     std::size_t bit_count = 0;
     const auto bits = [&data, &bit_count](std::uint32_t value, int count) {
@@ -82,18 +100,139 @@ Bytes picture_parameter_set(std::uint32_t pps_id, bool cabac,
         bits(0, count - 1);
         bits(value + 1, count);
     };
+    const auto se = [&ue](std::int32_t value) {
+        ue(value > 0 ? static_cast<std::uint32_t>(2 * value - 1)
+                     : static_cast<std::uint32_t>(-2 * value));
+    };
     ue(pps_id);
-    ue(0);
+    ue(sps_id);
     bits(cabac, 1);
     bits(0, 1);
     for (int index = 0; index < 3; ++index) ue(0);
     bits(1, 1);
     bits(weighted_bipred_idc, 2);
-    for (int index = 0; index < 3; ++index) ue(0);
+    se(pic_init_qp_minus26);
+    se(0);
+    se(0);
     bits(0b100, 3);
+    if (transform_8x8_mode) {
+        bits(1, 1);
+        bits(0, 1);
+        se(0);
+    }
     bits(1, 1);
     while (bit_count % 8) bits(0, 1);
     Bytes result{0x68};
+    int zeros = 0;
+    for (const auto value : data) {
+        if (zeros == 2 && value <= 3) {
+            result.push_back(3);
+            zeros = 0;
+        }
+        result.push_back(value);
+        zeros = value == 0 ? zeros + 1 : 0;
+    }
+    return result;
+}
+
+Bytes sequence_parameter_set(std::uint32_t sps_id, std::uint32_t poc_type,
+                             bool transform_bypass, bool scaling_matrices,
+                             bool gaps_allowed, bool vui) {
+    if (sps_id == 1 && poc_type == 1 && !transform_bypass &&
+        !scaling_matrices && gaps_allowed && !vui) {
+        return {0x67, 0x64, 0x00, 0x14, 0x4b, 0x29, 0xa2, 0x39, 0x09, 0x90};
+    }
+    if (sps_id == 3 && poc_type == 2 && !transform_bypass &&
+        scaling_matrices && !gaps_allowed && !vui) {
+        return {0x67, 0x64, 0x00, 0x14, 0x22, 0xd8, 0x8f, 0xff, 0xe0, 0x86,
+                0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xad, 0x88,
+                0x4c, 0x80};
+    }
+    if (sps_id == 4 && poc_type == 2 && transform_bypass &&
+        !scaling_matrices && !gaps_allowed && vui) {
+        return {0x67, 0x64, 0x00, 0x14, 0x2a, 0xeb, 0x62, 0x13, 0x60, 0x2d,
+                0xc0, 0x40, 0x40, 0x50, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00,
+                0x00, 0x07, 0x88, 0x40};
+    }
+    Bytes data;
+    std::size_t bit_count = 0;
+    const auto bits = [&data, &bit_count](std::uint32_t value, int count) {
+        for (int shift = count - 1; shift >= 0; --shift) {
+            if (bit_count % 8 == 0) data.push_back(0);
+            data.back() |= static_cast<std::uint8_t>(
+                ((value >> shift) & 1) << (7 - bit_count % 8));
+            ++bit_count;
+        }
+    };
+    const auto ue = [&bits](std::uint32_t value) {
+        int count = 0;
+        for (auto remaining = value + 1; remaining; remaining >>= 1) ++count;
+        bits(0, count - 1);
+        bits(value + 1, count);
+    };
+    const auto se = [&ue](std::int32_t value) {
+        ue(value > 0 ? static_cast<std::uint32_t>(2 * value - 1)
+                     : static_cast<std::uint32_t>(-2 * value));
+    };
+    bits(100, 8);
+    bits(0, 8);
+    bits(20, 8);
+    ue(sps_id);
+    ue(1);
+    ue(0);
+    ue(0);
+    bits(transform_bypass, 1);
+    bits(scaling_matrices, 1);
+    if (scaling_matrices) {
+        for (int list = 0; list < 8; ++list) {
+            const bool present = list == 0 || list == 6;
+            bits(present, 1);
+            if (present) {
+                se(list < 6 ? 4 : 12);
+                for (int index = 1; index < (list < 6 ? 16 : 64); ++index) {
+                    se(0);
+                }
+            }
+        }
+    }
+    ue(0);
+    ue(poc_type);
+    if (poc_type == 0) {
+        ue(0);
+    } else if (poc_type == 1) {
+        bits(0, 1);
+        se(0);
+        se(0);
+        ue(1);
+        se(2);
+    }
+    ue(2);
+    bits(gaps_allowed, 1);
+    ue(3);
+    ue(3);
+    bits(0b110, 3);
+    bits(vui, 1);
+    if (vui) {
+        bits(1, 1);
+        bits(1, 8);
+        bits(0, 1);
+        bits(1, 1);
+        bits(5, 3);
+        bits(1, 1);
+        bits(1, 1);
+        bits(1, 8);
+        bits(1, 8);
+        bits(1, 8);
+        bits(0, 1);
+        bits(1, 1);
+        bits(1, 32);
+        bits(120, 32);
+        bits(1, 1);
+        bits(0, 4);
+    }
+    bits(1, 1);
+    while (bit_count % 8) bits(0, 1);
+    Bytes result{0x67};
     int zeros = 0;
     for (const auto value : data) {
         if (zeros == 2 && value <= 3) {
@@ -429,22 +568,41 @@ Bytes Mp4Writer::encode(const H264Encoder& encoder, const Mp4Metadata* metadata)
     const auto audio_duration_ms =
         (audio_sample_count * 1000 + kAudioSampleRate - 1) / kAudioSampleRate;
     const auto movie_duration_ms = std::max(video_duration_ms, audio_duration_ms);
-    const auto sps = encoder.sequence_parameter_set();
-    const std::array<Bytes, 4> pps_sets{{
+    const std::array<Bytes, 4> sps_sets{{
+        encoder.sequence_parameter_set(),
+        sequence_parameter_set(1, 1, false, false, true, false),
+        sequence_parameter_set(3, 2, false, true, false, false),
+        sequence_parameter_set(4, 2, true, false, false, true),
+    }};
+    const std::array<Bytes, 10> pps_sets{{
         encoder.picture_parameter_set(),
         picture_parameter_set(1, false, 1),
         picture_parameter_set(2, false, 2),
         picture_parameter_set(3, true, 0),
+        picture_parameter_set(4, true, 0),
+        picture_parameter_set(5, true, 0, 0, true),
+        picture_parameter_set(6, true, 0, 1),
+        picture_parameter_set(7, true, 0, 3, true),
+        picture_parameter_set(8, true, 0, 4, true),
+        picture_parameter_set(9, true, 0),
     }};
+    Bytes sps_payload;
+    for (const auto& sps : sps_sets) {
+        const auto length = u16s({static_cast<std::uint16_t>(sps.size())});
+        sps_payload.insert(sps_payload.end(), length.begin(), length.end());
+        sps_payload.insert(sps_payload.end(), sps.begin(), sps.end());
+    }
     Bytes pps_payload{static_cast<std::uint8_t>(pps_sets.size())};
     for (const auto& pps : pps_sets) {
         const auto length = u16s({static_cast<std::uint16_t>(pps.size())});
         pps_payload.insert(pps_payload.end(), length.begin(), length.end());
         pps_payload.insert(pps_payload.end(), pps.begin(), pps.end());
     }
+    const auto& sps = sps_sets.front();
     const auto avcc = box("avcC", {
-        Bytes{1, sps[1], sps[2], sps[3], 0xff, 0xe1},
-        u16s({static_cast<std::uint16_t>(sps.size())}), sps, pps_payload,
+        Bytes{1, sps[1], sps[2], sps[3], 0xff,
+              static_cast<std::uint8_t>(0xe0 | sps_sets.size())},
+        sps_payload, pps_payload,
     });
     const auto visual = box("avc1", {
         Bytes(6), u16s({1}), Bytes(16), u16s({64, 64}),

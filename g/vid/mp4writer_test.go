@@ -3,6 +3,7 @@ package vid
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
 	"strings"
 	"testing"
 )
@@ -95,4 +96,200 @@ func TestMp4WindowsXtra(t *testing.T) {
 			t.Fatalf("incorrect year for %q: %v", date, err)
 		}
 	}
+}
+
+func TestGeneratedH264FeatureFrames31Through39(t *testing.T) {
+	t.Setenv("PATH", "")
+	const path = "generated-h264-features.mp4"
+	payload := NewMp4Writer().Encode(NewH264Encoder())
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	reader, err := OpenVideoSampleReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if got := reader.SampleCount(); got != 60 {
+		t.Fatalf("sample count = %d; want 60", got)
+	}
+	configuration := reader.Configuration()
+	if len(configuration.SequenceSets) != 4 || len(configuration.PictureSets) != 10 {
+		t.Fatalf("avcC parameter set counts = %d/%d; want 4/10",
+			len(configuration.SequenceSets), len(configuration.PictureSets))
+	}
+	sps := make(map[uint32]SPSInfo)
+	for _, nal := range configuration.SequenceSets {
+		info, err := ParseSPS(nal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sps[info.ID] = info
+	}
+	pps := make(map[uint32]PPSInfo)
+	for _, nal := range configuration.PictureSets {
+		info, err := ParsePPS(nal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pps[info.PictureParameterSetID] = info
+	}
+	if sps[1].PicOrderCntType != 1 || !sps[1].GapsInFrameNumValueAllowed ||
+		!sps[3].SeqScalingMatrixPresent || !sps[3].SeqScalingListPresent[0] ||
+		!sps[3].SeqScalingListPresent[6] || sps[3].SeqScalingLists[0][0] != 12 ||
+		sps[3].SeqScalingLists[6][0] != 20 || !sps[4].QPPrimeYZeroTransformBypass ||
+		!sps[4].VUIParametersPresent || !pps[5].Transform8x8Mode {
+		t.Fatalf("generated parameter-set features missing: SPS=%+v PPS5=%+v", sps, pps[5])
+	}
+	nalCounts := []int{1, 2, 2, 1, 1, 1, 1, 1, 5}
+	for offset, wantCount := range nalCounts {
+		sample, err := reader.SampleAt(uint64(31 + offset))
+		if err != nil {
+			t.Fatal(err)
+		}
+		nals, err := SplitH264SampleNALs(sample.Data, 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nals) != wantCount {
+			t.Fatalf("frame %d NAL count = %d; want %d", 31+offset, len(nals), wantCount)
+		}
+		var headers []SliceHeader
+		for _, nal := range nals {
+			header, err := ParseNALHeader(nal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if header.UnitType != 1 && header.UnitType != 5 {
+				continue
+			}
+			_, ppsID, err := readGeneratedPPSID(nal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			slice, err := ParseSliceHeader(nal, sps[pps[ppsID].SequenceParameterSetID], pps[ppsID])
+			if err != nil {
+				t.Fatal(err)
+			}
+			headers = append(headers, slice)
+		}
+		switch offset {
+		case 0:
+			if len(headers) != 1 || headers[0].DisableDeblockingFilterIDC != 0 ||
+				headers[0].SliceAlphaC0OffsetDiv2 != 2 || headers[0].SliceBetaOffsetDiv2 != -3 {
+				t.Fatalf("frame 31 deblocking header = %+v", headers)
+			}
+		case 1:
+			if len(headers) != 2 || headers[0].DisableDeblockingFilterIDC != 0 ||
+				headers[0].SliceAlphaC0OffsetDiv2 != 2 || headers[0].SliceBetaOffsetDiv2 != -2 ||
+				headers[1].DisableDeblockingFilterIDC != 1 {
+				t.Fatalf("frame 32 deblocking headers = %+v", headers)
+			}
+		case 2:
+			deltas := []int64{1, -1}
+			for index, header := range headers {
+				if header.FirstMacroblockInSlice != uint32(index*8) || header.SliceQPDelta != deltas[index] {
+					t.Fatalf("frame 33 slice %d = %+v", index, header)
+				}
+			}
+		case 3:
+			if len(headers) != 1 || !headers[0].IDR || headers[0].PictureParameterSetID != 6 ||
+				headers[0].PicOrderCntType != 1 || !headers[0].HasDeltaPicOrderCnt0 {
+				t.Fatalf("frame 34 POC type 1 header = %+v", headers)
+			}
+		case 4, 5:
+			if len(headers) != 1 || headers[0].PictureParameterSetID != 5 {
+				t.Fatalf("frame %d 8x8 PPS header = %+v", 35+offset-4, headers)
+			}
+		}
+	}
+
+	decoder := NewH264Decoder(reader)
+	decoder.SetThreads(1)
+	for index := 0; index < 60; index++ {
+		frame, err := decoder.DecodeFrame(uint64(index))
+		if err != nil {
+			t.Fatalf("native DecodeFrame(%d): %v", index, err)
+		}
+		if frame.Width != 64 || frame.Height != 64 {
+			t.Fatalf("native frame %d dimensions = %dx%d", index, frame.Width, frame.Height)
+		}
+	}
+
+	for _, test := range []struct {
+		presentationIndex uint64
+		all               bool
+	}{{35, true}, {36, true}} {
+		inspector := NewH264Decoder(reader)
+		inspector.SetThreads(1)
+		if _, err := inspector.DecodeFrame(test.presentationIndex); err != nil {
+			t.Fatalf("inspect frame %d: %v", test.presentationIndex, err)
+		}
+		trueCount := 0
+		var modes [9]bool
+		for _, block := range inspector.nativeBlocks {
+			if block.result.TransformSize8x8 {
+				trueCount++
+				for _, mode := range block.result.Luma8x8Modes {
+					modes[mode] = true
+				}
+			}
+		}
+		if trueCount == 0 || test.all != (trueCount == len(inspector.nativeBlocks)) {
+			t.Fatalf("frame %d 8x8 transform count = %d/%d", test.presentationIndex,
+				trueCount, len(inspector.nativeBlocks))
+		}
+		if test.presentationIndex == 36 && (!modes[0] || !modes[1] || !modes[2]) {
+			t.Fatalf("frame 36 8x8 prediction modes = %v", modes)
+		}
+	}
+
+	frame38, err := reader.SampleAt(38)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame38NALs, err := SplitH264SampleNALs(frame38.Data, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame39, err := reader.SampleAt(39)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nals, err := SplitH264SampleNALs(frame39.Data, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := make([]uint8, 0, len(nals))
+	for _, nal := range nals {
+		header, err := ParseNALHeader(nal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		types = append(types, header.UnitType)
+	}
+	if !bytes.Equal(types, []byte{9, 6, 5, 10, 11}) {
+		t.Fatalf("frame 39 NAL types = %v", types)
+	}
+	if len(frame38NALs) != 1 || !bytes.Equal(frame38NALs[0], nals[2]) {
+		t.Fatal("frame 39 did not preserve frame 38's coded picture")
+	}
+}
+
+func readGeneratedPPSID(nal []byte) (bool, uint32, error) {
+	rbsp, err := EBSPToRBSP(nal[1:])
+	if err != nil {
+		return false, 0, err
+	}
+	reader := NewBitReader(rbsp)
+	if _, err := reader.ReadUE(); err != nil {
+		return false, 0, err
+	}
+	if _, err := reader.ReadUE(); err != nil {
+		return false, 0, err
+	}
+	ppsID, err := reader.ReadUE()
+	return err == nil, ppsID, err
 }

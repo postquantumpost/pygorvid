@@ -469,22 +469,64 @@ mod tests {
         );
         let reader = pygorvid::VideoSampleReader::open(output).unwrap();
         assert_eq!(reader.sample_count(), 60);
+        let configuration = reader.configuration();
+        assert_eq!(
+            configuration
+                .sequence_parameter_sets
+                .iter()
+                .map(|nal| pygorvid::parse_sps(nal).unwrap().sps_id)
+                .collect::<Vec<_>>(),
+            [0, 1, 3, 4]
+        );
+        assert_eq!(configuration.picture_parameter_sets.len(), 10);
+        let pps: Vec<_> = configuration
+            .picture_parameter_sets
+            .iter()
+            .map(|nal| pygorvid::parse_pps(nal).unwrap())
+            .collect();
+        assert_eq!(
+            pps.iter()
+                .map(|entry| entry.picture_parameter_set_id)
+                .collect::<Vec<_>>(),
+            (0..10).collect::<Vec<_>>()
+        );
+        assert_eq!(pps[4].deblocking_filter_control_present, true);
+        assert_eq!(pps[5].transform_8x8_mode, true);
+        assert_eq!(pps[6].entropy_coding_mode, false);
+        assert_eq!(pps[7].transform_8x8_mode, true);
+        assert_eq!(pps[8].transform_8x8_mode, true);
+        assert_eq!(pps[9].entropy_coding_mode, false);
         let mut reader = reader;
         for index in [0, 1, 2, 59] {
             let sample = reader.sample_at(index).unwrap();
             assert_eq!(sample.dts_ticks, index as i64);
             assert_eq!(sample.pts_ticks, index as i64);
             assert_eq!(sample.duration_ticks, 1);
-            assert!(sample.is_sync);
+            assert_eq!(sample.is_sync, index != 2);
             if index == 1 {
                 assert!(sample.data.windows(4).any(|bytes| bytes == [0, 0, 3, 1]));
             }
         }
+        for (index, expected_nals) in [1_u8, 2, 2, 1, 1, 1, 1, 1, 5].into_iter().enumerate() {
+            let sample = reader.sample_at(index + 31).unwrap();
+            let nals = pygorvid::split_h264_sample_nals(&sample.data, 4).unwrap();
+            assert_eq!(nals.len(), expected_nals as usize, "frame {}", index + 31);
+            if index == 8 {
+                assert_eq!(
+                    nals.iter().map(|nal| nal[0] & 0x1f).collect::<Vec<_>>(),
+                    [9, 6, 5, 10, 11]
+                );
+                assert_eq!(&nals[1][1..3], [5, 0x12]);
+            }
+        }
         let mut decoder = pygorvid::H264Decoder::new(reader);
         decoder.set_threads(1);
-        for index in [0, 1, 2, 59] {
+        for index in 0..60 {
             let frame = decoder.decode_frame(index).unwrap();
             assert_eq!((frame.width, frame.height), (64, 64));
+            if ![0, 1, 59].contains(&index) {
+                continue;
+            }
             let mut expected_luma = vec![128; 4096];
             if index == 1 {
                 expected_luma[..3].copy_from_slice(&[0, 0, 1]);

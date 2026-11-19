@@ -90,6 +90,10 @@ struct CabacWriter {
 
 impl CabacWriter {
     fn new(slice_type: u8) -> Self {
+        Self::new_at_qp(slice_type, 26)
+    }
+
+    fn new_at_qp(slice_type: u8, qpy: i32) -> Self {
         let column = if matches!(slice_type % 5, 2 | 4) {
             0
         } else {
@@ -97,7 +101,7 @@ impl CabacWriter {
         };
         let contexts = CONTEXT_INIT_TABLE[column]
             .iter()
-            .map(|(m, n)| CabacContextModel::new(i32::from(*m), i32::from(*n), 26).unwrap())
+            .map(|(m, n)| CabacContextModel::new(i32::from(*m), i32::from(*n), qpy).unwrap())
             .collect();
         Self::with_contexts(contexts)
     }
@@ -228,23 +232,74 @@ impl H264Encoder {
     }
 
     pub fn sequence_parameter_set(&self) -> Vec<u8> {
+        self.sequence_parameter_set_with(0, 2, false, false, false, false)
+    }
+
+    pub(crate) fn sequence_parameter_set_with(
+        &self,
+        sps_id: u32,
+        pic_order_cnt_type: u32,
+        transform_bypass: bool,
+        scaling_matrices: bool,
+        gaps_allowed: bool,
+        vui: bool,
+    ) -> Vec<u8> {
         let mut writer = BitWriter::default();
         writer.bits(100, 8);
         writer.bits(0, 8);
         writer.bits(20, 8);
-        writer.ue(0);
+        writer.ue(sps_id);
         for value in [1, 0, 0] {
             writer.ue(value);
         }
-        writer.bits(0, 1);
-        writer.bits(0, 1);
-        for value in [0, 2, 2] {
-            writer.ue(value);
+        writer.bits(u32::from(transform_bypass), 1);
+        writer.bits(u32::from(scaling_matrices), 1);
+        if scaling_matrices {
+            for list_index in 0..8 {
+                let present = matches!(list_index, 0 | 6);
+                writer.bits(u32::from(present), 1);
+                if present {
+                    let size = if list_index < 6 { 16 } else { 64 };
+                    writer.se(if list_index < 6 { 4 } else { 12 });
+                    for _ in 1..size {
+                        writer.se(0);
+                    }
+                }
+            }
         }
-        writer.bits(0, 1);
+        writer.ue(0);
+        writer.ue(pic_order_cnt_type);
+        if pic_order_cnt_type == 1 {
+            writer.bits(0, 1);
+            writer.se(0);
+            writer.se(0);
+            writer.ue(1);
+            writer.se(2);
+        }
+        writer.ue(2);
+        writer.bits(u32::from(gaps_allowed), 1);
         writer.ue(3);
         writer.ue(3);
-        writer.bits(0b1100, 4);
+        writer.bits(0b110, 3);
+        writer.bits(u32::from(vui), 1);
+        if vui {
+            writer.bits(1, 1);
+            writer.bits(1, 8);
+            writer.bits(0, 1);
+            writer.bits(1, 1);
+            writer.bits(5, 3);
+            writer.bits(1, 1);
+            writer.bits(1, 1);
+            for value in [1_u32, 1, 1] {
+                writer.bits(value, 8);
+            }
+            writer.bits(0, 1);
+            writer.bits(1, 1);
+            writer.bits(1, 32);
+            writer.bits(120, 32);
+            writer.bits(1, 1);
+            writer.bits(0, 4);
+        }
         writer.nal(0x67)
     }
 
@@ -258,9 +313,20 @@ impl H264Encoder {
         cabac: bool,
         weighted_bipred_idc: u32,
     ) -> Vec<u8> {
+        self.picture_parameter_set_custom(pps_id, 0, cabac, weighted_bipred_idc, false)
+    }
+
+    pub(crate) fn picture_parameter_set_custom(
+        &self,
+        pps_id: u32,
+        sps_id: u32,
+        cabac: bool,
+        weighted_bipred_idc: u32,
+        transform_8x8: bool,
+    ) -> Vec<u8> {
         let mut writer = BitWriter::default();
         writer.ue(pps_id);
-        writer.ue(0);
+        writer.ue(sps_id);
         writer.bits(u32::from(cabac), 1);
         writer.bits(0, 1);
         for _ in 0..3 {
@@ -272,6 +338,11 @@ impl H264Encoder {
             writer.ue(0);
         }
         writer.bits(0b100, 3);
+        if transform_8x8 {
+            writer.bits(1, 1);
+            writer.bits(0, 1);
+            writer.se(0);
+        }
         writer.nal(0x68)
     }
 
@@ -331,12 +402,46 @@ impl H264Encoder {
         if frame_index == 30 {
             return self.encode_cabac_residual_frame();
         }
+        if frame_index == 31 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 32 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 33 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 34 {
+            return self.encode_poc_type1_idr_frame();
+        }
+        if frame_index == 35 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 36 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 37 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 38 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 39 {
+            return self.encode_cabac_feature_frame(frame_index);
+        }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
 
     fn sample(nal: Vec<u8>) -> Vec<u8> {
-        let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
-        sample.extend(nal);
+        Self::sample_nals([nal])
+    }
+
+    fn sample_nals(nals: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+        let mut sample = Vec::new();
+        for nal in nals {
+            sample.extend((nal.len() as u32).to_be_bytes());
+            sample.extend(nal);
+        }
         sample
     }
 
@@ -684,6 +789,206 @@ impl H264Encoder {
         let mut rbsp = header.data;
         rbsp.extend(cabac.data(4));
         Self::sample(Self::cabac_nal(0x21, &rbsp))
+    }
+
+    fn write_cabac_intra_mode(cabac: &mut CabacWriter, predicted: u8, desired: u8) {
+        if desired == predicted {
+            cabac.decision(true, 68);
+            return;
+        }
+        cabac.decision(false, 68);
+        let remainder = desired - u8::from(desired >= predicted);
+        for bit in 0..3 {
+            cabac.decision(remainder & (1 << bit) != 0, 69);
+        }
+    }
+
+    fn encode_cabac_feature_slice(
+        frame_index: u16,
+        first_mb: u32,
+        count: u32,
+        pps_id: u32,
+        qp_delta: i32,
+        disable_idc: u32,
+        alpha: i32,
+        beta: i32,
+        idr: bool,
+    ) -> Vec<u8> {
+        let mut header = BitWriter::default();
+        header.ue(first_mb);
+        header.ue(2);
+        header.ue(pps_id);
+        header.bits(0, 4);
+        if idr {
+            header.ue(0);
+            header.bits(0, 2);
+        } else {
+            header.bits(0, 1);
+        }
+        header.se(qp_delta);
+        header.ue(disable_idc);
+        if disable_idc != 1 {
+            header.se(alpha);
+            header.se(beta);
+        }
+        while header.bit_count % 8 != 0 {
+            header.bits(1, 1);
+        }
+        let mut cabac = CabacWriter::new_at_qp(2, 26 + qp_delta);
+        let start = first_mb as usize;
+        let end = start + count as usize;
+        let mut transforms = [false; 16];
+        for address in start..end {
+            let local = address - start;
+            cabac.decision(false, 3);
+            let transform = pps_id >= 5;
+            if transform {
+                let left = address % 4 != 0 && address > start && transforms[address - 1];
+                let top = address >= start + 4 && transforms[address - 4];
+                cabac.decision(true, 399 + usize::from(left) + usize::from(top));
+            }
+            transforms[address] = transform;
+            if transform {
+                for block in 0..4 {
+                    let desired = if frame_index == 36 {
+                        if address >= 4 {
+                            block as u8
+                        } else if address != 0 {
+                            1 + (block as u8 % 2)
+                        } else {
+                            2
+                        }
+                    } else {
+                        2
+                    };
+                    Self::write_cabac_intra_mode(&mut cabac, 2, desired);
+                }
+            } else {
+                for _ in 0..16 {
+                    cabac.decision(true, 68);
+                }
+            }
+            cabac.decision(false, 64);
+            let left = if address % 4 == 0 || local == 0 {
+                15
+            } else {
+                0
+            };
+            let top = if address < 4 || address < start + 4 {
+                15
+            } else {
+                0
+            };
+            cabac.zero_luma_cbp(left, top);
+            cabac.decision(false, 77);
+            if address + 1 != end {
+                cabac.terminate_false();
+            }
+        }
+        cabac.end();
+        let mut rbsp = header.data;
+        rbsp.extend(cabac.data(4));
+        Self::cabac_nal(if idr { 0x65 } else { 0x21 }, &rbsp)
+    }
+
+    fn encode_cavlc_feature_slices(slices: &[(u32, u32, u32, i32, u32, i32, i32)]) -> Vec<u8> {
+        let mut sample = Vec::new();
+        for &(first_mb, count, pps_id, qp_delta, disable_idc, alpha, beta) in slices {
+            let mut writer = BitWriter::default();
+            writer.ue(first_mb);
+            writer.ue(2);
+            writer.ue(pps_id);
+            writer.bits(0, 4);
+            writer.bits(0, 1);
+            writer.se(qp_delta);
+            writer.ue(disable_idc);
+            if disable_idc != 1 {
+                writer.se(alpha);
+                writer.se(beta);
+            }
+            for _ in 0..count {
+                writer.ue(0);
+                writer.bits(0xffff, 16);
+                writer.ue(0);
+                writer.ue(3);
+            }
+            sample.extend(Self::sample(writer.nal(0x21)));
+        }
+        sample
+    }
+
+    fn encode_cabac_feature_frame(&self, frame_index: u16) -> Vec<u8> {
+        if frame_index == 32 {
+            return Self::encode_cavlc_feature_slices(&[
+                (0, 8, 9, 0, 0, 2, -2),
+                (8, 8, 9, 0, 1, 0, 0),
+            ]);
+        }
+        if frame_index == 33 {
+            return Self::encode_cavlc_feature_slices(&[
+                (0, 8, 9, 1, 0, 1, -1),
+                (8, 8, 9, -1, 0, 1, -1),
+            ]);
+        }
+        let pps_id = match frame_index {
+            31 => 4,
+            35 | 36 => 5,
+            37 => 7,
+            38 | 39 => 8,
+            _ => unreachable!(),
+        };
+        let (alpha, beta) = if frame_index == 31 { (2, -3) } else { (0, 0) };
+        let coded = Self::encode_cabac_feature_slice(
+            frame_index,
+            0,
+            16,
+            pps_id,
+            0,
+            0,
+            alpha,
+            beta,
+            frame_index >= 37,
+        );
+        if frame_index != 39 {
+            return Self::sample(coded);
+        }
+        let mut sei = BitWriter::default();
+        sei.bits(5, 8);
+        sei.bits(0x12, 8);
+        for value in b"PYGORVID-FRAME-39!" {
+            sei.bits(u32::from(*value), 8);
+        }
+        let mut aud = BitWriter::default();
+        aud.bits(0x10, 8);
+        Self::sample_nals([
+            aud.nal(0x09),
+            sei.nal(0x06),
+            coded,
+            BitWriter::default().nal(0x0a),
+            BitWriter::default().nal(0x0b),
+        ])
+    }
+
+    fn encode_poc_type1_idr_frame(&self) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        for value in [0, 2, 6] {
+            writer.ue(value);
+        }
+        writer.bits(0, 4);
+        writer.ue(0);
+        writer.se(0);
+        writer.bits(0, 2);
+        writer.se(0);
+        writer.ue(0);
+        writer.se(0);
+        writer.se(0);
+        for _ in 0..16 {
+            writer.ue(25);
+            writer.align();
+            writer.data.extend_from_slice(&[128; 384]);
+            writer.bit_count += 384 * 8;
+        }
+        Self::sample(writer.nal(0x65))
     }
 
     fn write_prediction_weight_table(
@@ -1126,5 +1431,76 @@ impl H264Encoder {
         let mut sample = (nal.len() as u32).to_be_bytes().to_vec();
         sample.extend(nal);
         sample
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_parameter_sets_are_valid_and_deterministic() {
+        let encoder = H264Encoder::new();
+        let configurations = [
+            (0, 2, false, false, false, false),
+            (1, 1, false, false, true, false),
+            (3, 2, false, true, false, false),
+            (4, 2, true, false, false, true),
+        ];
+        let expected = [
+            "67640014acb62132",
+            "676400144b29a2390990",
+            "6764001422d88fffe0863fffffffffffffffad884c80",
+            "676400142aeb6213602dc040405000000300100000078840",
+        ];
+        for (configuration, expected) in configurations.into_iter().zip(expected) {
+            let sps = encoder.sequence_parameter_set_with(
+                configuration.0,
+                configuration.1,
+                configuration.2,
+                configuration.3,
+                configuration.4,
+                configuration.5,
+            );
+            assert_eq!(
+                sps,
+                encoder.sequence_parameter_set_with(
+                    configuration.0,
+                    configuration.1,
+                    configuration.2,
+                    configuration.3,
+                    configuration.4,
+                    configuration.5,
+                )
+            );
+            crate::parse_sps(&sps)
+                .unwrap_or_else(|error| panic!("SPS {}: {error}", configuration.0));
+            let actual: String = sps.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn generated_feature_frames_are_byte_deterministic() {
+        let encoder = H264Encoder::new();
+        let expected = [
+            0xaaf8c785e33e1279,
+            0x54991704496179e5,
+            0xe9f45694fe6ad7b8,
+            0xc9905c905ac9cd84,
+            0x3db3db9293364c3f,
+            0x174e8d76d0924608,
+            0x6fd35974cdfb570b,
+            0x8b6beb85644e632b,
+            0xc9f994060fe58f2f,
+        ];
+        for (frame_index, expected) in (31_u16..=39).zip(expected) {
+            let sample = encoder.encode_generated_frame(frame_index);
+            let hash = sample.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+            assert_eq!(hash, expected, "frame {frame_index}");
+            assert_eq!(sample, encoder.encode_generated_frame(frame_index));
+        }
     }
 }

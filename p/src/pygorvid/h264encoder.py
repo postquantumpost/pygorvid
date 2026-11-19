@@ -154,32 +154,76 @@ class H264Encoder:
     """Initial subset: 64x64, 8-bit YUV420 grey, Baseline I_PCM IDR pictures."""
 
     def sequence_parameter_set(self) -> bytes:
+        return self._sequence_parameter_set()
+
+    def _sequence_parameter_set(
+        self, sps_id: int = 0, poc_type: int = 2, transform_bypass: bool = False,
+        scaling_lists: bool = False, gaps_allowed: bool = False,
+        vui: bool = False,
+    ) -> bytes:
         writer = _BitWriter()
         writer.bits(100, 8)
         writer.bits(0, 8)
         writer.bits(20, 8)
-        writer.ue(0)
+        writer.ue(sps_id)
         for value in (1, 0, 0):
             writer.ue(value)
-        writer.bits(0, 1)
-        writer.bits(0, 1)
-        for value in (0, 2, 2):
-            writer.ue(value)
-        writer.bits(0, 1)
+        writer.bits(int(transform_bypass), 1)
+        writer.bits(int(scaling_lists), 1)
+        if scaling_lists:
+            for list_index in range(8):
+                present = list_index in (0, 6)
+                writer.bits(int(present), 1)
+                if present:
+                    writer.se(4 if list_index == 0 else 12)
+                    for _ in range((16 if list_index < 6 else 64) - 1):
+                        writer.se(0)
+        writer.ue(0)
+        writer.ue(poc_type)
+        if poc_type == 0:
+            writer.ue(2)
+        elif poc_type == 1:
+            writer.bits(0, 1)
+            writer.se(0)
+            writer.se(0)
+            writer.ue(1)
+            writer.se(2)
+        writer.ue(2)
+        writer.bits(int(gaps_allowed), 1)
         writer.ue(3)
         writer.ue(3)
-        writer.bits(0b1100, 4)
+        writer.bits(0b110, 3)
+        writer.bits(int(vui), 1)
+        if vui:
+            writer.bits(1, 1)
+            writer.bits(1, 8)
+            writer.bits(0, 1)
+            writer.bits(1, 1)
+            writer.bits(5, 3)
+            writer.bits(1, 1)
+            writer.bits(1, 1)
+            writer.bits(1, 8)
+            writer.bits(1, 8)
+            writer.bits(1, 8)
+            writer.bits(0, 1)
+            writer.bits(1, 1)
+            writer.bits(1, 32)
+            writer.bits(120, 32)
+            writer.bits(1, 1)
+            for _ in range(4):
+                writer.bits(0, 1)
         return writer.nal(0x67)
 
     def picture_parameter_set(self) -> bytes:
         return self._picture_parameter_set(0, False, 0)
 
     def _picture_parameter_set(
-        self, pps_id: int, cabac: bool = False, weighted_bipred_idc: int = 0
+        self, pps_id: int, cabac: bool = False, weighted_bipred_idc: int = 0,
+        sps_id: int = 0, transform_8x8: bool = False,
     ) -> bytes:
         writer = _BitWriter()
         writer.ue(pps_id)
-        writer.ue(0)
+        writer.ue(sps_id)
         writer.bits(int(cabac), 1)
         writer.bits(0, 1)
         for _ in range(3):
@@ -189,6 +233,10 @@ class H264Encoder:
         for _ in range(3):
             writer.ue(0)  # Signed Exp-Golomb zero has the same representation.
         writer.bits(0b100, 3)
+        if transform_8x8:
+            writer.bits(1, 1)
+            writer.bits(0, 1)
+            writer.se(0)
         return writer.nal(0x68)
 
     def encode_grey_frame(self, idr_pic_id: int = 0) -> bytes:
@@ -233,7 +281,175 @@ class H264Encoder:
             return self._encode_cabac_b_frame()
         if frame_index == 30:
             return self._encode_cabac_residual_frame()
+        if frame_index == 31:
+            return self._encode_cabac_feature_frame(4, 2, -3)
+        if frame_index == 32:
+            return self._encode_feature_slices(
+                ((0, 8, 0, 0, 2), (8, 8, 1, 0, 0))
+            )
+        if frame_index == 33:
+            return self._encode_feature_slices(
+                ((0, 8, 0, 1, 1), (8, 8, 0, -1, 1))
+            )
+        if frame_index == 34:
+            return self._encode_poc_type1_idr_frame()
+        if frame_index in (35, 36):
+            return self._encode_cabac_feature_frame(
+                5, 0, 0, transform_8x8=True,
+                directional_modes=frame_index == 36,
+            )
+        if frame_index == 37:
+            return self._encode_cabac_feature_frame(
+                7, 0, 0, transform_8x8=True, idr=True
+            )
+        if frame_index in (38, 39):
+            coded = self._encode_cabac_feature_frame(
+                8, 0, 0, transform_8x8=True, idr=True
+            )
+            return coded if frame_index == 38 else self._encode_signaled_frame(coded)
         return self._encode_pcm_frame(frame_index, frame_index == 1)
+
+    def _finish_cabac_slice(
+        self, header: _BitWriter, cabac: _CABACWriter, idr: bool = False,
+    ) -> bytes:
+        cabac.end()
+        return self._cabac_nal(
+            0x65 if idr else 0x21, header.data + cabac.data()
+        )
+
+    def _encode_cabac_feature_slice(
+        self, first_macroblock: int, macroblock_count: int, pps_id: int,
+        qp_delta: int, disable_deblocking: int, alpha_offset: int,
+        beta_offset: int, transform_8x8: bool = False,
+        directional_modes: bool = False, idr: bool = False,
+    ) -> bytes:
+        from .h264_cabac import initialize_slice_contexts
+
+        header = _BitWriter()
+        header.ue(first_macroblock)
+        header.ue(2)
+        header.ue(pps_id)
+        header.bits(0, 4)
+        if idr:
+            header.ue(0)
+            header.bits(0, 2)
+        else:
+            header.bits(0, 1)
+        header.se(qp_delta)
+        header.ue(disable_deblocking)
+        if disable_deblocking != 1:
+            header.se(alpha_offset)
+            header.se(beta_offset)
+        while header.bit_count % 8:
+            header.bits(1, 1)
+        cabac = _CABACWriter(initialize_slice_contexts(2, 0, 26 + qp_delta))
+        for offset in range(macroblock_count):
+            macroblock = first_macroblock + offset
+            cabac.decision(0, 3)
+            if transform_8x8:
+                context = 399 + int(macroblock % 4 != 0) + int(macroblock >= 4)
+                cabac.decision(1, context)
+                modes = (
+                    (0, 1, 2, 3)
+                    if directional_modes and macroblock >= 4
+                    else (1, 2, 1, 2)
+                    if directional_modes and macroblock
+                    else (2, 2, 2, 2)
+                )
+                for mode in modes:
+                    if mode == 2:
+                        cabac.decision(1, 68)
+                    else:
+                        cabac.decision(0, 68)
+                        encoded = mode - int(mode >= 2)
+                        for bit in range(3):
+                            cabac.decision((encoded >> bit) & 1, 69)
+            else:
+                for _ in range(16):
+                    cabac.decision(1, 68)
+            cabac.decision(0, 64)
+            cabac.zero_luma_cbp(
+                15 if macroblock % 4 == 0 else 0,
+                15 if macroblock < 4 else 0,
+            )
+            cabac.decision(0, 77)
+            if offset != macroblock_count - 1:
+                cabac.terminate(False)
+        return self._finish_cabac_slice(header, cabac, idr)
+
+    def _encode_cabac_feature_frame(
+        self, pps_id: int, alpha_offset: int, beta_offset: int,
+        transform_8x8: bool = False,
+        directional_modes: bool = False, idr: bool = False,
+    ) -> bytes:
+        return self._sample(
+            self._encode_cabac_feature_slice(
+                0, 16, pps_id, 0, 0, alpha_offset, beta_offset,
+                transform_8x8, directional_modes, idr,
+            )
+        )
+
+    def _encode_feature_slices(
+        self, slices: tuple[tuple[int, int, int, int, int], ...],
+    ) -> bytes:
+        nals = []
+        for first, count, disable, qp_delta, alpha in slices:
+            writer = _BitWriter()
+            writer.ue(first)
+            writer.ue(2)
+            writer.ue(9)
+            writer.bits(0, 4)
+            writer.bits(0, 1)
+            writer.se(qp_delta)
+            writer.ue(disable)
+            if disable != 1:
+                writer.se(alpha)
+                writer.se(-alpha)
+            for _ in range(count):
+                writer.ue(0)
+                for _ in range(16):
+                    writer.bits(1, 1)
+                writer.ue(0)
+                writer.ue(3)
+            nals.append(writer.nal(0x21))
+        return b"".join(len(nal).to_bytes(4, "big") + nal for nal in nals)
+
+    def _encode_poc_type1_idr_frame(self) -> bytes:
+        writer = _BitWriter()
+        for value in (0, 2, 6):
+            writer.ue(value)
+        writer.bits(0, 4)
+        writer.ue(0)
+        writer.se(0)
+        writer.bits(0, 2)
+        writer.se(0)
+        writer.ue(0)
+        writer.se(0)
+        writer.se(0)
+        for _ in range(16):
+            writer.ue(25)
+            writer.align()
+            writer.data.extend(bytes([128]) * 384)
+            writer.bit_count += 384 * 8
+        return self._sample(writer.nal(0x65))
+
+    def _encode_signaled_frame(self, coded: bytes) -> bytes:
+        def rbsp_nal(header: int, payload: bytes) -> bytes:
+            writer = _BitWriter()
+            for value in payload:
+                writer.bits(value, 8)
+            return writer.nal(header)
+
+        picture_length = int.from_bytes(coded[:4], "big")
+        picture = coded[4:4 + picture_length]
+        aud = rbsp_nal(0x09, b"\x10")
+        sei = rbsp_nal(0x06, b"\x05\x12PYGORVID-FRAME-39!")
+        sequence_end = rbsp_nal(0x0A, b"")
+        stream_end = rbsp_nal(0x0B, b"")
+        return b"".join(
+            len(nal).to_bytes(4, "big") + nal
+            for nal in (aud, sei, picture, sequence_end, stream_end)
+        )
 
     @staticmethod
     def _b_macroblock(writer: _BitWriter, kind: int, spatial_direct: bool,
