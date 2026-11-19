@@ -1,4 +1,5 @@
 #include "pygorvid/h264.hpp"
+#include "pygorvid/h264_annexb.hpp"
 #include "pygorvid/h264_encoder.hpp"
 #include "pygorvid/mp4_writer.hpp"
 
@@ -9,8 +10,94 @@
 #include <vector>
 #include <stdexcept>
 
+namespace {
+
+std::uint32_t crc32(const std::vector<std::uint8_t>& data) {
+    std::uint32_t crc = 0xffffffffU;
+    for (const auto byte : data) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1)));
+        }
+    }
+    return crc ^ 0xffffffffU;
+}
+
+std::vector<std::pair<std::uint8_t, std::uint8_t>>
+annex_b_nal_headers(const std::vector<std::uint8_t>& data) {
+    std::vector<std::pair<std::uint8_t, std::uint8_t>> headers;
+    std::size_t offset = 0;
+    while (offset + 4 <= data.size()) {
+        assert(data[offset] == 0 && data[offset + 1] == 0 &&
+               data[offset + 2] == 0 && data[offset + 3] == 1);
+        offset += 4;
+        headers.emplace_back((data[offset] >> 5) & 3, data[offset] & 31);
+        auto next = offset + 1;
+        while (next + 3 < data.size() &&
+               !(data[next] == 0 && data[next + 1] == 0 &&
+                 data[next + 2] == 0 && data[next + 3] == 1)) {
+            ++next;
+        }
+        if (next + 3 >= data.size()) {
+            offset = data.size();
+        } else {
+            offset = next;
+        }
+    }
+    assert(offset == data.size());
+    return headers;
+}
+
+} // namespace
+
 int main() {
     const pygorvid::H264Encoder encoder;
+    const auto companions = pygorvid::generate_h264_annex_b_streams();
+    const std::array<std::string, 15> suffixes{{
+        "frame-40-422.264", "frame-41-444.264",
+        "frame-41-separate.264", "frame-42-10bit.264",
+        "frame-42-12bit.264", "frame-43-fields.264",
+        "frame-44-mbaff.264", "frame-45-fmo.264",
+        "frame-46-redundant.264", "frame-47-partitions.264",
+        "frame-48-sp-si.264", "frame-49-svc.264",
+        "frame-49-mvc.264", "frame-49-mvcd.264",
+        "frame-49-3davc.264"}};
+    const std::array<std::size_t, 15> sizes{{
+        8252, 12349, 12429, 7741, 18494, 6212, 6204, 6214,
+        18592, 12730, 12417, 6219, 6213, 6213, 6213}};
+    const std::array<std::uint32_t, 15> checksums{{
+        0xdb9c1df5, 0x00e7a59f, 0xa288f759, 0x48b0e96e,
+        0x38773d1a, 0xf6eb4420, 0x04fa4fe8, 0x31272eb3,
+        0x6d50e0a3, 0x54b9432b, 0xf8014dd3, 0x29b3c877,
+        0xc045fbfb, 0x107c6470, 0x8b683c4d}};
+    assert(companions.size() == suffixes.size());
+    for (std::size_t index = 0; index < companions.size(); ++index) {
+        assert(companions[index].suffix == suffixes[index]);
+        assert(companions[index].data.size() == sizes[index]);
+        assert(crc32(companions[index].data) == checksums[index]);
+        assert(companions[index].data ==
+               pygorvid::generate_h264_annex_b_streams()[index].data);
+        const auto headers = annex_b_nal_headers(companions[index].data);
+        assert(!headers.empty());
+        assert(headers[0].second == 7 || headers[0].second == 15);
+    }
+    assert(annex_b_nal_headers(companions[7].data).size() == 4);
+    const auto redundant_headers = annex_b_nal_headers(companions[8].data);
+    assert(std::count_if(redundant_headers.begin(), redundant_headers.end(),
+        [](const auto& header) { return header.second == 9; }) == 3);
+    assert(std::count_if(redundant_headers.begin(), redundant_headers.end(),
+        [](const auto& header) { return header.second == 5 ||
+                                      header.second == 1; }) == 3);
+    const auto partition_headers = annex_b_nal_headers(companions[9].data);
+    assert(partition_headers.size() == 53);
+    assert(partition_headers[5].second == 2);
+    assert(partition_headers[6].second == 3);
+    assert(partition_headers[7].second == 4);
+    assert(annex_b_nal_headers(companions[10].data).size() == 8);
+    assert(annex_b_nal_headers(companions[11].data).back().second == 20);
+    assert(annex_b_nal_headers(companions[12].data).back().second == 20);
+    assert(annex_b_nal_headers(companions[13].data).back().second == 21);
+    assert(annex_b_nal_headers(companions[14].data).back().second == 21);
     const auto sps = pygorvid::parse_sps(encoder.sequence_parameter_set());
     const auto pps = pygorvid::parse_pps(encoder.picture_parameter_set());
     for (const std::uint16_t index : {0, 24, 65535}) {
@@ -165,7 +252,7 @@ int main() {
     }
     assert(luma_changed);
     const std::vector<std::uint32_t> feature_nal_counts{
-        1, 2, 2, 1, 1, 1, 1, 1, 5,
+        1, 2, 2, 1, 1, 1, 1, 1, 3,
     };
     const std::array<std::uint32_t, 9> feature_pps{4, 9, 9, 6, 5, 5, 7, 8, 8};
     for (std::uint16_t frame_index = 31; frame_index <= 39; ++frame_index) {
@@ -199,8 +286,6 @@ int main() {
         if (frame_index == 39) {
             assert(pygorvid::parse_nal_header(nals[0]).unit_type == 9);
             assert(pygorvid::parse_nal_header(nals[1]).unit_type == 6);
-            assert(pygorvid::parse_nal_header(nals[3]).unit_type == 10);
-            assert(pygorvid::parse_nal_header(nals[4]).unit_type == 11);
             const auto sei_rbsp = pygorvid::ebsp_to_rbsp(
                 std::vector<std::uint8_t>(nals[1].begin() + 1, nals[1].end()));
             assert(sei_rbsp[0] == 5 && sei_rbsp[1] == 0x12);
@@ -209,8 +294,27 @@ int main() {
             assert(marker == "PYGORVID-FRAME-39!");
         }
     }
+    const auto final_nals = pygorvid::split_h264_sample_nals(
+        encoder.encode_generated_frame(59), 4);
+    assert(final_nals.size() == 3);
+    assert(pygorvid::parse_nal_header(final_nals[0]).unit_type == 5);
+    assert(pygorvid::parse_nal_header(final_nals[1]).unit_type == 10);
+    assert(pygorvid::parse_nal_header(final_nals[2]).unit_type == 11);
+    for (std::uint16_t frame_index = 40; frame_index < 59; ++frame_index) {
+        const auto nals = pygorvid::split_h264_sample_nals(
+            encoder.encode_generated_frame(frame_index), 4);
+        assert(nals.size() == 1);
+        assert(pygorvid::parse_nal_header(nals[0]).unit_type == 5);
+    }
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
+    const std::vector<std::uint8_t> limited_sps4{
+        0x67, 0x64, 0x00, 0x14, 0x2a, 0xeb, 0x62, 0x13,
+        0x60, 0x2d, 0x40, 0x40, 0x40, 0x50, 0x00, 0x00,
+        0x03, 0x00, 0x10, 0x00, 0x00, 0x07, 0x88, 0x40};
+    assert(std::search(payload.begin(), payload.end(),
+                       limited_sps4.begin(), limited_sps4.end()) !=
+           payload.end());
     assert(payload == writer.encode(encoder));
     const pygorvid::Mp4Metadata empty;
     assert(payload == writer.encode(encoder, &empty));

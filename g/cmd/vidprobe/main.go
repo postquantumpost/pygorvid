@@ -84,6 +84,28 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", outputPath, err)
 			return 1
 		}
+		companionBase := strings.TrimSuffix(outputPath, filepath.Ext(outputPath))
+		companions := vid.GenerateH264CompanionStreams()
+		companionPaths := make([]string, 0, len(vid.H264CompanionSuffixes))
+		destinations := []string{outputPath}
+		for _, suffix := range vid.H264CompanionSuffixes {
+			companionPath := companionBase + "-" + suffix
+			companionPaths = append(companionPaths, companionPath)
+			destinations = append(destinations, companionPath)
+		}
+		for _, destination := range destinations {
+			if err := precheckOutputFile(destination); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", destination, err)
+				return 1
+			}
+		}
+		for index, suffix := range vid.H264CompanionSuffixes {
+			companionPath := companionPaths[index]
+			if err := writeOutputFile(companionPath, companions[suffix]); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", companionPath, err)
+				return 1
+			}
+		}
 		if err := writeOutputFile(outputPath, payload); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", outputPath, err)
 			return 1
@@ -269,6 +291,20 @@ func writeOutputFile(output string, payload []byte) error {
 		return err
 	}
 	return os.Rename(tempPath, output)
+}
+
+func precheckOutputFile(output string) error {
+	info, err := os.Stat(output)
+	if err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("is a directory")
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func extractFrame(input string, frame int, output string, threads int, verbose bool) error {

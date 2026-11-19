@@ -166,6 +166,16 @@ core `--generate` file broadly playable and emit separate companion test
 files for those profile families; never make the core output malformed or
 silently decoder-dependent just to keep one filename.
 
+The implemented gate uses the companion-file option: the original 60-frame
+Progressive High 4:2:0 MP4 remains byte-identical, while `--generate` emits
+fifteen deterministic Annex-B companions beside it. Frames 41, 42, and 49 have
+one file per incompatible subcase. The complete suffix set is
+`frame-40-422.264`, `frame-41-444.264`, `frame-41-separate.264`,
+`frame-42-10bit.264`, `frame-42-12bit.264`, `frame-43-fields.264`,
+`frame-44-mbaff.264`, `frame-45-fmo.264`, `frame-46-redundant.264`,
+`frame-47-partitions.264`, `frame-48-sp-si.264`, `frame-49-svc.264`,
+`frame-49-mvc.264`, `frame-49-mvcd.264`, and `frame-49-3davc.264`.
+
 ### B. Feature isolation and ordering rules
 
 1. Make frame 1 the smallest reproducible, independently decodable anchor.

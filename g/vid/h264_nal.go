@@ -8,6 +8,41 @@ var (
 	ErrMalformedEBSP    = errors.New("malformed emulation-prevention sequence")
 )
 
+// SplitAnnexBNALUnits splits a deterministic Annex-B byte stream into NAL
+// units. Both three- and four-byte start codes are accepted.
+func SplitAnnexBNALUnits(data []byte) ([][]byte, error) {
+	var units [][]byte
+	start := -1
+	for index := 0; index+3 <= len(data); index++ {
+		length := 0
+		switch {
+		case index+4 <= len(data) && data[index] == 0 && data[index+1] == 0 &&
+			data[index+2] == 0 && data[index+3] == 1:
+			length = 4
+		case data[index] == 0 && data[index+1] == 0 && data[index+2] == 1:
+			length = 3
+		}
+		if length == 0 {
+			continue
+		}
+		if start >= 0 {
+			units = append(units, append([]byte(nil), data[start:index]...))
+		}
+		start = index + length
+		index += length - 1
+	}
+	if start < 0 {
+		return nil, errors.New("Annex-B stream has no start code")
+	}
+	units = append(units, append([]byte(nil), data[start:]...))
+	for _, unit := range units {
+		if len(unit) == 0 {
+			return nil, ErrEmptyNALUnit
+		}
+	}
+	return units, nil
+}
+
 // NALHeader contains the fields in the one-byte H.264 NAL unit header.
 type NALHeader struct {
 	ReferenceIDC uint8

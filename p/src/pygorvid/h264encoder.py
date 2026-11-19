@@ -200,7 +200,7 @@ class H264Encoder:
             writer.bits(0, 1)
             writer.bits(1, 1)
             writer.bits(5, 3)
-            writer.bits(1, 1)
+            writer.bits(0, 1)
             writer.bits(1, 1)
             writer.bits(1, 8)
             writer.bits(1, 8)
@@ -241,6 +241,11 @@ class H264Encoder:
 
     def encode_grey_frame(self, idr_pic_id: int = 0) -> bytes:
         return self._encode_pcm_frame(idr_pic_id, False)
+
+    def encode_companion_streams(self) -> dict[str, bytes]:
+        from .h264companions import companion_streams
+
+        return companion_streams()
 
     def encode_generated_frame(self, frame_index: int) -> bytes:
         if not 0 <= frame_index <= 65535:
@@ -307,6 +312,8 @@ class H264Encoder:
                 8, 0, 0, transform_8x8=True, idr=True
             )
             return coded if frame_index == 38 else self._encode_signaled_frame(coded)
+        if frame_index == 59:
+            return self._append_stream_end(self._encode_pcm_frame(frame_index, False))
         return self._encode_pcm_frame(frame_index, frame_index == 1)
 
     def _finish_cabac_slice(
@@ -444,11 +451,19 @@ class H264Encoder:
         picture = coded[4:4 + picture_length]
         aud = rbsp_nal(0x09, b"\x10")
         sei = rbsp_nal(0x06, b"\x05\x12PYGORVID-FRAME-39!")
-        sequence_end = rbsp_nal(0x0A, b"")
-        stream_end = rbsp_nal(0x0B, b"")
         return b"".join(
             len(nal).to_bytes(4, "big") + nal
-            for nal in (aud, sei, picture, sequence_end, stream_end)
+            for nal in (aud, sei, picture)
+        )
+
+    def _append_stream_end(self, coded: bytes) -> bytes:
+        writer = _BitWriter()
+        sequence_end = writer.nal(0x0A)
+        writer = _BitWriter()
+        stream_end = writer.nal(0x0B)
+        return coded + b"".join(
+            len(nal).to_bytes(4, "big") + nal
+            for nal in (sequence_end, stream_end)
         )
 
     @staticmethod

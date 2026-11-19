@@ -53,8 +53,9 @@ func TestGenerate(t *testing.T) {
 	decoder.SetThreads(1)
 	for _, index := range []uint64{0, 1, 2, 59} {
 		sample, err := reader.SampleAt(index)
+		expectedSync := index <= 1 || index > 30
 		if err != nil || sample.DTSTicks != int64(index) || sample.PTSTicks != int64(index) ||
-			!sample.IsSync || sample.DurationTicks != 1 {
+			sample.IsSync != expectedSync || sample.DurationTicks != 1 {
 			t.Fatalf("sample %d: %+v, %v", index, sample, err)
 		}
 		if index == 1 && !bytes.Contains(sample.Data, []byte{0, 0, 3, 1}) {
@@ -62,7 +63,7 @@ func TestGenerate(t *testing.T) {
 		}
 		frame, err := decoder.DecodeFrame(index)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("sample %d decode: %v", index, err)
 		}
 		expectedLuma := bytes.Repeat([]byte{128}, 4096)
 		if index == 1 {
@@ -93,7 +94,7 @@ func TestGenerate(t *testing.T) {
 		t.Fatal("generation failed to report write error")
 	}
 	entries, err := os.ReadDir(directory)
-	if err != nil || len(entries) != 2 {
+	if err != nil || len(entries) != 17 {
 		t.Fatalf("temporary output leaked: %v, %v", entries, err)
 	}
 }
@@ -115,9 +116,17 @@ func TestGeneratePrefix(t *testing.T) {
 		if err := os.Remove(written); err != nil {
 			t.Fatal(err)
 		}
+		base := strings.TrimSuffix(written, filepath.Ext(written))
+		for _, suffix := range vid.H264CompanionSuffixes {
+			path := base + "-" + suffix
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if err := os.Mkdir(written, 0o700); err != nil {
 			t.Fatal(err)
 		}
+
 		if run([]string{"--generate", output, "--prefix=" + prefix}) != 1 {
 			t.Fatal("prefixed output write failure was not reported")
 		}
@@ -125,6 +134,25 @@ func TestGeneratePrefix(t *testing.T) {
 		if err != nil || len(entries) != 1 {
 			t.Fatalf("unexpected outputs: %v, %v", entries, err)
 		}
+	}
+}
+
+func TestGeneratePrechecksCompanionDestinations(t *testing.T) {
+	directory := t.TempDir()
+	output := filepath.Join(directory, "video.mp4")
+	blocked := strings.TrimSuffix(output, ".mp4") + "-" + vid.H264CompanionSuffixes[0]
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if status := run([]string{"--generate", output}); status != 1 {
+		t.Fatalf("generate status = %d; want 1", status)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(blocked) {
+		t.Fatalf("generation wrote partial outputs: %v", entries)
 	}
 }
 

@@ -280,7 +280,7 @@ func (e H264Encoder) sequenceParameterSet(id, pocType uint32, transformBypass, s
 		w.bits(0, 1)
 		w.bits(1, 1)
 		w.bits(5, 3)
-		w.bits(1, 1)
+		w.bits(0, 1)
 		w.bits(1, 1)
 		w.bits(1, 8)
 		w.bits(1, 8)
@@ -388,7 +388,14 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 	if frameIndex >= 31 && frameIndex <= 39 {
 		return e.encodeCABACFeatureFrame(frameIndex)
 	}
-	return e.encodePCMFrame(frameIndex, frameIndex == 1)
+	sample := e.encodePCMFrame(frameIndex, frameIndex == 1)
+	if frameIndex == uint16(minGeneratedVideoFrameCount-1) {
+		endWriter := h264BitWriter{}
+		sample = append(sample, prependH264NALSize(endWriter.nal(0x0a))...)
+		endWriter = h264BitWriter{}
+		sample = append(sample, prependH264NALSize(endWriter.nal(0x0b))...)
+	}
+	return sample
 }
 
 func bMacroblock(w *h264BitWriter, kind int, subTypes []int) {
@@ -868,18 +875,11 @@ func (e H264Encoder) encodeCABACFeatureFrame(frameIndex uint16) []byte {
 		audWriter := h264BitWriter{}
 		audWriter.bits(0x10, 8)
 		aud := audWriter.nal(0x09)
-		endWriter := h264BitWriter{}
-		endSequence := endWriter.nal(0x0a)
-		endWriter = h264BitWriter{}
-		endStream := endWriter.nal(0x0b)
 		var delimited []byte
 		for _, nal := range [][]byte{aud, sei} {
 			delimited = append(delimited, prependH264NALSize(nal)...)
 		}
 		delimited = append(delimited, sample...)
-		for _, nal := range [][]byte{endSequence, endStream} {
-			delimited = append(delimited, prependH264NALSize(nal)...)
-		}
 		return delimited
 	}
 	return sample

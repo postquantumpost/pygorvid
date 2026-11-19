@@ -69,8 +69,18 @@ fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
 }
 
 pub fn parse_sps(nal: &[u8]) -> io::Result<SpsInfo> {
+    parse_sps_impl(nal, true)
+}
+
+/// Parses SPS or subset-SPS syntax without requiring decoder support for the
+/// advertised profile, chroma format, bit depth, or scan mode.
+pub fn parse_sps_syntax(nal: &[u8]) -> io::Result<SpsInfo> {
+    parse_sps_impl(nal, false)
+}
+
+fn parse_sps_impl(nal: &[u8], decoder_supported_only: bool) -> io::Result<SpsInfo> {
     let header = parse_nal_header(nal)?;
-    if header.unit_type != 7 {
+    if header.unit_type != 7 && (decoder_supported_only || header.unit_type != 15) {
         return Err(invalid(format!(
             "NAL unit type {} is not an SPS",
             header.unit_type
@@ -231,7 +241,9 @@ pub fn parse_sps(nal: &[u8]) -> io::Result<SpsInfo> {
         frame_mbs_only,
         crop,
     )?;
-    validate_supported_sps(&info)?;
+    if decoder_supported_only {
+        validate_supported_sps(&info)?;
+    }
     Ok(info)
 }
 

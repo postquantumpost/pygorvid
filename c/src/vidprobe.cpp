@@ -1,4 +1,5 @@
 #include "pygorvid/h264.hpp"
+#include "pygorvid/h264_annexb.hpp"
 #include "pygorvid/h264_encoder.hpp"
 #include "pygorvid/mp4_writer.hpp"
 #include "pygorvid/jpeg.hpp"
@@ -842,7 +843,17 @@ void generate_video(const std::string& output_path) {
         "180.0", "pygorvid",
     };
     const auto payload = pygorvid::Mp4Writer().encode(pygorvid::H264Encoder(), &metadata);
+    const auto companions = pygorvid::generate_h264_annex_b_streams();
     const std::filesystem::path output(output_path);
+    std::error_code output_error;
+    if (std::filesystem::is_directory(output, output_error)) {
+        throw std::runtime_error("video output path is a directory");
+    }
+    if (output_error &&
+        output_error != std::errc::no_such_file_or_directory) {
+        throw std::runtime_error("cannot inspect video output path: " +
+                                 output_error.message());
+    }
     const auto parent = output.has_parent_path() ? output.parent_path()
                                                  : std::filesystem::path(".");
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -879,6 +890,27 @@ void generate_video(const std::string& output_path) {
     if (!file) {
         throw std::runtime_error("cannot write complete video output file");
     }
+    for (std::size_t index = 0; index < companions.size(); ++index) {
+        std::ofstream companion(temporary / std::to_string(index),
+                                std::ios::binary);
+        if (!companion) {
+            throw std::runtime_error("cannot open Annex-B companion output file");
+        }
+        companion.write(
+            reinterpret_cast<const char*>(companions[index].data.data()),
+            static_cast<std::streamsize>(companions[index].data.size()));
+        companion.close();
+        if (!companion) {
+            throw std::runtime_error(
+                "cannot write complete Annex-B companion output file");
+        }
+    }
+    for (std::size_t index = 0; index < companions.size(); ++index) {
+        const auto companion_path =
+            parent / (output.stem().string() + "-" + companions[index].suffix);
+        std::filesystem::rename(temporary / std::to_string(index),
+                                companion_path);
+    }
     std::filesystem::rename(video, output);
 }
 
@@ -913,7 +945,8 @@ int run(const std::vector<std::string>& args) {
         try {
             generate_video(output_path);
             std::cout << output_path
-                      << ": generated one second of 64x64 H.264 feature-test video with stereo silence\n";
+                      << ": generated one second of 64x64 H.264 feature-test video with stereo silence"
+                      << " and 15 Annex-B companion streams\n";
             return 0;
         } catch (const std::exception& error) {
             std::cerr << output_path << ": " << error.what() << '\n';

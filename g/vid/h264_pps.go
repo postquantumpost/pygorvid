@@ -9,6 +9,8 @@ type PPSInfo struct {
 	EntropyCodingMode                 bool
 	BottomFieldPicOrderInFramePresent bool
 	NumSliceGroupsMinus1              uint32
+	SliceGroupMapType                 uint32
+	RunLengthMinus1                   []uint32
 	NumRefIdxL0DefaultActiveMinus1    uint32
 	NumRefIdxL1DefaultActiveMinus1    uint32
 	WeightedPred                      bool
@@ -25,8 +27,21 @@ type PPSInfo struct {
 	SecondChromaQPIndexOffset         int64
 }
 
-// ParsePPS parses PPS identifiers and the core entropy/field-order flags.
+// ParsePPS parses a PPS supported by the native decoder.
 func ParsePPS(nal []byte) (PPSInfo, error) {
+	info, err := ParsePPSStructure(nal)
+	if err != nil {
+		return PPSInfo{}, err
+	}
+	if info.NumSliceGroupsMinus1 != 0 {
+		return PPSInfo{}, fmt.Errorf("unsupported PPS slice groups: num_slice_groups_minus1=%d", info.NumSliceGroupsMinus1)
+	}
+	return info, nil
+}
+
+// ParsePPSStructure parses PPS syntax without applying the native decoder's
+// restriction to raster slice ordering.
+func ParsePPSStructure(nal []byte) (PPSInfo, error) {
 	header, err := ParseNALHeader(nal)
 	if err != nil {
 		return PPSInfo{}, err
@@ -72,7 +87,23 @@ func ParsePPS(nal []byte) (PPSInfo, error) {
 		return PPSInfo{}, err
 	}
 	if info.NumSliceGroupsMinus1 != 0 {
-		return PPSInfo{}, fmt.Errorf("unsupported PPS slice groups: num_slice_groups_minus1=%d", info.NumSliceGroupsMinus1)
+		info.SliceGroupMapType, err = readPPSUE(reader, "slice_group_map_type")
+		if err != nil {
+			return PPSInfo{}, fmt.Errorf("unsupported PPS slice groups: num_slice_groups_minus1=%d: %w",
+				info.NumSliceGroupsMinus1, err)
+		}
+		switch info.SliceGroupMapType {
+		case 0:
+			info.RunLengthMinus1 = make([]uint32, info.NumSliceGroupsMinus1+1)
+			for index := range info.RunLengthMinus1 {
+				info.RunLengthMinus1[index], err = readPPSUE(reader, "run_length_minus1")
+				if err != nil {
+					return PPSInfo{}, err
+				}
+			}
+		default:
+			return PPSInfo{}, fmt.Errorf("unsupported PPS slice_group_map_type %d", info.SliceGroupMapType)
+		}
 	}
 	info.NumRefIdxL0DefaultActiveMinus1, err = readPPSUE(reader, "num_ref_idx_l0_default_active_minus1")
 	if err != nil {

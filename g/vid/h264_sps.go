@@ -42,13 +42,27 @@ type SPSInfo struct {
 	Direct8x8Inference          bool
 }
 
-// ParseSPS parses SPS identity, profile, chroma format, and bit-depth fields.
+// ParseSPS parses an SPS supported by this package's progressive decoder.
 func ParseSPS(nal []byte) (SPSInfo, error) {
+	info, err := ParseSPSStructure(nal)
+	if err != nil {
+		return SPSInfo{}, err
+	}
+	if err := validateSupportedSPS(info); err != nil {
+		return SPSInfo{}, err
+	}
+	return info, nil
+}
+
+// ParseSPSStructure parses SPS syntax without applying the native decoder's
+// progressive 8-bit 4:2:0 restrictions. It is useful for H.264 feature
+// streams that are intentionally outside that decoder's supported subset.
+func ParseSPSStructure(nal []byte) (SPSInfo, error) {
 	header, err := ParseNALHeader(nal)
 	if err != nil {
 		return SPSInfo{}, err
 	}
-	if header.UnitType != 7 {
+	if header.UnitType != 7 && header.UnitType != 15 {
 		return SPSInfo{}, fmt.Errorf("NAL unit type %d is not an SPS", header.UnitType)
 	}
 	rbsp, err := EBSPToRBSP(nal[1:])
@@ -243,9 +257,6 @@ func ParseSPS(nal []byte) (SPSInfo, error) {
 		return SPSInfo{}, fmt.Errorf("SPS vui_parameters_present_flag: %w", err)
 	}
 	if err := setSPSDimensions(&info, widthMbsMinus1, heightMapUnitsMinus1, info.FrameMbsOnly, cropLeft, cropRight, cropTop, cropBottom); err != nil {
-		return SPSInfo{}, err
-	}
-	if err := validateSupportedSPS(info); err != nil {
 		return SPSInfo{}, err
 	}
 	return info, nil

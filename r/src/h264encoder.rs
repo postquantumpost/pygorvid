@@ -288,7 +288,7 @@ impl H264Encoder {
             writer.bits(0, 1);
             writer.bits(1, 1);
             writer.bits(5, 3);
-            writer.bits(1, 1);
+            writer.bits(0, 1);
             writer.bits(1, 1);
             for value in [1_u32, 1, 1] {
                 writer.bits(value, 8);
@@ -428,6 +428,15 @@ impl H264Encoder {
         }
         if frame_index == 39 {
             return self.encode_cabac_feature_frame(frame_index);
+        }
+        if frame_index == 59 {
+            let picture = self.encode_pcm_frame(frame_index, false);
+            let mut sample = picture;
+            sample.extend(Self::sample_nals([
+                BitWriter::default().nal(0x0a),
+                BitWriter::default().nal(0x0b),
+            ]));
+            return sample;
         }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
@@ -960,13 +969,7 @@ impl H264Encoder {
         }
         let mut aud = BitWriter::default();
         aud.bits(0x10, 8);
-        Self::sample_nals([
-            aud.nal(0x09),
-            sei.nal(0x06),
-            coded,
-            BitWriter::default().nal(0x0a),
-            BitWriter::default().nal(0x0b),
-        ])
+        Self::sample_nals([aud.nal(0x09), sei.nal(0x06), coded])
     }
 
     fn encode_poc_type1_idr_frame(&self) -> Vec<u8> {
@@ -1451,7 +1454,7 @@ mod tests {
             "67640014acb62132",
             "676400144b29a2390990",
             "6764001422d88fffe0863fffffffffffffffad884c80",
-            "676400142aeb6213602dc040405000000300100000078840",
+            "676400142aeb6213602d4040405000000300100000078840",
         ];
         for (configuration, expected) in configurations.into_iter().zip(expected) {
             let sps = encoder.sequence_parameter_set_with(
@@ -1492,7 +1495,7 @@ mod tests {
             0x174e8d76d0924608,
             0x6fd35974cdfb570b,
             0x8b6beb85644e632b,
-            0xc9f994060fe58f2f,
+            0xae9b88780439fc9e,
         ];
         for (frame_index, expected) in (31_u16..=39).zip(expected) {
             let sample = encoder.encode_generated_frame(frame_index);

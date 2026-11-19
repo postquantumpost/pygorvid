@@ -143,7 +143,7 @@ func TestGeneratedH264FeatureFrames31Through39(t *testing.T) {
 		!sps[4].VUIParametersPresent || !pps[5].Transform8x8Mode {
 		t.Fatalf("generated parameter-set features missing: SPS=%+v PPS5=%+v", sps, pps[5])
 	}
-	nalCounts := []int{1, 2, 2, 1, 1, 1, 1, 1, 5}
+	nalCounts := []int{1, 2, 2, 1, 1, 1, 1, 1, 3}
 	for offset, wantCount := range nalCounts {
 		sample, err := reader.SampleAt(uint64(31 + offset))
 		if err != nil {
@@ -270,11 +270,30 @@ func TestGeneratedH264FeatureFrames31Through39(t *testing.T) {
 		}
 		types = append(types, header.UnitType)
 	}
-	if !bytes.Equal(types, []byte{9, 6, 5, 10, 11}) {
+	if !bytes.Equal(types, []byte{9, 6, 5}) {
 		t.Fatalf("frame 39 NAL types = %v", types)
 	}
 	if len(frame38NALs) != 1 || !bytes.Equal(frame38NALs[0], nals[2]) {
 		t.Fatal("frame 39 did not preserve frame 38's coded picture")
+	}
+	frame59, err := reader.SampleAt(59)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame59NALs, err := SplitH264SampleNALs(frame59.Data, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame59Types := make([]uint8, len(frame59NALs))
+	for index, nal := range frame59NALs {
+		header, err := ParseNALHeader(nal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frame59Types[index] = header.UnitType
+	}
+	if !bytes.Equal(frame59Types, []byte{5, 10, 11}) {
+		t.Fatalf("frame 59 NAL types = %v", frame59Types)
 	}
 }
 

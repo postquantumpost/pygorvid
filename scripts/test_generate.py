@@ -24,6 +24,31 @@ EXPECTED_METADATA = {
     "heading": "180.0", "encoder": "pygorvid",
 }
 
+COMPANION_SUFFIXES = (
+    "frame-40-422.264",
+    "frame-41-444.264",
+    "frame-41-separate.264",
+    "frame-42-10bit.264",
+    "frame-42-12bit.264",
+    "frame-43-fields.264",
+    "frame-44-mbaff.264",
+    "frame-45-fmo.264",
+    "frame-46-redundant.264",
+    "frame-47-partitions.264",
+    "frame-48-sp-si.264",
+    "frame-49-svc.264",
+    "frame-49-mvc.264",
+    "frame-49-mvcd.264",
+    "frame-49-3davc.264",
+)
+
+
+def companion_paths(output):
+    return [
+        output.with_name(f"{output.stem}-{suffix}")
+        for suffix in COMPANION_SUFFIXES
+    ]
+
 
 def boxes(data: bytes):
     offset = 0
@@ -249,6 +274,12 @@ def main() -> None:
             if reference is None:
                 reference = payload
             assert payload == reference, f"output differs across languages: {executable}"
+            companions = [path.read_bytes() for path in companion_paths(output)]
+            if index == 0:
+                reference_companions = companions
+            assert companions == reference_companions, (
+                f"companion output differs across languages: {executable}"
+            )
             run([executable, f"--generate={output}"])
             assert output.read_bytes() == payload
             for prefix in ("native_", ""):
@@ -263,6 +294,8 @@ def main() -> None:
                 run([executable, "--generate", str(requested), f"--prefix={prefix}"], 1)
                 assert written.is_dir()
                 written.rmdir()
+                for companion in companion_paths(written):
+                    companion.unlink()
             metadata = json.loads(run([
                 ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(output),
             ]))
@@ -381,7 +414,10 @@ def main() -> None:
             assert output.read_bytes() == payload
             suffix = ", VLC metadata" if options.check_vlc else ""
             print(f"{executable}: metadata, 60 fps feature frames, gray padding, silence, CLI errors and output parity{suffix} passed")
-        assert len(list(directory.iterdir())) == 2 * len(options.commands), "temporary files leaked"
+        remaining = sorted(path.name for path in directory.iterdir())
+        assert len(remaining) == (
+            (len(COMPANION_SUFFIXES) + 2) * len(options.commands)
+        ), f"temporary files leaked: {remaining}"
 
 
 if __name__ == "__main__":

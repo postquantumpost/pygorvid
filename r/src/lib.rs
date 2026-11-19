@@ -13,6 +13,7 @@ mod codec_frame;
 mod codec_sample;
 #[path = "h264_decoder.rs"]
 mod decoder;
+mod h264_annexb;
 mod h264_cavlc;
 mod h264_cavlc_syntax;
 mod h264_mp4;
@@ -72,6 +73,7 @@ pub use codec::{
 };
 pub use codec_frame::Yuv420Frame;
 pub use decoder::{DecodeError, DependencySlice, H264Decoder};
+pub use h264_annexb::{generate_h264_companion_corpus, H264Companion, H264_COMPANION_SUFFIXES};
 pub use h264_cavlc::{decode_cavlc_residual_block, CavlcResidualBlock};
 pub use h264_mp4::AvcConfiguration;
 pub use h264encoder::H264Encoder;
@@ -83,7 +85,7 @@ pub use mp4writer::{Mp4Metadata, Mp4Writer};
 pub use nal::{
     ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals, NalHeader,
 };
-pub use pps::{parse_pps, PpsInfo};
+pub use pps::{parse_pps, parse_pps_syntax, PpsInfo};
 pub use reconstruction::{
     apply_luma_deblocking_edge, apply_luma_deblocking_edge_segment,
     apply_luma_deblocking_macroblock, apply_luma_deblocking_plane_edge_segment,
@@ -135,7 +137,7 @@ pub use slice::{
     group_slices_into_pictures, parse_slice_header, same_primary_picture, PictureIdentity,
     RefPicListModification, SliceHeader,
 };
-pub use sps::{parse_sps, SpsInfo};
+pub use sps::{parse_sps, parse_sps_syntax, SpsInfo};
 mod h264_weighted_prediction;
 pub use h264_weighted_prediction::{InterWeighting, PredictionWeight, PredictionWeightTable};
 pub use videosamplereader::{CompressedSample, VideoSampleReader};

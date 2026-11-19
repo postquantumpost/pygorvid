@@ -26,6 +26,16 @@ pub struct PpsInfo {
 }
 
 pub fn parse_pps(nal: &[u8]) -> io::Result<PpsInfo> {
+    parse_pps_impl(nal, true)
+}
+
+/// Parses PPS syntax without restricting it to the slice-group subset used by
+/// the library decoder.
+pub fn parse_pps_syntax(nal: &[u8]) -> io::Result<PpsInfo> {
+    parse_pps_impl(nal, false)
+}
+
+fn parse_pps_impl(nal: &[u8], decoder_supported_only: bool) -> io::Result<PpsInfo> {
     let header = parse_nal_header(nal)?;
     if header.unit_type != 8 {
         return Err(invalid(format!(
@@ -54,10 +64,48 @@ pub fn parse_pps(nal: &[u8]) -> io::Result<PpsInfo> {
         .read_bit()
         .map_err(|error| context("bottom_field_pic_order_in_frame_present_flag", error))?;
     let num_slice_groups_minus1 = read_ue(&mut reader, "num_slice_groups_minus1")?;
-    if num_slice_groups_minus1 != 0 {
+    if num_slice_groups_minus1 > 7 {
+        return Err(invalid(format!(
+            "PPS slice group count {num_slice_groups_minus1} is out of range"
+        )));
+    }
+    if decoder_supported_only && num_slice_groups_minus1 != 0 {
         return Err(invalid(format!(
             "unsupported PPS slice groups: num_slice_groups_minus1={num_slice_groups_minus1}"
         )));
+    }
+    if num_slice_groups_minus1 != 0 {
+        let map_type = read_ue(&mut reader, "slice_group_map_type")?;
+        match map_type {
+            0 => {
+                for index in 0..=num_slice_groups_minus1 {
+                    read_ue(&mut reader, &format!("run_length_minus1[{index}]"))?;
+                }
+            }
+            1 => {}
+            2 => {
+                for index in 0..(num_slice_groups_minus1 + 1) / 2 {
+                    read_ue(&mut reader, &format!("top_left[{index}]"))?;
+                    read_ue(&mut reader, &format!("bottom_right[{index}]"))?;
+                }
+            }
+            3..=5 => {
+                reader
+                    .read_bit()
+                    .map_err(|error| context("slice_group_change_direction_flag", error))?;
+                read_ue(&mut reader, "slice_group_change_rate_minus1")?;
+            }
+            6 => {
+                return Err(invalid(
+                    "PPS map type 6 requires the picture-size information from its SPS",
+                ));
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "PPS slice_group_map_type {map_type} exceeds 6"
+                )));
+            }
+        }
     }
     let num_ref_idx_l0_default_active_minus1 =
         read_ue(&mut reader, "num_ref_idx_l0_default_active_minus1")?;

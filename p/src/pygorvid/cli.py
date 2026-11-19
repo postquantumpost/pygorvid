@@ -174,9 +174,26 @@ def main(argv=None) -> int:
             if args.prefix is not None:
                 output = output.with_name(args.prefix + output.name)
             payload = Mp4Writer().encode(H264Encoder(), _generation_metadata())
+            companions = H264Encoder().encode_companion_streams()
+            if output.is_dir():
+                raise IsADirectoryError(f"{output} is a directory")
             with tempfile.TemporaryDirectory(prefix=".pygorvid-", dir=output.parent) as directory:
+                staged = {}
+                for suffix, companion in companions.items():
+                    companion_output = output.with_name(
+                        f"{output.stem}-{suffix}"
+                    )
+                    if companion_output.is_dir():
+                        raise IsADirectoryError(
+                            f"{companion_output} is a directory"
+                        )
+                    companion_temporary = Path(directory) / suffix
+                    companion_temporary.write_bytes(companion)
+                    staged[companion_temporary] = companion_output
                 temporary = Path(directory) / "video"
                 temporary.write_bytes(payload)
+                for companion_temporary, companion_output in staged.items():
+                    companion_temporary.replace(companion_output)
                 temporary.replace(output)
         except (OSError, ValueError) as error:
             print(f"{output}: {error}", file=sys.stderr)

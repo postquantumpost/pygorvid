@@ -171,6 +171,13 @@ track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must
 support PCM in MP4, not only AAC.
 
+Frames 40–49 are emitted as fifteen Annex-B `.264` companion files beside the
+MP4 because 4:2:2, 4:4:4, separate-colour-plane, high-bit-depth, field,
+MBAFF, FMO, data-partitioned, SP/SI, SVC, MVC, depth, and 3D profiles cannot be
+mixed into one broadly playable Progressive High AVC track. These companions
+use names with `-frame-40-...` through `-frame-49-...` suffixes and are written
+without changing the core MP4 bytes.
+
 Each implementation exposes separate `H264Encoder` and `Mp4Writer` objects.
 The writer's `encode` method (`Encode` in Go) accepts an encoder and returns
 the MP4 bytes. These objects intentionally support only this initial fixed

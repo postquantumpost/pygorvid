@@ -15,6 +15,14 @@ from pygorvid import (
 from pygorvid.cli import _generation_metadata, main
 from pygorvid.h264_nal import split_h264_sample_nals
 from pygorvid.mp4writer import _metadata_box
+from pygorvid.h264companions import _COMPANION_SUFFIXES
+
+
+def _generated_paths(output):
+    return [output, *(
+        output.with_name(f"{output.stem}-{suffix}")
+        for suffix in _COMPANION_SUFFIXES
+    )]
 
 
 def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
@@ -278,13 +286,17 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
         signaling = split_h264_sample_nals(
             reader.sample_at(39).data, reader.configuration.nal_length_size
         )
-        assert [nal[0] & 0x1F for nal in signaling] == [9, 6, 5, 10, 11]
+        assert [nal[0] & 0x1F for nal in signaling] == [9, 6, 5]
+        final_signaling = split_h264_sample_nals(
+            reader.sample_at(59).data, reader.configuration.nal_length_size
+        )
+        assert [nal[0] & 0x1F for nal in final_signaling] == [5, 10, 11]
         for index in range(31, 40):
             frame = decoder.decode_frame(index)
             assert (frame.width, frame.height) == (64, 64)
     finally:
         reader.close()
-    assert list(tmp_path.iterdir()) == [output]
+    assert set(tmp_path.iterdir()) == set(_generated_paths(output))
 
 
 @pytest.mark.parametrize("arguments", (
@@ -307,7 +319,9 @@ def test_generate_equals_and_io_failure(tmp_path):
     directory.mkdir()
     assert main(["--generate", str(directory)]) == 1
     assert directory.is_dir()
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["directory.mp4", "grey.mp4"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [path.name for path in _generated_paths(output)] + ["directory.mp4"]
+    )
 
 
 @pytest.mark.parametrize("prefix", ("native_", ""))
@@ -317,12 +331,12 @@ def test_generate_prefix(tmp_path, capsys, prefix):
     assert main([f"--generate={output}", "--prefix", prefix]) == 0
     assert written.read_bytes() == Mp4Writer().encode(H264Encoder(), _generation_metadata())
     assert str(written) in capsys.readouterr().out
-    assert list(tmp_path.iterdir()) == [written]
+    assert set(tmp_path.iterdir()) == set(_generated_paths(written))
     written.unlink()
     written.mkdir()
     assert main(["--generate", str(output), f"--prefix={prefix}"]) == 1
     assert str(written) in capsys.readouterr().err
-    assert list(tmp_path.iterdir()) == [written]
+    assert set(tmp_path.iterdir()) == set(_generated_paths(written))
 
 
 @pytest.mark.parametrize("picture_id", (-1, 65536))
@@ -334,6 +348,30 @@ def test_encoder_rejects_out_of_range_picture_id(picture_id):
 def test_generated_frame_rejects_out_of_range_picture_id(frame_index):
     with pytest.raises(ValueError, match="IDR picture ID"):
         H264Encoder().encode_generated_frame(frame_index)
+
+
+def test_generated_extension_companion_corpus():
+    encoder = H264Encoder()
+    companions = encoder.encode_companion_streams()
+    assert tuple(companions) == _COMPANION_SUFFIXES
+    assert companions == encoder.encode_companion_streams()
+    for payload in companions.values():
+        assert payload.startswith(b"\x00\x00\x00\x01\x67")
+        assert b"\x00\x00\x00\x01" in payload[len(b"\x00\x00\x00\x01\x67"):]
+    assert companions["frame-40-422.264"][5] == 122
+    assert companions["frame-41-444.264"][5] == 244
+    assert companions["frame-42-10bit.264"][5] == 110
+    assert companions["frame-48-sp-si.264"].count(
+        b"\x00\x00\x00\x01\x21"
+    ) == 2
+    for name, payload in companions.items():
+        if name.startswith("frame-49-"):
+            starts = [
+                index + 4
+                for index in range(len(payload) - 4)
+                if payload[index:index + 4] == b"\x00\x00\x00\x01"
+            ]
+            assert payload[starts[-1]] & 0x1F in (20, 21)
 
 
 def test_optional_metadata_and_utf8():

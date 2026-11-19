@@ -77,13 +77,18 @@ fn run(args: Vec<String>) -> i32 {
                 return 1;
             }
         };
-        if let Err(error) = write_output(output, &payload) {
+        if let Err(error) = write_generated_outputs(
+            output,
+            &payload,
+            &pygorvid::generate_h264_companion_corpus(),
+        ) {
             eprintln!("{output_path}: {error}");
             return 1;
         }
         println!("{output_path}: generated one second of 64x64 H.264 feature-test video with stereo silence");
         return 0;
     }
+
     if files.is_empty() {
         print_usage();
         return 2;
@@ -178,6 +183,72 @@ fn format_duration_hms(seconds: f64) -> String {
     } else {
         format!("{seconds_part:02}")
     }
+}
+
+fn companion_output_path(mp4: &Path, suffix: &str) -> PathBuf {
+    let stem = mp4
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("output");
+    mp4.with_file_name(format!("{stem}-{suffix}"))
+}
+
+fn write_generated_outputs(
+    output: &Path,
+    payload: &[u8],
+    companions: &[pygorvid::H264Companion],
+) -> std::io::Result<()> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_nanos();
+    let mut temporary = None;
+    for attempt in 0..100 {
+        let directory = parent.join(format!(
+            ".pygorvid-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&directory) {
+            Ok(()) => {
+                temporary = Some(TemporaryOutputDirectory(directory));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let temporary = temporary.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "cannot create temporary output directory",
+        )
+    })?;
+    if output.is_dir() {
+        return Err(std::io::Error::other("output path is a directory"));
+    }
+    let mut staged = Vec::new();
+    for companion in companions {
+        let target = companion_output_path(output, companion.suffix);
+        if target.is_dir() {
+            return Err(std::io::Error::other(format!(
+                "{} is a directory",
+                target.display()
+            )));
+        }
+        let source = temporary.0.join(companion.suffix);
+        fs::write(&source, &companion.data)?;
+        staged.push((source, target));
+    }
+    let video = temporary.0.join("video");
+    fs::write(&video, payload)?;
+    for (source, target) in staged {
+        fs::rename(source, target)?;
+    }
+    fs::rename(video, output)
 }
 
 fn parse_args(
@@ -507,18 +578,27 @@ mod tests {
                 assert!(sample.data.windows(4).any(|bytes| bytes == [0, 0, 3, 1]));
             }
         }
-        for (index, expected_nals) in [1_u8, 2, 2, 1, 1, 1, 1, 1, 5].into_iter().enumerate() {
+        for (index, expected_nals) in [1_u8, 2, 2, 1, 1, 1, 1, 1, 3].into_iter().enumerate() {
             let sample = reader.sample_at(index + 31).unwrap();
             let nals = pygorvid::split_h264_sample_nals(&sample.data, 4).unwrap();
             assert_eq!(nals.len(), expected_nals as usize, "frame {}", index + 31);
             if index == 8 {
                 assert_eq!(
                     nals.iter().map(|nal| nal[0] & 0x1f).collect::<Vec<_>>(),
-                    [9, 6, 5, 10, 11]
+                    [9, 6, 5]
                 );
                 assert_eq!(&nals[1][1..3], [5, 0x12]);
             }
         }
+        let final_sample = reader.sample_at(59).unwrap();
+        let final_nals = pygorvid::split_h264_sample_nals(&final_sample.data, 4).unwrap();
+        assert_eq!(
+            final_nals
+                .iter()
+                .map(|nal| nal[0] & 0x1f)
+                .collect::<Vec<_>>(),
+            [5, 10, 11]
+        );
         let mut decoder = pygorvid::H264Decoder::new(reader);
         decoder.set_threads(1);
         for index in 0..60 {
@@ -551,7 +631,7 @@ mod tests {
         let blocked = directory.join("directory.mp4");
         fs::create_dir(&blocked).unwrap();
         assert_eq!(run(args(&["--generate", blocked.to_str().unwrap()])), 1);
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 17);
         for prefix in ["native_", ""] {
             let requested = directory.join("prefixed video.MP4");
             let written = directory.join(format!("{prefix}prefixed video.MP4"));
@@ -573,6 +653,9 @@ mod tests {
                     .unwrap()
             );
             fs::remove_file(&written).unwrap();
+            for suffix in pygorvid::H264_COMPANION_SUFFIXES {
+                fs::remove_file(companion_output_path(&written, suffix)).unwrap();
+            }
             fs::create_dir(&written).unwrap();
             assert_eq!(
                 run(vec![
@@ -583,7 +666,7 @@ mod tests {
                 1
             );
             fs::remove_dir(&written).unwrap();
-            assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 17);
         }
         drop(cleanup);
     }

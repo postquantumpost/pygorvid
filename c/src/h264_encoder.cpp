@@ -313,7 +313,7 @@ std::vector<std::uint8_t> sequence_parameter_set(
         writer.bits(0, 1);
         writer.bits(1, 1);
         writer.bits(5, 3);
-        writer.bits(1, 1);
+        writer.bits(0, 1);
         writer.bits(1, 1);
         writer.bits(1, 8);
         writer.bits(1, 8);
@@ -1265,9 +1265,16 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
                               'D', '-', 'F', 'R', 'A', 'M', 'E', '-', '3',
                               '9', '!'}),
             encode_cabac_i_slice(0, 16, 8, 0, 0, 0, 0, true, false, true),
+        });
+    }
+    if (frame_index == 59) {
+        auto coded = encode_pcm_frame(frame_index, false);
+        const auto stream_end = sample_nals({
             marker_nal(0x0a),
             marker_nal(0x0b),
         });
+        coded.insert(coded.end(), stream_end.begin(), stream_end.end());
+        return coded;
     }
     return encode_pcm_frame(frame_index, frame_index == 1);
 }
