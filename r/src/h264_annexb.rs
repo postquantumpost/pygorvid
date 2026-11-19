@@ -1,5 +1,7 @@
 //! Deterministic Annex-B corpora for H.264 profile-extension feature tests.
 
+use crate::mp4writer::{full_box, mp4_box, track, u16s, u32s};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct H264Companion {
     pub suffix: &'static str,
@@ -7,17 +9,17 @@ pub struct H264Companion {
 }
 
 pub const H264_COMPANION_SUFFIXES: [&str; 15] = [
-    "frame-40-422.264",
-    "frame-41-444.264",
-    "frame-41-separate.264",
-    "frame-42-10bit.264",
-    "frame-42-12bit.264",
-    "frame-43-fields.264",
-    "frame-44-mbaff.264",
-    "frame-45-fmo.264",
-    "frame-46-redundant.264",
-    "frame-47-partitions.264",
-    "frame-48-sp-si.264",
+    "frame-40-422.mp4",
+    "frame-41-444.mp4",
+    "frame-41-separate.mp4",
+    "frame-42-10bit.mp4",
+    "frame-42-12bit.mp4",
+    "frame-43-fields.mp4",
+    "frame-44-mbaff.mp4",
+    "frame-45-fmo.mp4",
+    "frame-46-redundant.mp4",
+    "frame-47-partitions.mp4",
+    "frame-48-sp-si.mp4",
     "frame-49-svc.264",
     "frame-49-mvc.264",
     "frame-49-mvcd.264",
@@ -388,7 +390,164 @@ fn extension_nal(family: usize) -> Vec<u8> {
     output
 }
 
-pub fn generate_h264_companion_corpus() -> Vec<H264Companion> {
+fn annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
+    let starts: Vec<_> = (0..data.len().saturating_sub(3))
+        .filter(|&index| data[index..index + 4] == [0, 0, 0, 1])
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            &data[start + 4..starts.get(index + 1).copied().unwrap_or(data.len())]
+        })
+        .collect()
+}
+
+fn mux_avc_mp4(annex: &[u8], sample_count: usize) -> Vec<u8> {
+    let nals = annex_b_nals(annex);
+    let sequence_sets: Vec<_> = nals
+        .iter()
+        .copied()
+        .filter(|nal| nal[0] & 31 == 7)
+        .collect();
+    let picture_sets: Vec<_> = nals
+        .iter()
+        .copied()
+        .filter(|nal| nal[0] & 31 == 8)
+        .collect();
+    let picture_nals: Vec<_> = nals
+        .iter()
+        .copied()
+        .filter(|nal| !matches!(nal[0] & 31, 7 | 8))
+        .collect();
+    assert_eq!(sequence_sets.len(), 1, "companion must contain one SPS");
+    assert_eq!(picture_sets.len(), 1, "companion must contain one PPS");
+
+    let mut grouped = vec![Vec::new(); sample_count];
+    if sample_count == 1 {
+        grouped[0] = picture_nals;
+    } else {
+        let mut aud_groups: Vec<Vec<&[u8]>> = Vec::new();
+        let mut current = Vec::new();
+        for nal in picture_nals {
+            if nal[0] & 31 == 9 && !current.is_empty() {
+                aud_groups.push(current);
+                current = Vec::new();
+            }
+            current.push(nal);
+        }
+        if !current.is_empty() {
+            aud_groups.push(current);
+        }
+        if aud_groups.len() == sample_count {
+            grouped = aud_groups;
+        } else {
+            let slices: Vec<_> = nals
+                .iter()
+                .copied()
+                .filter(|nal| matches!(nal[0] & 31, 1 | 5))
+                .collect();
+            assert_eq!(
+                slices.len(),
+                sample_count,
+                "companion sample grouping is ambiguous"
+            );
+            grouped = slices.into_iter().map(|nal| vec![nal]).collect();
+        }
+    }
+
+    let samples: Vec<_> = grouped
+        .iter()
+        .map(|group| {
+            let mut sample = Vec::new();
+            for nal in group {
+                sample.extend(u32s(&[nal.len() as u32]));
+                sample.extend_from_slice(nal);
+            }
+            sample
+        })
+        .collect();
+    assert_eq!(samples.len(), sample_count);
+    let sps = sequence_sets[0];
+    let pps = picture_sets[0];
+    let avcc = mp4_box(
+        b"avcC",
+        &[
+            &[1, sps[1], sps[2], sps[3], 0xff, 0xe1],
+            &u16s(&[sps.len() as u16]),
+            sps,
+            &[1],
+            &u16s(&[pps.len() as u16]),
+            pps,
+        ],
+    );
+    let visual = mp4_box(
+        b"avc1",
+        &[
+            &[0; 6],
+            &u16s(&[1]),
+            &[0; 16],
+            &u16s(&[64, 64]),
+            &u32s(&[0x480000, 0x480000, 0]),
+            &u16s(&[1]),
+            &[0; 32],
+            &u16s(&[24, 0xffff]),
+            &avcc,
+        ],
+    );
+    let mut size_values = vec![0, samples.len() as u32];
+    size_values.extend(samples.iter().map(|sample| sample.len() as u32));
+    let sizes = full_box(b"stsz", 0, &[&u32s(&size_values)]);
+    let ftyp = mp4_box(b"ftyp", &[b"isom", &u32s(&[0x200]), b"isomiso2avc1mp41"]);
+    let sync_samples: Vec<_> = (1..=sample_count as u32).collect();
+    let placeholder = track(
+        1,
+        &visual,
+        &sizes,
+        sample_count as u32,
+        60,
+        sample_count as u32,
+        ftyp.len() as u32 + 8,
+        true,
+        &sync_samples,
+        &[],
+    );
+    let data: Vec<_> = samples.iter().flatten().copied().collect();
+    let movie_header = full_box(
+        b"mvhd",
+        0,
+        &[
+            &u32s(&[0, 0, 600, sample_count as u32 * 10]),
+            &u16s(&[1, 0]),
+            &[0; 8],
+            &u32s(&[0x00010000, 0x01000000, 0]),
+            &[0; 36],
+            &u32s(&[0, 0, 0, 0, 0, 0]),
+            &u32s(&[2]),
+        ],
+    );
+    let movie = mp4_box(b"moov", &[&movie_header, &placeholder]);
+    let video_offset = ftyp.len() as u32 + movie.len() as u32 + 8;
+    let final_track = track(
+        1,
+        &visual,
+        &sizes,
+        sample_count as u32,
+        60,
+        sample_count as u32,
+        video_offset,
+        true,
+        &sync_samples,
+        &[],
+    );
+    let movie = mp4_box(b"moov", &[&movie_header, &final_track]);
+    let mut result = ftyp;
+    result.extend(movie);
+    result.extend(mp4_box(b"mdat", &[&data]));
+    result
+}
+
+fn generate_h264_companion_streams() -> Vec<Vec<u8>> {
     let base = Sequence::new(100);
     let chroma422 = Sequence {
         profile_idc: 122,
@@ -583,9 +742,21 @@ pub fn generate_h264_companion_corpus() -> Vec<H264Companion> {
         stream.extend(extension_nal(family));
         data.push(stream);
     }
+    data
+}
+
+pub fn generate_h264_companion_corpus() -> Vec<H264Companion> {
+    let streams = generate_h264_companion_streams();
+    let sample_counts = [1, 1, 1, 1, 1, 2, 1, 1, 3, 2, 3];
+    let files = streams[..11]
+        .iter()
+        .zip(sample_counts)
+        .map(|(stream, sample_count)| mux_avc_mp4(stream, sample_count))
+        .chain(streams[11..].iter().cloned())
+        .collect::<Vec<_>>();
     H264_COMPANION_SUFFIXES
         .into_iter()
-        .zip(data)
+        .zip(files)
         .map(|(suffix, data)| H264Companion { suffix, data })
         .collect()
 }
@@ -593,6 +764,83 @@ pub fn generate_h264_companion_corpus() -> Vec<H264Companion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sha256(data: &[u8]) -> [u8; 32] {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
+        ];
+        let mut hash = [
+            0x6a09e667u32,
+            0xbb67ae85,
+            0x3c6ef372,
+            0xa54ff53a,
+            0x510e527f,
+            0x9b05688c,
+            0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        let bit_len = (data.len() as u64) * 8;
+        let mut padded = data.to_vec();
+        padded.push(0x80);
+        while padded.len() % 64 != 56 {
+            padded.push(0);
+        }
+        padded.extend(bit_len.to_be_bytes());
+        for chunk in padded.chunks_exact(64) {
+            let mut words = [0; 64];
+            for (index, bytes) in chunk.chunks_exact(4).enumerate() {
+                words[index] = u32::from_be_bytes(bytes.try_into().unwrap());
+            }
+            for index in 16..64 {
+                let a = words[index - 15];
+                let b = words[index - 2];
+                let s0 = a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3);
+                let s1 = b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10);
+                words[index] = words[index - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(words[index - 7])
+                    .wrapping_add(s1);
+            }
+            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = hash;
+            for index in 0..64 {
+                let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                let choice = (e & f) ^ (!e & g);
+                let t1 = h
+                    .wrapping_add(s1)
+                    .wrapping_add(choice)
+                    .wrapping_add(K[index])
+                    .wrapping_add(words[index]);
+                let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                let majority = (a & b) ^ (a & c) ^ (b & c);
+                let t2 = s0.wrapping_add(majority);
+                h = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(t1);
+                d = c;
+                c = b;
+                b = a;
+                a = t1.wrapping_add(t2);
+            }
+            for (word, value) in hash.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+                *word = word.wrapping_add(value);
+            }
+        }
+        let mut result = [0; 32];
+        for (chunk, word) in result.chunks_exact_mut(4).zip(hash) {
+            chunk.copy_from_slice(&word.to_be_bytes());
+        }
+        result
+    }
 
     fn nals(stream: &[u8]) -> Vec<&[u8]> {
         let mut result = Vec::new();
@@ -615,34 +863,88 @@ mod tests {
     #[test]
     fn companion_corpus_has_canonical_keys_bytes_and_structure() {
         let corpus = generate_h264_companion_corpus();
-        let expected = [
-            8252, 12349, 12429, 7741, 18494, 6212, 6204, 6214, 18592, 12730, 12417, 6219, 6213,
-            6213, 6213,
+        let expected_hashes = [
+            0xe5a6_6d62,
+            0x2bee_ee98,
+            0x3538_16dc,
+            0xc4a1_65a1,
+            0xfe92_c204,
+            0x74b2_17b8,
+            0x2633_954c,
+            0x2307_1982,
+            0xdc57_0e9b,
+            0x55d0_581a,
+            0xcc2e_ca15,
         ];
+        let expected_samples = [1, 1, 1, 1, 1, 2, 1, 1, 3, 2, 3];
         assert_eq!(corpus.len(), 15);
-        for ((entry, suffix), size) in corpus.iter().zip(H264_COMPANION_SUFFIXES).zip(expected) {
+        for (((entry, suffix), hash), sample_count) in corpus[..11]
+            .iter()
+            .zip(H264_COMPANION_SUFFIXES)
+            .zip(expected_hashes)
+            .zip(expected_samples)
+        {
             assert_eq!(entry.suffix, suffix);
-            assert_eq!(entry.data.len(), size, "{suffix}");
-            assert_eq!(entry.data[..4], [0, 0, 0, 1], "{suffix}");
-            assert!(entry.data[4..]
+            assert_eq!(entry.data[4..8], *b"ftyp", "{suffix}");
+            assert_eq!(
+                u32::from_be_bytes(sha256(&entry.data)[..4].try_into().unwrap()),
+                hash,
+                "{suffix}"
+            );
+            let stsz = entry
+                .data
                 .windows(4)
-                .any(|bytes| bytes == [0, 0, 0, 1]));
+                .position(|bytes| bytes == b"stsz")
+                .unwrap()
+                - 4;
+            assert_eq!(
+                u32::from_be_bytes(entry.data[stsz + 16..stsz + 20].try_into().unwrap()),
+                sample_count,
+                "{suffix}"
+            );
+            let avcc = entry
+                .data
+                .windows(4)
+                .position(|bytes| bytes == b"avcC")
+                .unwrap();
+            let avcc_size =
+                u32::from_be_bytes(entry.data[avcc - 4..avcc].try_into().unwrap()) as usize;
+            let configuration = &entry.data[avcc + 4..avcc - 4 + avcc_size];
+            assert_eq!(configuration[0], 1);
+            assert_eq!(configuration[4], 0xff);
+            assert_eq!(configuration[5], 0xe1);
+            let sps_size = u16::from_be_bytes(configuration[6..8].try_into().unwrap()) as usize;
+            assert_eq!(&configuration[8 + sps_size..=8 + sps_size], &[1]);
+            let pps_size = u16::from_be_bytes(
+                configuration[9 + sps_size..11 + sps_size]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            assert_eq!(configuration.len(), 11 + sps_size + pps_size);
+            let mdat = entry
+                .data
+                .windows(4)
+                .position(|bytes| bytes == b"mdat")
+                .unwrap()
+                - 4;
+            let sample_sizes = &entry.data[stsz + 20..stsz + 20 + sample_count as usize * 4];
+            let mut cursor = mdat + 8;
+            for bytes in sample_sizes.chunks_exact(4) {
+                let size = u32::from_be_bytes(bytes.try_into().unwrap()) as usize;
+                assert!(
+                    !crate::split_h264_sample_nals(&entry.data[cursor..cursor + size], 4)
+                        .unwrap()
+                        .is_empty()
+                );
+                cursor += size;
+            }
+            assert!(!entry.data.windows(4).any(|bytes| bytes == b"soun"));
+        }
+        for (entry, suffix) in corpus[11..].iter().zip(&H264_COMPANION_SUFFIXES[11..]) {
+            assert_eq!(&entry.suffix, suffix);
+            assert_eq!(entry.data[..4], [0, 0, 0, 1]);
         }
         assert_eq!(corpus, generate_h264_companion_corpus());
-        for entry in &corpus[..11] {
-            let units = nals(&entry.data);
-            let sps = crate::parse_sps_syntax(units[0]).unwrap();
-            let pps = crate::parse_pps_syntax(units[1]).unwrap();
-            assert_eq!(pps.sequence_parameter_set_id, sps.sps_id);
-            assert!(units.iter().skip(2).any(|nal| matches!(nal[0] & 31, 1..=5)));
-        }
-        assert_eq!(
-            nals(&corpus[9].data)
-                .iter()
-                .filter(|nal| matches!(nal[0] & 31, 2..=4))
-                .count(),
-            48
-        );
         assert_eq!(nals(&corpus[11].data).last().unwrap()[0] & 31, 20);
         assert_eq!(nals(&corpus[12].data).last().unwrap()[1] & 0x80, 0);
         assert_ne!(nals(&corpus[13].data).last().unwrap()[1] & 0x80, 0);

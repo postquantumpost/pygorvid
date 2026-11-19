@@ -1,12 +1,15 @@
 package vid
 
-// H264CompanionSuffixes is the deterministic set of Annex-B companion streams
-// emitted by vidprobe alongside its generated MP4.
+import "fmt"
+
+// H264CompanionSuffixes is the deterministic set of companion files emitted by
+// vidprobe alongside its generated MP4. Frames 40-48 use standalone MP4 files;
+// frame 49 retains the Annex-B extension-family streams.
 var H264CompanionSuffixes = []string{
-	"frame-40-422.264", "frame-41-444.264", "frame-41-separate.264",
-	"frame-42-10bit.264", "frame-42-12bit.264", "frame-43-fields.264",
-	"frame-44-mbaff.264", "frame-45-fmo.264", "frame-46-redundant.264",
-	"frame-47-partitions.264", "frame-48-sp-si.264", "frame-49-svc.264",
+	"frame-40-422.mp4", "frame-41-444.mp4", "frame-41-separate.mp4",
+	"frame-42-10bit.mp4", "frame-42-12bit.mp4", "frame-43-fields.mp4",
+	"frame-44-mbaff.mp4", "frame-45-fmo.mp4", "frame-46-redundant.mp4",
+	"frame-47-partitions.mp4", "frame-48-sp-si.mp4", "frame-49-svc.264",
 	"frame-49-mvc.264", "frame-49-mvcd.264", "frame-49-3davc.264",
 }
 
@@ -31,8 +34,8 @@ func companionSequenceDefaults(profile uint32) companionSequence {
 	}
 }
 
-// GenerateH264CompanionStreams is a byte-for-byte port of the canonical
-// Python Annex-B companion corpus.
+// GenerateH264CompanionStreams is a byte-for-byte port of the canonical Python
+// Annex-B corpus used to construct the emitted companion files.
 func GenerateH264CompanionStreams() map[string][]byte {
 	chroma422 := companionSequenceDefaults(122)
 	chroma422.chroma = 2
@@ -114,6 +117,146 @@ func GenerateH264CompanionStreams() map[string][]byte {
 		"frame-49-mvcd.264":       append(append([]byte(nil), extensionBase...), companionExtension("mvcd")...),
 		"frame-49-3davc.264":      append(append([]byte(nil), extensionBase...), companionExtension("3davc")...),
 	}
+}
+
+// GenerateH264CompanionFiles returns the files emitted beside the generated
+// core MP4. Frames 40-48 are muxed as AVC MP4; frame 49 remains Annex-B.
+func GenerateH264CompanionFiles() map[string][]byte {
+	streams := GenerateH264CompanionStreams()
+	plans := []struct {
+		annex  string
+		sample int
+	}{
+		{"frame-40-422.264", 1},
+		{"frame-41-444.264", 1},
+		{"frame-41-separate.264", 1},
+		{"frame-42-10bit.264", 1},
+		{"frame-42-12bit.264", 1},
+		{"frame-43-fields.264", 2},
+		{"frame-44-mbaff.264", 1},
+		{"frame-45-fmo.264", 1},
+		{"frame-46-redundant.264", 3},
+		{"frame-47-partitions.264", 2},
+		{"frame-48-sp-si.264", 3},
+	}
+	files := make(map[string][]byte, len(H264CompanionSuffixes))
+	for _, plan := range plans {
+		suffix := plan.annex[:len(plan.annex)-len(".264")] + ".mp4"
+		data, err := muxH264CompanionMP4(streams[plan.annex], plan.sample)
+		if err != nil {
+			panic(err)
+		}
+		files[suffix] = data
+	}
+	for _, suffix := range H264CompanionSuffixes[len(plans):] {
+		files[suffix] = append([]byte(nil), streams[suffix]...)
+	}
+	return files
+}
+
+func muxH264CompanionMP4(annex []byte, sampleCount int) ([]byte, error) {
+	nals, err := SplitAnnexBNALUnits(annex)
+	if err != nil {
+		return nil, fmt.Errorf("split companion Annex-B: %w", err)
+	}
+	var sequenceSets, pictureSets, pictureNALs [][]byte
+	for _, nal := range nals {
+		switch nal[0] & 0x1f {
+		case 7:
+			sequenceSets = append(sequenceSets, nal)
+		case 8:
+			pictureSets = append(pictureSets, nal)
+		default:
+			pictureNALs = append(pictureNALs, nal)
+		}
+	}
+	if len(sequenceSets) == 0 || len(pictureSets) == 0 || sampleCount < 1 {
+		return nil, fmt.Errorf("companion MP4 requires SPS, PPS, and a positive sample count")
+	}
+
+	grouped := make([][][]byte, sampleCount)
+	if sampleCount == 1 {
+		grouped[0] = pictureNALs
+	} else {
+		var audGroups [][][]byte
+		var current [][]byte
+		for _, nal := range pictureNALs {
+			if nal[0]&0x1f == 9 && len(current) != 0 {
+				audGroups = append(audGroups, current)
+				current = nil
+			}
+			current = append(current, nal)
+		}
+		if len(current) != 0 {
+			audGroups = append(audGroups, current)
+		}
+		if len(audGroups) == sampleCount {
+			grouped = make([][][]byte, len(audGroups))
+			for index, group := range audGroups {
+				grouped[index] = group
+			}
+		} else {
+			grouped = make([][][]byte, 0, sampleCount)
+			for _, nal := range pictureNALs {
+				if kind := nal[0] & 0x1f; kind == 1 || kind == 5 {
+					grouped = append(grouped, [][]byte{nal})
+				}
+			}
+			if len(grouped) != sampleCount {
+				return nil, fmt.Errorf("companion sample grouping is ambiguous")
+			}
+		}
+	}
+
+	samples := make([][]byte, len(grouped))
+	for index, group := range grouped {
+		for _, nal := range group {
+			samples[index] = append(samples[index], mp4U32(uint32(len(nal)))...)
+			samples[index] = append(samples[index], nal...)
+		}
+	}
+	sps := sequenceSets[0]
+	avcCParts := [][]byte{{1, sps[1], sps[2], sps[3], 0xff, 0xe1}, mp4U16(uint16(len(sps))), sps,
+		{byte(len(pictureSets))}}
+	for _, pps := range pictureSets {
+		avcCParts = append(avcCParts, mp4U16(uint16(len(pps))), pps)
+	}
+	visual := mp4Box("avc1", make([]byte, 6), mp4U16(1), make([]byte, 16), mp4U16(64, 64),
+		mp4U32(0x480000, 0x480000, 0), mp4U16(1), make([]byte, 32), mp4U16(24, 0xffff),
+		mp4Box("avcC", avcCParts...))
+	sampleSizeValues := make([]uint32, 0, len(samples)+2)
+	sampleSizeValues = append(sampleSizeValues, 0, uint32(len(samples)))
+	for _, sample := range samples {
+		sampleSizeValues = append(sampleSizeValues, uint32(len(sample)))
+	}
+	sizes := mp4FullBox("stsz", 0, mp4U32(sampleSizeValues...))
+	ftyp := mp4Box("ftyp", []byte("isom"), mp4U32(0x200), []byte("isomiso2avc1mp41"))
+	count := uint32(len(samples))
+	syncSamples := make([]uint32, sampleCount)
+	for index := range syncSamples {
+		syncSamples[index] = uint32(index + 1)
+	}
+	track := mp4Track(1, visual, sizes, count, 60, count, uint32(len(ftyp)+8),
+		true, syncSamples, nil)
+	data := make([]byte, 0)
+	for _, sample := range samples {
+		data = append(data, sample...)
+	}
+	movieHeader := mp4FullBox("mvhd", 0,
+		mp4U32(0, 0, 600, uint32(sampleCount*10)), mp4U16(1, 0),
+		make([]byte, 8), mp4U32(0x00010000, 0x01000000, 0),
+		make([]byte, 36), mp4U32(0, 0, 0, 0, 0, 0, 2))
+	movieOffset := len(ftyp) + len(movieHeader) + len(track) + 32
+	if movieOffset != len(ftyp)+8 {
+		track = mp4Track(1, visual, sizes, count, 60, count, uint32(movieOffset),
+			true, syncSamples, nil)
+	}
+	movie := mp4Box("moov", movieHeader, track)
+	videoOffset := len(ftyp) + len(movie) + 8
+	track = mp4Track(1, visual, sizes, count, 60, count, uint32(videoOffset),
+		true, syncSamples, nil)
+	movie = mp4Box("moov", movieHeader, track)
+	return append(append(ftyp, movie...), mp4Box("mdat", data)...), nil
 }
 
 func intPtr(value int) *int { return &value }

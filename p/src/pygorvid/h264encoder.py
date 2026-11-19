@@ -243,9 +243,9 @@ class H264Encoder:
         return self._encode_pcm_frame(idr_pic_id, False)
 
     def encode_companion_streams(self) -> dict[str, bytes]:
-        from .h264companions import companion_streams
+        from .h264companions import companion_files
 
-        return companion_streams()
+        return companion_files()
 
     def encode_generated_frame(self, frame_index: int) -> bytes:
         if not 0 <= frame_index <= 65535:

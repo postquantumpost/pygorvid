@@ -355,15 +355,16 @@ def test_generated_extension_companion_corpus():
     companions = encoder.encode_companion_streams()
     assert tuple(companions) == _COMPANION_SUFFIXES
     assert companions == encoder.encode_companion_streams()
-    for payload in companions.values():
+    for suffix, payload in companions.items():
+        if suffix.endswith(".mp4"):
+            assert payload[4:8] == b"ftyp"
+            continue
         assert payload.startswith(b"\x00\x00\x00\x01\x67")
         assert b"\x00\x00\x00\x01" in payload[len(b"\x00\x00\x00\x01\x67"):]
-    assert companions["frame-40-422.264"][5] == 122
-    assert companions["frame-41-444.264"][5] == 244
-    assert companions["frame-42-10bit.264"][5] == 110
-    assert companions["frame-48-sp-si.264"].count(
-        b"\x00\x00\x00\x01\x21"
-    ) == 2
+    for suffix in ("frame-40-422.mp4", "frame-41-444.mp4", "frame-42-10bit.mp4"):
+        assert b"avc1" in companions[suffix]
+        assert b"avcC" in companions[suffix]
+    assert b"mdat" in companions["frame-48-sp-si.mp4"]
     for name, payload in companions.items():
         if name.startswith("frame-49-"):
             starts = [

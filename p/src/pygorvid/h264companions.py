@@ -6,17 +6,17 @@ from .h264encoder import _BitWriter
 
 
 _COMPANION_SUFFIXES = (
-    "frame-40-422.264",
-    "frame-41-444.264",
-    "frame-41-separate.264",
-    "frame-42-10bit.264",
-    "frame-42-12bit.264",
-    "frame-43-fields.264",
-    "frame-44-mbaff.264",
-    "frame-45-fmo.264",
-    "frame-46-redundant.264",
-    "frame-47-partitions.264",
-    "frame-48-sp-si.264",
+    "frame-40-422.mp4",
+    "frame-41-444.mp4",
+    "frame-41-separate.mp4",
+    "frame-42-10bit.mp4",
+    "frame-42-12bit.mp4",
+    "frame-43-fields.mp4",
+    "frame-44-mbaff.mp4",
+    "frame-45-fmo.mp4",
+    "frame-46-redundant.mp4",
+    "frame-47-partitions.mp4",
+    "frame-48-sp-si.mp4",
     "frame-49-svc.264",
     "frame-49-mvc.264",
     "frame-49-mvcd.264",
@@ -296,6 +296,127 @@ def companion_streams() -> dict[str, bytes]:
         "frame-49-mvcd.264": extension_base + _extension_nal("mvcd"),
         "frame-49-3davc.264": extension_base + _extension_nal("3davc"),
     }
+
+
+def companion_files() -> dict[str, bytes]:
+    """Return companion files, using MP4 for AVC frames 40-48."""
+    annex = companion_streams()
+    sample_counts = {
+        "frame-40-422.264": 1,
+        "frame-41-444.264": 1,
+        "frame-41-separate.264": 1,
+        "frame-42-10bit.264": 1,
+        "frame-42-12bit.264": 1,
+        "frame-43-fields.264": 2,
+        "frame-44-mbaff.264": 1,
+        "frame-45-fmo.264": 1,
+        "frame-46-redundant.264": 3,
+        "frame-47-partitions.264": 2,
+        "frame-48-sp-si.264": 3,
+    }
+    result = {}
+    for annex_suffix, sample_count in sample_counts.items():
+        suffix = annex_suffix.removesuffix(".264") + ".mp4"
+        result[suffix] = _mux_avc_mp4(annex[annex_suffix], sample_count)
+    for suffix in (
+        "frame-49-svc.264", "frame-49-mvc.264", "frame-49-mvcd.264",
+        "frame-49-3davc.264",
+    ):
+        result[suffix] = annex[suffix]
+    return result
+
+
+def _annex_b_nals(data: bytes) -> list[bytes]:
+    starts = [
+        index for index in range(len(data) - 3)
+        if data[index:index + 4] == b"\x00\x00\x00\x01"
+    ]
+    return [
+        data[start + 4:(starts[index + 1] if index + 1 < len(starts) else len(data))]
+        for index, start in enumerate(starts)
+    ]
+
+
+def _mux_avc_mp4(annex: bytes, sample_count: int) -> bytes:
+    from .mp4writer import _box, _full_box, _matrix, _track, _u16, _u32
+
+    nals = _annex_b_nals(annex)
+    sequence_sets = [nal for nal in nals if nal[0] & 0x1F == 7]
+    picture_sets = [nal for nal in nals if nal[0] & 0x1F == 8]
+    picture_nals = [
+        nal for nal in nals if nal[0] & 0x1F != 7 and nal[0] & 0x1F != 8
+    ]
+
+    grouped: list[list[bytes]] = [[] for _ in range(sample_count)]
+    if sample_count == 1:
+        grouped[0] = picture_nals
+    else:
+        aud_groups: list[list[bytes]] = []
+        current: list[bytes] = []
+        for nal in picture_nals:
+            if nal[0] & 0x1F == 9 and current:
+                aud_groups.append(current)
+                current = []
+            current.append(nal)
+        if current:
+            aud_groups.append(current)
+        if len(aud_groups) == sample_count:
+            grouped = aud_groups
+        else:
+            slice_nals = [
+                nal for nal in picture_nals if nal[0] & 0x1F in (1, 5)
+            ]
+            if len(slice_nals) != sample_count:
+                raise ValueError("companion sample grouping is ambiguous")
+            grouped = [[nal] for nal in slice_nals]
+
+    samples = [
+        b"".join(len(nal).to_bytes(4, "big") + nal for nal in group)
+        for group in grouped
+    ]
+    if len(samples) != sample_count:
+        raise ValueError("companion sample count does not match picture plan")
+    sps = sequence_sets[0]
+    avcc = _box(
+        b"avcC", bytes([1, sps[1], sps[2], sps[3], 0xFF, 0xE1]),
+        _u16(len(sps)), sps, bytes([len(picture_sets)]),
+        *(_u16(len(pps)) + pps for pps in picture_sets),
+    )
+    visual = _box(
+        b"avc1", bytes(6), _u16(1), bytes(16), _u16(64, 64),
+        _u32(0x480000, 0x480000, 0), _u16(1), bytes(32),
+        _u16(24, 0xFFFF), avcc,
+    )
+    timescale = 60
+    sizes = _full_box(
+        b"stsz", _u32(0, len(samples)), _u32(*(len(sample) for sample in samples))
+    )
+    ftyp = _box(b"ftyp", b"isom", _u32(0x200), b"isomiso2avc1mp41")
+    video_offset = len(ftyp) + 8
+    track = _track(
+        1, visual, sizes, len(samples), timescale, sample_count,
+        video_offset, True, tuple(range(1, sample_count + 1)),
+    )
+    data = b"".join(samples)
+    movie_header = _full_box(
+        b"mvhd", _u32(0, 0, 600, sample_count * 10),
+        _u16(1, 0), bytes(8), _u32(0x00010000, 0x01000000, 0),
+        bytes(36), _u32(0, 0, 0, 0, 0, 0), _u32(2),
+    )
+    movie_offset = len(ftyp) + len(movie_header) + len(track) + 32
+    if movie_offset != len(ftyp) + 8:
+        track = _track(
+            1, visual, sizes, len(samples), timescale, sample_count,
+            movie_offset, True, tuple(range(1, sample_count + 1)),
+        )
+    movie = _box(b"moov", movie_header, track)
+    video_offset = len(ftyp) + len(movie) + 8
+    track = _track(
+        1, visual, sizes, len(samples), timescale, sample_count,
+        video_offset, True, tuple(range(1, sample_count + 1)),
+    )
+    movie = _box(b"moov", movie_header, track)
+    return ftyp + movie + _box(b"mdat", data)
 
 
 def _partition_nals(sequence: _Sequence, mb: int) -> tuple[bytes, bytes, bytes]:

@@ -45,12 +45,12 @@ if(PYGORVID_BUILD_TESTS)
     add_test(NAME pygorvid_test COMMAND pygorvid_test)
     find_program(PYGORVID_FFMPEG ffmpeg)
     if(PYGORVID_FFMPEG)
-        add_test(NAME vidprobe_annexb_ffmpeg COMMAND ${CMAKE_COMMAND}
+        add_test(NAME vidprobe_companion_ffmpeg COMMAND ${CMAKE_COMMAND}
             -DVIDPROBE=$<TARGET_FILE:vidprobe>
             -DFFMPEG=${PYGORVID_FFMPEG}
             -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_annexb_ffmpeg.cmake)
-        set_tests_properties(vidprobe_annexb_ffmpeg PROPERTIES TIMEOUT 60)
+        set_tests_properties(vidprobe_companion_ffmpeg PROPERTIES TIMEOUT 60)
     endif()
     add_test(NAME vidprobe_image_formats COMMAND ${CMAKE_COMMAND}
         -DVIDPROBE=$<TARGET_FILE:vidprobe>

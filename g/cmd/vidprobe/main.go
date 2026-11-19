@@ -85,7 +85,7 @@ func run(args []string) int {
 			return 1
 		}
 		companionBase := strings.TrimSuffix(outputPath, filepath.Ext(outputPath))
-		companions := vid.GenerateH264CompanionStreams()
+		companions := vid.GenerateH264CompanionFiles()
 		companionPaths := make([]string, 0, len(vid.H264CompanionSuffixes))
 		destinations := []string{outputPath}
 		for _, suffix := range vid.H264CompanionSuffixes {

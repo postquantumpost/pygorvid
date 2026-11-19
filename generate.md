@@ -166,15 +166,29 @@ core `--generate` file broadly playable and emit separate companion test
 files for those profile families; never make the core output malformed or
 silently decoder-dependent just to keep one filename.
 
-The implemented gate uses the companion-file option: the original 60-frame
-Progressive High 4:2:0 MP4 remains byte-identical, while `--generate` emits
-fifteen deterministic Annex-B companions beside it. Frames 41, 42, and 49 have
-one file per incompatible subcase. The complete suffix set is
-`frame-40-422.264`, `frame-41-444.264`, `frame-41-separate.264`,
-`frame-42-10bit.264`, `frame-42-12bit.264`, `frame-43-fields.264`,
-`frame-44-mbaff.264`, `frame-45-fmo.264`, `frame-46-redundant.264`,
-`frame-47-partitions.264`, `frame-48-sp-si.264`, `frame-49-svc.264`,
-`frame-49-mvc.264`, `frame-49-mvcd.264`, and `frame-49-3davc.264`.
+The implemented gate uses standalone companion files. The original 60-frame
+Progressive High 4:2:0 MP4 remains unchanged. Frames 40–48 are emitted as AVC
+MP4 files with independent `avc1` sample entries and `avcC` parameter sets.
+Frames 41 and 42 have one file per incompatible subcase. The MP4 suffix set is
+`frame-40-422.mp4`, `frame-41-444.mp4`, `frame-41-separate.mp4`,
+`frame-42-10bit.mp4`, `frame-42-12bit.mp4`, `frame-43-fields.mp4`,
+`frame-44-mbaff.mp4`, `frame-45-fmo.mp4`, `frame-46-redundant.mp4`,
+`frame-47-partitions.mp4`, and `frame-48-sp-si.mp4`.
+
+The four frame-49 Annex extension families do not share a single standardized
+`avc1` mapping suitable for the target players, so they remain deterministic
+Annex-B files: `frame-49-svc.264`, `frame-49-mvc.264`,
+`frame-49-mvcd.264`, and `frame-49-3davc.264`.
+
+All companion filenames are formed from the requested core filename. For
+example, `--generate grey.mp4` writes `grey-frame-40-422.mp4` and peers beside
+`grey.mp4`. The companion MP4s intentionally have no audio track. They use
+four-byte H.264 NAL lengths, one SPS/PPS set per file, and separate access-unit
+sample tables. Separate-colour-plane, FMO, and data-partition content is valid
+AVC packetization but may require a specialized decoder; FFmpeg does not
+implement every one of those decoding paths. Use `ffprobe` for container/SPS
+inspection and a decoder that advertises the corresponding feature for pixel
+validation.
 
 ### B. Feature isolation and ordering rules
 

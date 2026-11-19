@@ -240,12 +240,14 @@ fn write_generated_outputs(
             )));
         }
         let source = temporary.0.join(companion.suffix);
-        fs::write(&source, &companion.data)?;
-        staged.push((source, target));
+        staged.push((source, target, &companion.data));
+    }
+    for (source, _, data) in &staged {
+        fs::write(source, data)?;
     }
     let video = temporary.0.join("video");
     fs::write(&video, payload)?;
-    for (source, target) in staged {
+    for (source, target, _) in staged {
         fs::rename(source, target)?;
     }
     fs::rename(video, output)
@@ -632,6 +634,18 @@ mod tests {
         fs::create_dir(&blocked).unwrap();
         assert_eq!(run(args(&["--generate", blocked.to_str().unwrap()])), 1);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 17);
+        let sample_counts = [1, 1, 1, 1, 1, 2, 1, 1, 3, 2, 3];
+        for (suffix, sample_count) in pygorvid::H264_COMPANION_SUFFIXES[..11]
+            .iter()
+            .zip(sample_counts)
+        {
+            let reader =
+                pygorvid::VideoSampleReader::open(companion_output_path(Path::new(output), suffix))
+                    .unwrap();
+            assert_eq!(reader.sample_count(), sample_count, "{suffix}");
+            assert_eq!(reader.configuration().sequence_parameter_sets.len(), 1);
+            assert_eq!(reader.configuration().picture_parameter_sets.len(), 1);
+        }
         for prefix in ["native_", ""] {
             let requested = directory.join("prefixed video.MP4");
             let written = directory.join(format!("{prefix}prefixed video.MP4"));
@@ -668,6 +682,29 @@ mod tests {
             fs::remove_dir(&written).unwrap();
             assert_eq!(fs::read_dir(&directory).unwrap().count(), 17);
         }
+        drop(cleanup);
+    }
+
+    #[test]
+    fn generation_preserves_outputs_when_a_companion_target_is_a_directory() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../tmp/generate-rust-blocked-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let cleanup = TemporaryOutputDirectory(directory.clone());
+        let output = directory.join("grey.mp4");
+        fs::write(&output, b"existing output").unwrap();
+        let blocked = companion_output_path(&output, pygorvid::H264_COMPANION_SUFFIXES[5]);
+        fs::create_dir(&blocked).unwrap();
+
+        assert_eq!(
+            run(vec!["--generate".into(), output.display().to_string()]),
+            1
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"existing output");
+        assert!(blocked.is_dir());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
         drop(cleanup);
     }
 

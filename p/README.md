@@ -36,8 +36,10 @@ multiple slices, POC variants, 8x8 transforms and prediction, scaling lists,
 transform bypass, VUI, SEI, access-unit delimiters, and stream-end markers.
 Frame 2 tests emulation prevention. It includes silent
 stereo 48 kHz 16-bit PCM audio (`sowt`, requiring a PCM-capable MP4 player).
-Profile-extension milestones 40–49 are also generated as fifteen Annex-B
-`.264` companions; the exact names are documented in the root plan.
+Profile-extension milestones 40–48 are generated as standalone `.mp4`
+companions, with no audio and independent `avcC` configuration. Frame 49's
+Annex SVC/MVC/MVCD/3D-AVC families remain `.264` files. The exact names and
+decoder caveats are documented in the root plan.
 The initial `H264Encoder` and `Mp4Writer` objects are also exported:
 
 ```python

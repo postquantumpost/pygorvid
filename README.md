@@ -171,12 +171,20 @@ track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must
 support PCM in MP4, not only AAC.
 
-Frames 40–49 are emitted as fifteen Annex-B `.264` companion files beside the
-MP4 because 4:2:2, 4:4:4, separate-colour-plane, high-bit-depth, field,
-MBAFF, FMO, data-partitioned, SP/SI, SVC, MVC, depth, and 3D profiles cannot be
-mixed into one broadly playable Progressive High AVC track. These companions
-use names with `-frame-40-...` through `-frame-49-...` suffixes and are written
-without changing the core MP4 bytes.
+Frames 40–48 are emitted as standalone AVC `.mp4` companions beside the core
+MP4 because incompatible chroma, depth, field, FMO, partition, and SP/SI
+configurations cannot share one broadly playable Progressive High track. Each
+companion has its own `avc1` sample entry and `avcC` SPS/PPS, four-byte NAL
+lengths, access-unit sample table, and no audio track. The four frame-49
+Annex-extension families remain `.264` files.
+
+For example, `--generate grey.mp4` also creates
+`grey-frame-40-422.mp4`, `grey-frame-41-444.mp4`, the remaining
+`grey-frame-4x-...mp4` files, and `grey-frame-49-svc.264`,
+`grey-frame-49-mvc.264`, `grey-frame-49-mvcd.264`, and
+`grey-frame-49-3davc.264`. General MP4 tools can inspect all companion
+containers; decoding separate-colour-plane, FMO, and data-partition samples
+requires a decoder implementing those H.264 paths.
 
 Each implementation exposes separate `H264Encoder` and `Mp4Writer` objects.
 The writer's `encode` method (`Encode` in Go) accepts an encoder and returns

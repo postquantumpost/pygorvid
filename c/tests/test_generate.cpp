@@ -48,6 +48,39 @@ annex_b_nal_headers(const std::vector<std::uint8_t>& data) {
     return headers;
 }
 
+std::uint32_t mp4_sample_count(const std::vector<std::uint8_t>& data) {
+    for (std::size_t index = 0; index + 20 <= data.size(); ++index) {
+        if (data[index] == 's' && data[index + 1] == 't' &&
+            data[index + 2] == 's' && data[index + 3] == 'z') {
+            return (static_cast<std::uint32_t>(data[index + 12]) << 24) |
+                   (static_cast<std::uint32_t>(data[index + 13]) << 16) |
+                   (static_cast<std::uint32_t>(data[index + 14]) << 8) |
+                   data[index + 15];
+        }
+    }
+    assert(false);
+    return 0;
+}
+
+bool has_single_avcc_set_and_four_byte_lengths(
+    const std::vector<std::uint8_t>& data) {
+    for (std::size_t index = 0; index + 16 <= data.size(); ++index) {
+        if (data[index] == 'a' && data[index + 1] == 'v' &&
+            data[index + 2] == 'c' && data[index + 3] == 'C') {
+            if ((data[index + 8] & 3) != 3 || (data[index + 9] & 31) != 1) {
+                return false;
+            }
+            const auto sps_size =
+                (static_cast<std::size_t>(data[index + 10]) << 8) |
+                data[index + 11];
+            const auto pps_count_index = index + 12 + sps_size;
+            return pps_count_index < data.size() &&
+                   data[pps_count_index] == 1;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -98,6 +131,43 @@ int main() {
     assert(annex_b_nal_headers(companions[12].data).back().second == 20);
     assert(annex_b_nal_headers(companions[13].data).back().second == 21);
     assert(annex_b_nal_headers(companions[14].data).back().second == 21);
+    const auto files = pygorvid::generate_h264_companion_files();
+    const std::array<std::string, 15> file_suffixes{{
+        "frame-40-422.mp4", "frame-41-444.mp4",
+        "frame-41-separate.mp4", "frame-42-10bit.mp4",
+        "frame-42-12bit.mp4", "frame-43-fields.mp4",
+        "frame-44-mbaff.mp4", "frame-45-fmo.mp4",
+        "frame-46-redundant.mp4", "frame-47-partitions.mp4",
+        "frame-48-sp-si.mp4", "frame-49-svc.264",
+        "frame-49-mvc.264", "frame-49-mvcd.264",
+        "frame-49-3davc.264"}};
+    const std::array<std::size_t, 11> file_sizes{{
+        8895, 12992, 13072, 8384, 19137, 6863, 6847, 6857, 19251,
+        13381, 13076}};
+    const std::array<std::uint32_t, 11> file_checksums{{
+        0xa962795b, 0x2648c93c, 0x6b062863, 0xfcdecb14,
+        0x5a9e4f02, 0xb7746bc6, 0x58bba852, 0x220d9da5,
+        0x7c7a2b3a, 0x75acc2b7, 0xd025dfb8}};
+    const std::array<std::uint32_t, 11> sample_counts{{
+        1, 1, 1, 1, 1, 2, 1, 1, 3, 2, 3}};
+    const std::string sound_handler = "soun";
+    assert(files.size() == file_suffixes.size());
+    for (std::size_t index = 0; index < files.size(); ++index) {
+        assert(files[index].suffix == file_suffixes[index]);
+        if (index < sample_counts.size()) {
+            assert(files[index].data.size() == file_sizes[index]);
+            assert(crc32(files[index].data) == file_checksums[index]);
+            assert(mp4_sample_count(files[index].data) == sample_counts[index]);
+            assert(has_single_avcc_set_and_four_byte_lengths(files[index].data));
+            assert(std::search(files[index].data.begin(),
+                               files[index].data.end(),
+                               sound_handler.begin(),
+                               sound_handler.end()) ==
+                   files[index].data.end());
+        } else {
+            assert(files[index].data == companions[index].data);
+        }
+    }
     const auto sps = pygorvid::parse_sps(encoder.sequence_parameter_set());
     const auto pps = pygorvid::parse_pps(encoder.picture_parameter_set());
     for (const std::uint16_t index : {0, 24, 65535}) {

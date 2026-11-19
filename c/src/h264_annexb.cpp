@@ -1,6 +1,9 @@
 #include "pygorvid/h264_annexb.hpp"
 
 #include <array>
+#include <initializer_list>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -222,6 +225,218 @@ Bytes annex_b(const std::vector<Bytes>& nals) {
     return result;
 }
 
+Bytes u32s(std::initializer_list<std::uint32_t> values) {
+    Bytes result;
+    for (const auto value : values) {
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            result.push_back(static_cast<std::uint8_t>(value >> shift));
+        }
+    }
+    return result;
+}
+
+Bytes u16s(std::initializer_list<std::uint16_t> values) {
+    Bytes result;
+    for (const auto value : values) {
+        result.push_back(static_cast<std::uint8_t>(value >> 8));
+        result.push_back(static_cast<std::uint8_t>(value));
+    }
+    return result;
+}
+
+Bytes text(const std::string& value) {
+    return Bytes(value.begin(), value.end());
+}
+
+Bytes box(const std::string& kind, std::initializer_list<Bytes> parts) {
+    std::size_t length = 8;
+    for (const auto& part : parts) {
+        if (part.size() > std::numeric_limits<std::uint32_t>::max() - length) {
+            throw std::length_error("MP4 box exceeds the 32-bit size limit");
+        }
+        length += part.size();
+    }
+    Bytes result = u32s({static_cast<std::uint32_t>(length)});
+    result.reserve(length);
+    result.insert(result.end(), kind.begin(), kind.end());
+    for (const auto& part : parts) {
+        result.insert(result.end(), part.begin(), part.end());
+    }
+    return result;
+}
+
+Bytes full_box(const std::string& kind, std::uint32_t flags,
+               std::initializer_list<Bytes> parts) {
+    Bytes result = u32s({flags});
+    for (const auto& part : parts) {
+        result.insert(result.end(), part.begin(), part.end());
+    }
+    return box(kind, {std::move(result)});
+}
+
+Bytes matrix() {
+    return u32s({0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000});
+}
+
+Bytes mp4_track(const Bytes& entry, const Bytes& sizes,
+                std::uint32_t sample_count, std::uint32_t offset) {
+    const auto tkhd = full_box("tkhd", 7, {
+        u32s({0, 0, 1, 0, sample_count}), Bytes(8), u16s({0, 0, 0, 0}),
+        matrix(), u32s({64u << 16, 64u << 16}),
+    });
+    const auto mdhd = full_box("mdhd", 0, {
+        u32s({0, 0, 60, sample_count}), u16s({0x55c4, 0}),
+    });
+    const auto hdlr = full_box("hdlr", 0, {
+        u32s({0}), text("vide"), Bytes(12), text("Video"), Bytes(1),
+    });
+    const auto media_header = full_box("vmhd", 1, {Bytes(8)});
+    const auto dinf = box("dinf", {
+        full_box("dref", 0, {u32s({1}), full_box("url ", 1, {})}),
+    });
+    auto sync = u32s({sample_count});
+    for (std::uint32_t sample = 1; sample <= sample_count; ++sample) {
+        const auto value = u32s({sample});
+        sync.insert(sync.end(), value.begin(), value.end());
+    }
+    const auto stbl = box("stbl", {
+        full_box("stsd", 0, {u32s({1}), entry}),
+        full_box("stts", 0, {u32s({1, sample_count, 1})}),
+        full_box("stsc", 0, {u32s({1, 1, sample_count, 1})}),
+        sizes,
+        full_box("stss", 0, {std::move(sync)}),
+        full_box("stco", 0, {u32s({1, offset})}),
+    });
+    return box("trak", {
+        std::move(tkhd),
+        box("mdia", {
+            std::move(mdhd), std::move(hdlr),
+            box("minf", {std::move(media_header), std::move(dinf),
+                         std::move(stbl)}),
+        }),
+    });
+}
+
+std::vector<Bytes> annex_b_nals(const Bytes& data) {
+    std::vector<std::size_t> starts;
+    for (std::size_t index = 0; index + 4 <= data.size(); ++index) {
+        if (data[index] == 0 && data[index + 1] == 0 &&
+            data[index + 2] == 0 && data[index + 3] == 1) {
+            starts.push_back(index);
+        }
+    }
+    if (starts.empty()) {
+        throw std::invalid_argument("companion stream contains no Annex-B NAL units");
+    }
+    std::vector<Bytes> result;
+    for (std::size_t index = 0; index < starts.size(); ++index) {
+        const auto first = starts[index] + 4;
+        const auto last = index + 1 < starts.size() ? starts[index + 1]
+                                                   : data.size();
+        if (first == last) {
+            throw std::invalid_argument("companion stream contains an empty NAL unit");
+        }
+        result.emplace_back(data.begin() + static_cast<std::ptrdiff_t>(first),
+                            data.begin() + static_cast<std::ptrdiff_t>(last));
+    }
+    return result;
+}
+
+Bytes mux_avc_mp4(const Bytes& annex, std::uint32_t sample_count) {
+    if (!sample_count) {
+        throw std::invalid_argument("companion sample count must be positive");
+    }
+    const auto nals = annex_b_nals(annex);
+    std::vector<Bytes> sequence_sets, picture_sets, picture_nals;
+    for (const auto& nal : nals) {
+        const auto type = nal.front() & 31;
+        if (type == 7) sequence_sets.push_back(nal);
+        else if (type == 8) picture_sets.push_back(nal);
+        else picture_nals.push_back(nal);
+    }
+    if (sequence_sets.size() != 1 || picture_sets.size() != 1) {
+        throw std::invalid_argument(
+            "companion MP4 requires exactly one SPS and one PPS");
+    }
+
+    std::vector<std::vector<Bytes>> grouped(sample_count);
+    if (sample_count == 1) {
+        grouped.front() = picture_nals;
+    } else {
+        std::vector<std::vector<Bytes>> aud_groups;
+        std::vector<Bytes> current;
+        for (const auto& nal : picture_nals) {
+            if ((nal.front() & 31) == 9 && !current.empty()) {
+                aud_groups.push_back(std::move(current));
+                current.clear();
+            }
+            current.push_back(nal);
+        }
+        if (!current.empty()) aud_groups.push_back(std::move(current));
+        if (aud_groups.size() == sample_count) {
+            grouped = std::move(aud_groups);
+        } else {
+            grouped.clear();
+            for (const auto& nal : picture_nals) {
+                if ((nal.front() & 31) == 1 || (nal.front() & 31) == 5) {
+                    grouped.push_back({nal});
+                }
+            }
+            if (grouped.size() != sample_count) {
+                throw std::invalid_argument("companion sample grouping is ambiguous");
+            }
+        }
+    }
+
+    Bytes data;
+    Bytes sample_sizes = u32s({0, sample_count});
+    for (const auto& group : grouped) {
+        Bytes sample;
+        for (const auto& nal : group) {
+            const auto length = u32s({static_cast<std::uint32_t>(nal.size())});
+            sample.insert(sample.end(), length.begin(), length.end());
+            sample.insert(sample.end(), nal.begin(), nal.end());
+        }
+        const auto size = u32s({static_cast<std::uint32_t>(sample.size())});
+        sample_sizes.insert(sample_sizes.end(), size.begin(), size.end());
+        data.insert(data.end(), sample.begin(), sample.end());
+    }
+    const auto sizes = full_box("stsz", 0, {std::move(sample_sizes)});
+    const auto& sps = sequence_sets.front();
+    const auto& pps = picture_sets.front();
+    const auto avcc = box("avcC", {
+        Bytes{1, sps[1], sps[2], sps[3], 0xff, 0xe1},
+        u16s({static_cast<std::uint16_t>(sps.size())}), sps, Bytes{1},
+        u16s({static_cast<std::uint16_t>(pps.size())}), pps,
+    });
+    const auto visual = box("avc1", {
+        Bytes(6), u16s({1}), Bytes(16), u16s({64, 64}),
+        u32s({0x480000, 0x480000, 0}), u16s({1}), Bytes(32),
+        u16s({24, 0xffff}), avcc,
+    });
+    const auto ftyp = box("ftyp", {
+        text("isom"), u32s({0x200}), text("isomiso2avc1mp41"),
+    });
+    const auto initial_track = mp4_track(visual, sizes, sample_count, 0);
+    const auto movie_header = full_box("mvhd", 0, {
+        u32s({0, 0, 600, sample_count * 10}), u16s({1, 0}), Bytes(8),
+        u32s({0x00010000, 0x01000000, 0}), Bytes(36),
+        u32s({0, 0, 0, 0, 0, 0}), u32s({2}),
+    });
+    const auto movie = box("moov", {movie_header, initial_track});
+    const auto video_offset =
+        static_cast<std::uint32_t>(ftyp.size() + movie.size() + 8);
+    const auto final_movie = box("moov", {
+        movie_header, mp4_track(visual, sizes, sample_count, video_offset),
+    });
+    Bytes result;
+    const auto media = box("mdat", {std::move(data)});
+    for (const auto* part : {&ftyp, &final_movie, &media}) {
+        result.insert(result.end(), part->begin(), part->end());
+    }
+    return result;
+}
+
 Bytes aud() {
     BitWriter writer;
     writer.bits(0, 8);
@@ -361,6 +576,20 @@ std::vector<H264AnnexBStream> generate_h264_annex_b_streams() {
         stream("frame-49-mvcd.264", appended("mvcd")),
         stream("frame-49-3davc.264", appended("3davc")),
     };
+}
+
+std::vector<H264AnnexBStream> generate_h264_companion_files() {
+    static const std::array<std::uint32_t, 11> sample_counts{{
+        1, 1, 1, 1, 1, 2, 1, 1, 3, 2, 3,
+    }};
+    auto result = generate_h264_annex_b_streams();
+    for (std::size_t index = 0; index < sample_counts.size(); ++index) {
+        auto suffix = result[index].suffix;
+        suffix.replace(suffix.size() - 4, 4, ".mp4");
+        result[index] = stream(std::move(suffix),
+            mux_avc_mp4(result[index].data, sample_counts[index]));
+    }
+    return result;
 }
 
 } // namespace pygorvid

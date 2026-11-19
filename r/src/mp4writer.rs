@@ -214,7 +214,7 @@ fn metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
     ))
 }
 
-fn u32s(values: &[u32]) -> Vec<u8> {
+pub(crate) fn u32s(values: &[u32]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|value| value.to_be_bytes())
@@ -392,14 +392,14 @@ fn windows_metadata_box(metadata: Option<&Mp4Metadata>) -> io::Result<Vec<u8>> {
     Ok(mp4_box(b"Xtra", &[&records]))
 }
 
-fn u16s(values: &[u16]) -> Vec<u8> {
+pub(crate) fn u16s(values: &[u16]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|value| value.to_be_bytes())
         .collect()
 }
 
-fn mp4_box(kind: &[u8; 4], parts: &[&[u8]]) -> Vec<u8> {
+pub(crate) fn mp4_box(kind: &[u8; 4], parts: &[&[u8]]) -> Vec<u8> {
     let length = 8 + parts.iter().map(|part| part.len()).sum::<usize>();
     let mut result = Vec::with_capacity(length);
     result.extend_from_slice(&(length as u32).to_be_bytes());
@@ -410,18 +410,18 @@ fn mp4_box(kind: &[u8; 4], parts: &[&[u8]]) -> Vec<u8> {
     result
 }
 
-fn full_box(kind: &[u8; 4], flags: u32, parts: &[&[u8]]) -> Vec<u8> {
+pub(crate) fn full_box(kind: &[u8; 4], flags: u32, parts: &[&[u8]]) -> Vec<u8> {
     let flags = flags.to_be_bytes();
     let mut contents: Vec<&[u8]> = vec![&flags];
     contents.extend_from_slice(parts);
     mp4_box(kind, &contents)
 }
 
-fn matrix() -> Vec<u8> {
+pub(crate) fn matrix() -> Vec<u8> {
     u32s(&[0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000])
 }
 
-fn track(
+pub(crate) fn track(
     id: u32,
     entry: &[u8],
     sizes: &[u8],
