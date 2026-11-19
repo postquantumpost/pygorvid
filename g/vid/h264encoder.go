@@ -26,6 +26,14 @@ func (w *h264BitWriter) ue(value uint32) {
 	w.bits(value+1, count)
 }
 
+func (w *h264BitWriter) se(value int32) {
+	if value > 0 {
+		w.ue(uint32(2*value - 1))
+	} else {
+		w.ue(uint32(-2 * value))
+	}
+}
+
 func (w *h264BitWriter) align() {
 	for w.bitCount%8 != 0 {
 		w.bits(0, 1)
@@ -103,7 +111,10 @@ func (e H264Encoder) EncodeGeneratedFrame(frameIndex uint16) []byte {
 		return e.encodeIntra4x4DCFrame()
 	}
 	if frameIndex == 6 {
-		return e.encodeIntra4x4DirectionalFrame()
+		return e.encodeIntra4x4DirectionalFrame(5, false)
+	}
+	if frameIndex == 7 {
+		return e.encodeIntra4x4DirectionalFrame(6, true)
 	}
 	return e.encodePCMFrame(frameIndex, frameIndex == 1)
 }
@@ -147,12 +158,12 @@ func (e H264Encoder) encodeIntra4x4DCFrame() []byte {
 	return prependH264NALSize(w.nal(0x21))
 }
 
-func (e H264Encoder) encodeIntra4x4DirectionalFrame() []byte {
+func (e H264Encoder) encodeIntra4x4DirectionalFrame(frameNum uint32, residual bool) []byte {
 	w := h264BitWriter{}
 	for _, value := range []uint32{0, 2, 0} {
 		w.ue(value)
 	}
-	w.bits(5, 4)
+	w.bits(frameNum, 4)
 	w.bits(0, 1)
 	w.ue(0)
 	w.ue(1)
@@ -210,7 +221,19 @@ func (e H264Encoder) encodeIntra4x4DirectionalFrame() []byte {
 			}
 		}
 		w.ue(0)
-		w.ue(3)
+		if residual && mb == 15 {
+			w.ue(29)
+			w.se(1)
+			// Positive trailing-one token, zero runs, then three empty blocks.
+			w.bits(0b01, 2)
+			w.bits(0, 1)
+			w.bits(1, 1)
+			w.bits(1, 1)
+			w.bits(1, 1)
+			w.bits(1, 1)
+		} else {
+			w.ue(3)
+		}
 		macroblockModes = append(macroblockModes, modes)
 	}
 	return prependH264NALSize(w.nal(0x21))

@@ -22,6 +22,14 @@ impl BitWriter {
         self.bits(value + 1, count);
     }
 
+    fn se(&mut self, value: i32) {
+        self.ue(if value > 0 {
+            (2 * value - 1) as u32
+        } else {
+            (-2 * value) as u32
+        });
+    }
+
     fn align(&mut self) {
         while self.bit_count % 8 != 0 {
             self.bits(0, 1);
@@ -100,7 +108,10 @@ impl H264Encoder {
             return self.encode_intra4x4_dc_frame();
         }
         if frame_index == 6 {
-            return self.encode_intra4x4_directional_frame();
+            return self.encode_intra4x4_directional_frame(5, false);
+        }
+        if frame_index == 7 {
+            return self.encode_intra4x4_directional_frame(6, true);
         }
         self.encode_pcm_frame(frame_index, frame_index == 1)
     }
@@ -181,12 +192,12 @@ impl H264Encoder {
         sample
     }
 
-    fn encode_intra4x4_directional_frame(&self) -> Vec<u8> {
+    fn encode_intra4x4_directional_frame(&self, frame_num: u32, residual: bool) -> Vec<u8> {
         let mut writer = BitWriter::default();
         for value in [0, 2, 0] {
             writer.ue(value);
         }
-        writer.bits(5, 4);
+        writer.bits(frame_num, 4);
         writer.bits(0, 1);
         writer.ue(0);
         writer.ue(1);
@@ -245,7 +256,19 @@ impl H264Encoder {
                 }
             }
             writer.ue(0);
-            writer.ue(3);
+            if residual && macroblock == 15 {
+                writer.ue(29);
+                writer.se(1);
+                // Positive trailing-one token, zero runs, then three empty blocks.
+                writer.bits(0b01, 2);
+                writer.bits(0, 1);
+                writer.bits(1, 1);
+                writer.bits(1, 1);
+                writer.bits(1, 1);
+                writer.bits(1, 1);
+            } else {
+                writer.ue(3);
+            }
             macroblock_modes.push(modes);
         }
         let nal = writer.nal(0x21);

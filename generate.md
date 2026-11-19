@@ -95,6 +95,10 @@ Frame 7 is a reference non-IDR Intra_4x4 directional picture. Its first
 macroblock uses I_PCM to seed non-flat references; the remaining macroblocks
 exercise all directional modes, top-left/top-right reference paths, and both
 predicted and explicitly signaled neighbor-derived modes.
+Frame 8 is a reference non-IDR Intra_4x4 directional picture with one sparse
+4x4 luma residual in the final macroblock. Its CAVLC data uses a luma-only
+coded-block pattern, `mb_qp_delta=1`, one positive trailing-one coefficient,
+and zero-coefficient tokens for the other blocks in that 8x8 quadrant.
 Gray IDR padding follows through frame 60; the padded duration is at least one
 second. All current pictures are Constrained Baseline I_PCM, I_16x16, or
 Intra_4x4. The plan changes the

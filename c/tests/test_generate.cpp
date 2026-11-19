@@ -91,6 +91,28 @@ int main() {
         directional_frame.luma.begin(), directional_frame.luma.end()).first !=
         std::minmax_element(
             directional_frame.luma.begin(), directional_frame.luma.end()).second);
+    const auto residual_sample = encoder.encode_generated_frame(7);
+    const auto residual_nal = std::vector<std::uint8_t>(
+        residual_sample.begin() + 4, residual_sample.end());
+    const auto residual_header =
+        pygorvid::parse_idr_i_slice_header(residual_nal, sps, pps);
+    assert(residual_header.frame_num == 6);
+    assert(pygorvid::parse_nal_header(residual_nal).unit_type == 1);
+    const auto residual_frame =
+        pygorvid::decode_h264_reference_frame({residual_nal}, sps, pps);
+    const std::size_t residual_origin = 48 * 64 + 48;
+    assert(residual_frame.luma[residual_origin] ==
+           directional_frame.luma[residual_origin] + 4);
+    for (int row = 0; row < 64; ++row) {
+        for (int column = 0; column < 64; ++column) {
+            if (row < 48 || column < 48) {
+                const auto index = static_cast<std::size_t>(row * 64 + column);
+                assert(residual_frame.luma[index] == directional_frame.luma[index]);
+            }
+        }
+    }
+    assert(residual_frame.chroma_u == directional_frame.chroma_u);
+    assert(residual_frame.chroma_v == directional_frame.chroma_v);
     const pygorvid::Mp4Writer writer;
     const auto payload = writer.encode(encoder);
     assert(payload == writer.encode(encoder));

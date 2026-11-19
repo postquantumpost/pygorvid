@@ -33,6 +33,11 @@ public:
         bits(value + 1, count);
     }
 
+    void se(std::int32_t value) {
+        ue(value > 0 ? static_cast<std::uint32_t>(2 * value - 1)
+                     : static_cast<std::uint32_t>(-2 * value));
+    }
+
     void align() {
         while (bit_count % 8) {
             bits(0, 1);
@@ -179,12 +184,12 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
         sample.insert(sample.end(), nal.begin(), nal.end());
         return sample;
     }
-    if (frame_index == 6) {
+    if (frame_index == 6 || frame_index == 7) {
         BitWriter writer;
         for (const auto value : {0u, 2u, 0u}) {
             writer.ue(value);
         }
-        writer.bits(5, 4);
+        writer.bits(frame_index == 6 ? 5 : 6, 4);
         writer.bits(0, 1);
         writer.ue(0);
         writer.ue(1);
@@ -251,7 +256,19 @@ std::vector<std::uint8_t> H264Encoder::encode_generated_frame(std::uint16_t fram
                 }
             }
             writer.ue(0);
-            writer.ue(3);
+            if (frame_index == 7 && macroblock == 15) {
+                writer.ue(29);
+                writer.se(1);
+                // Positive trailing-one token, zero runs, then three empty blocks.
+                writer.bits(0b01, 2);
+                writer.bits(0, 1);
+                writer.bits(1, 1);
+                writer.bits(1, 1);
+                writer.bits(1, 1);
+                writer.bits(1, 1);
+            } else {
+                writer.ue(3);
+            }
             macroblock_modes[macroblock] = modes;
         }
         const auto nal = writer.nal(0x21);

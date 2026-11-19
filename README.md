@@ -146,8 +146,10 @@ prediction together with all 4:2:0 chroma prediction modes; a compact CAVLC
 residual seeds observable luma and chroma reference edges. Frame 6 is an
 Intra_4x4 DC picture that sets every `prev_intra4x4_pred_mode_flag`. Frame 7
 seeds an I_PCM macroblock and uses all eight directional Intra_4x4 modes in
-the remaining macroblocks, including modes derived from coded neighbors. The
-remaining 53 frames are gray IDR padding. All pictures use
+the remaining macroblocks, including modes derived from coded neighbors.
+Frame 8 retains that prediction family and adds a single sparse 4x4 CAVLC
+luma residual with a QP delta in the final macroblock. The remaining 52 frames
+are gray IDR padding. All pictures use
 Constrained Baseline H.264 Level 2.0, with four-byte MP4 NAL lengths. The audio
 track is uncompressed signed 16-bit
 little-endian PCM, using the QuickTime `sowt` sample entry; players must

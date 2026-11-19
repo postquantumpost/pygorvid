@@ -15,6 +15,9 @@ class _BitWriter:
         self.bits(0, count - 1)
         self.bits(value + 1, count)
 
+    def se(self, value: int) -> None:
+        self.ue(2 * value - 1 if value > 0 else -2 * value)
+
     def align(self) -> None:
         while self.bit_count % 8:
             self.bits(0, 1)
@@ -76,13 +79,17 @@ class H264Encoder:
             return self._encode_intra4x4_dc_frame()
         if frame_index == 6:
             return self._encode_intra4x4_directional_frame()
+        if frame_index == 7:
+            return self._encode_intra4x4_directional_frame(6, True)
         return self._encode_pcm_frame(frame_index, frame_index == 1)
 
-    def _encode_intra4x4_directional_frame(self) -> bytes:
+    def _encode_intra4x4_directional_frame(
+        self, frame_num: int = 5, residual: bool = False
+    ) -> bytes:
         writer = _BitWriter()
         for value in (0, 2, 0):
             writer.ue(value)
-        writer.bits(5, 4)
+        writer.bits(frame_num, 4)
         writer.bits(0, 1)
         writer.ue(0)
         writer.ue(1)
@@ -125,7 +132,18 @@ class H264Encoder:
                     writer.bits(0, 1)
                     writer.bits(desired - (desired >= predicted), 3)
             writer.ue(0)
-            writer.ue(3)
+            if residual and macroblock == 15:
+                writer.ue(29)
+                writer.se(1)
+                # Positive trailing-one token, zero runs, then three empty blocks.
+                writer.bits(0b01, 2)
+                writer.bits(0, 1)
+                writer.bits(1, 1)
+                writer.bits(1, 1)
+                writer.bits(1, 1)
+                writer.bits(1, 1)
+            else:
+                writer.ue(3)
             macroblock_modes.append(list(modes))
 
         nal = writer.nal(0x21)
