@@ -91,6 +91,7 @@ def _read_all_frames(
     reader = VideoSampleReader(input_path)
     try:
         decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
+        decoder.frame_cache_size = reader.sample_count
         for index in range(reader.sample_count):
             try:
                 if index > 0 and reader.sample_at(index).is_sync:
@@ -115,6 +116,7 @@ def _slideshow(input_path: str, threads: "int | None" = None, verbose: bool = Fa
                 raise Mp4FormatError("video configuration is unavailable")
             timescale = reader.configuration.timescale
             presentation_order = reader.presentation_sample_indices()
+            decoder.frame_cache_size = len(presentation_order)
             deadline_seconds = time.monotonic()
             count = 0
             for index, sample_index in enumerate(presentation_order):

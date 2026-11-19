@@ -3054,7 +3054,11 @@ class CABACArithmeticDecoder:
         ):
             raise CABACError("CABAC slice_data inputs are invalid or unsupported")
 
-        if slice_type % 5 == 2 or not _parallel_reconstruction_available(threads):
+        if (
+            slice_type % 5 == 2
+            or picture_macroblock_count < 4096
+            or not _parallel_reconstruction_available(threads)
+        ):
             return self._decode_slice_macroblocks(
                 slice_type, first_macroblock_address, picture_macroblock_count,
                 contexts, builder, input_provider, progress_callback, None,

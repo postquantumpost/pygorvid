@@ -141,6 +141,8 @@ def test_slideshow_presents_frames_in_order_and_stops_on_close(monkeypatch):
             closed.append("reader")
 
     class FakeDecoder:
+        frame_cache_size = 0
+
         def decode_frame(self, index):
             return index
 

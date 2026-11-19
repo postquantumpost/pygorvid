@@ -960,7 +960,12 @@ def deblock_yuv420_picture(
         planes.append(bytearray(b"".join(plane[row * stride:row * stride + width] for row in range(height))))
 
     rows = frame.height // 16
-    if threads > 1 and rows > 1 and "fork" in multiprocessing.get_all_start_methods():
+    if (
+        threads > 1
+        and rows > 1
+        and len(macroblocks) >= 4096
+        and "fork" in multiprocessing.get_all_start_methods()
+    ):
         if timeout_check is not None:
             timeout_check()
         if not _deblock_wavefront(planes, frame.width, macroblocks, qpc, width_in_mbs, min(threads, rows)):
@@ -1050,8 +1055,28 @@ def _deblock_wavefront(planes, width, macroblocks, qpc, width_in_mbs, workers) -
     processes = [context.Process(target=child, args=(worker,)) for worker in range(workers)]
     for process in processes:
         process.start()
+    while any(process.is_alive() for process in processes):
+        for process in processes:
+            process.join(0.05)
+        failed_process = next(
+            (
+                process
+                for process in processes
+                if process.exitcode is not None and process.exitcode != 0
+            ),
+            None,
+        )
+        if failed_process is not None:
+            failed.value = 1
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join()
+            break
     for process in processes:
-        process.join()
+        if process.is_alive():
+            process.terminate()
+            process.join()
     ok = not failed.value and all(process.exitcode == 0 for process in processes)
     if ok:
         for plane, buffer in zip(planes, shared):
