@@ -39,7 +39,11 @@ class PixelConverter:
             raise PixelConversionError("dimensions and strides must be positive integers")
 
         chroma_width = (width + 1) // 2
-        chroma_height = (height + 1) // 2
+        chroma_422 = (
+            len(u_plane) >= u_stride * height
+            and len(v_plane) >= v_stride * height
+        )
+        chroma_height = height if chroma_422 else (height + 1) // 2
         if y_stride < width or u_stride < chroma_width or v_stride < chroma_width:
             raise PixelConversionError("chroma and luma strides are too small")
 
@@ -58,10 +62,10 @@ class PixelConverter:
         )
         y_values = y_values[:, :width].astype(np.float64)
         u_values = np.frombuffer(
-            _upsample_chroma420(u_data, width, height, u_stride), dtype=np.uint8
+            _upsample_chroma(u_data, width, height, u_stride, chroma_422), dtype=np.uint8
         ).reshape(height, width).astype(np.float64) - 128
         v_values = np.frombuffer(
-            _upsample_chroma420(v_data, width, height, v_stride), dtype=np.uint8
+            _upsample_chroma(v_data, width, height, v_stride, chroma_422), dtype=np.uint8
         ).reshape(height, width).astype(np.float64) - 128
         blue_difference = u_values
         red_difference = v_values
@@ -114,6 +118,17 @@ def _upsample_chroma420(chroma: bytes, width: int, height: int, stride: int) -> 
     )
     upsampled = np.repeat(np.repeat(plane[:, :chroma_width], 2, axis=0), 2, axis=1)
     return upsampled[:height, :width].tobytes()
+
+
+def _upsample_chroma(
+    chroma: bytes, width: int, height: int, stride: int, chroma_422: bool
+) -> bytes:
+    if not chroma_422:
+        return _upsample_chroma420(chroma, width, height, stride)
+    plane = np.frombuffer(chroma[: height * stride], dtype=np.uint8).reshape(
+        height, stride
+    )
+    return np.repeat(plane[:, : (width + 1) // 2], 2, axis=1)[:, :width].tobytes()
 
 
 def _round_half_away_from_zero(values: np.ndarray) -> np.ndarray:

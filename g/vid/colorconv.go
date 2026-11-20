@@ -23,10 +23,24 @@ func upsampleChroma420(chroma []byte, width, height, stride int) []byte {
 	if width <= 0 || height <= 0 || stride <= 0 {
 		return nil
 	}
+
 	upsampled := make([]byte, width*height)
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			upsampled[y*width+x] = chroma[(y/2)*stride+(x/2)]
+		}
+	}
+	return upsampled
+}
+
+func upsampleChroma(chroma []byte, width, height, stride int, chroma422 bool) []byte {
+	if !chroma422 {
+		return upsampleChroma420(chroma, width, height, stride)
+	}
+	upsampled := make([]byte, width*height)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			upsampled[y*width+x] = chroma[y*stride+x/2]
 		}
 	}
 	return upsampled
@@ -66,13 +80,18 @@ func (c PixelConverter) ConvertYUV420ToRGB(width, height int, y, u, v []byte, yS
 	if yStride < width || uStride < (width+1)/2 || vStride < (width+1)/2 {
 		return PixelBuffer{}, fmt.Errorf("%w: chroma and luma strides are too small", ErrPixelConverter)
 	}
-	if len(y) < yStride*height || len(u) < uStride*((height+1)/2) || len(v) < vStride*((height+1)/2) {
+	chroma422 := len(u) >= uStride*height && len(v) >= vStride*height
+	chromaHeight := (height + 1) / 2
+	if chroma422 {
+		chromaHeight = height
+	}
+	if len(y) < yStride*height || len(u) < uStride*chromaHeight || len(v) < vStride*chromaHeight {
 		return PixelBuffer{}, fmt.Errorf("%w: input planes are too short for the requested dimensions", ErrPixelConverter)
 	}
 	outStride := width * 3
 	outData := make([]byte, outStride*height)
-	uUpsampled := upsampleChroma420(u, width, height, uStride)
-	vUpsampled := upsampleChroma420(v, width, height, vStride)
+	uUpsampled := upsampleChroma(u, width, height, uStride, chroma422)
+	vUpsampled := upsampleChroma(v, width, height, vStride, chroma422)
 	for row := 0; row < height; row++ {
 		for col := 0; col < width; col++ {
 			offset := row*outStride + col*3
@@ -95,7 +114,11 @@ func (frame Yuv420Frame) ConvertToRGB(colorRange PixelColorRange) (PixelBuffer, 
 	if frame.YStride < frame.Width || frame.UStride < (frame.Width+1)/2 || frame.VStride < (frame.Width+1)/2 {
 		return PixelBuffer{}, fmt.Errorf("%w: YUV frame strides are too small for the decoded geometry", ErrPixelConverter)
 	}
-	if len(frame.Y) < frame.YStride*frame.Height || len(frame.U) < frame.UStride*((frame.Height+1)/2) || len(frame.V) < frame.VStride*((frame.Height+1)/2) {
+	chromaHeight := (frame.Height + 1) / 2
+	if len(frame.U) >= frame.UStride*frame.Height && len(frame.V) >= frame.VStride*frame.Height {
+		chromaHeight = frame.Height
+	}
+	if len(frame.Y) < frame.YStride*frame.Height || len(frame.U) < frame.UStride*chromaHeight || len(frame.V) < frame.VStride*chromaHeight {
 		return PixelBuffer{}, fmt.Errorf("%w: YUV frame planes are too short for the decoded geometry", ErrPixelConverter)
 	}
 	converter, err := NewPixelConverter(colorRange)

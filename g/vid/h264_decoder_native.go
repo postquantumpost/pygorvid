@@ -127,12 +127,74 @@ func (decoder *H264Decoder) decodeNativeIntraSample(sample CompressedSample) (Yu
 	return cropNativeFrame(frame, decoder.nativeBlocks[0].slice.sps), nil
 }
 
+func decodeNativeIntraPCM422(slices []nativeSlice) (Yuv420Frame, error) {
+	first := slices[0]
+	sps := first.sps
+	width, height := int(sps.CodedWidth), int(sps.CodedHeight)
+	frame := Yuv420Frame{
+		Width: width, Height: height,
+		YStride: width, UStride: width / 2, VStride: width / 2,
+		Y: make([]byte, width*height),
+		U: make([]byte, width*height/2),
+		V: make([]byte, width*height/2),
+	}
+	widthMBs := width / 16
+	written := make([]bool, widthMBs*(height/16))
+	for _, slice := range slices {
+		reader := NewBitReader(slice.rbsp)
+		reader.bitOffset = slice.header.SliceDataBitOffset
+		address := int(slice.header.FirstMacroblockInSlice)
+		for reader.MoreRBSPData() {
+			mbType, err := reader.ReadUE()
+			if err != nil {
+				return Yuv420Frame{}, err
+			}
+			if mbType != 25 || address >= len(written) || written[address] {
+				return Yuv420Frame{}, fmt.Errorf("4:2:2 decoder requires complete I_PCM macroblocks")
+			}
+			reader.AlignToByte()
+			mbX, mbY := address%widthMBs, address/widthMBs
+			for row := 0; row < 16; row++ {
+				for column := 0; column < 16; column++ {
+					value, err := reader.ReadBits(8)
+					if err != nil {
+						return Yuv420Frame{}, err
+					}
+					frame.Y[(mbY*16+row)*width+mbX*16+column] = byte(value)
+				}
+			}
+			for _, plane := range [][]byte{frame.U, frame.V} {
+				for row := 0; row < 16; row++ {
+					for column := 0; column < 8; column++ {
+						value, err := reader.ReadBits(8)
+						if err != nil {
+							return Yuv420Frame{}, err
+						}
+						plane[(mbY*16+row)*(width/2)+mbX*8+column] = byte(value)
+					}
+				}
+			}
+			written[address] = true
+			address++
+		}
+	}
+	for _, complete := range written {
+		if !complete {
+			return Yuv420Frame{}, fmt.Errorf("4:2:2 I_PCM picture is incomplete")
+		}
+	}
+	return frame, nil
+}
+
 func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample) (Yuv420Frame, error) {
 	slices, err := decoder.nativeSlices(sample)
 	if err != nil {
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
+	if first.sps.ChromaFormatIDC == 2 {
+		return decodeNativeIntraPCM422(slices)
+	}
 	if first.header.SliceType%5 != 2 && first.header.SliceType%5 != 4 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 	}
@@ -206,17 +268,23 @@ func cropNativeFrame(coded Yuv420Frame, sps SPSInfo) Yuv420Frame {
 	width, height := int(sps.Width), int(sps.Height)
 	frame := Yuv420Frame{Width: width, Height: height, YStride: width, UStride: width / 2, VStride: width / 2}
 	planes := [3][]byte{coded.Y, coded.U, coded.V}
+	chromaHeightDivisor := 2
+	if sps.ChromaFormatIDC == 2 {
+		chromaHeightDivisor = 1
+	}
 	packed := [3][]byte{}
 	for component, plane := range planes {
-		divisor := 1
+		widthDivisor := 1
+		heightDivisor := 1
 		if component > 0 {
-			divisor = 2
+			widthDivisor = 2
+			heightDivisor = chromaHeightDivisor
 		}
-		stride := coded.Width / divisor
-		left, top := int(sps.FrameCropLeft)/divisor, int(sps.FrameCropTop)/divisor
-		packed[component] = make([]byte, width/divisor*height/divisor)
-		for row := 0; row < height/divisor; row++ {
-			copy(packed[component][row*(width/divisor):], plane[(top+row)*stride+left:(top+row)*stride+left+width/divisor])
+		stride := coded.Width / widthDivisor
+		left, top := int(sps.FrameCropLeft)/widthDivisor, int(sps.FrameCropTop)/heightDivisor
+		packed[component] = make([]byte, width/widthDivisor*height/heightDivisor)
+		for row := 0; row < height/heightDivisor; row++ {
+			copy(packed[component][row*(width/widthDivisor):], plane[(top+row)*stride+left:(top+row)*stride+left+width/widthDivisor])
 		}
 	}
 	frame.Y, frame.U, frame.V = packed[0], packed[1], packed[2]

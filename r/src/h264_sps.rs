@@ -43,9 +43,9 @@ fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
             info.profile_idc
         )));
     }
-    if info.chroma_format_idc != 1 {
+    if !matches!(info.chroma_format_idc, 1 | 2) {
         return Err(invalid(format!(
-            "unsupported SPS chroma_format_idc {}: only 4:2:0 is supported",
+            "unsupported SPS chroma_format_idc {}: only 4:2:0 and 4:2:2 are supported",
             info.chroma_format_idc
         )));
     }

@@ -46,10 +46,19 @@ fn validate_checkpoint_frame(frame: &Yuv420Frame) -> io::Result<()> {
                 .is_some_and(|required| plane.len() >= required)
     };
     let chroma_width = frame.width / 2 + frame.width % 2;
-    let chroma_height = frame.height / 2 + frame.height % 2;
+    let chroma_height_u = if frame.u_stride > 0 && frame.u.len() >= frame.u_stride * frame.height {
+        frame.height
+    } else {
+        frame.height / 2 + frame.height % 2
+    };
+    let chroma_height_v = if frame.v_stride > 0 && frame.v.len() >= frame.v_stride * frame.height {
+        frame.height
+    } else {
+        frame.height / 2 + frame.height % 2
+    };
     if valid_plane(&frame.y, frame.width, frame.height, frame.y_stride)
-        && valid_plane(&frame.u, chroma_width, chroma_height, frame.u_stride)
-        && valid_plane(&frame.v, chroma_width, chroma_height, frame.v_stride)
+        && valid_plane(&frame.u, chroma_width, chroma_height_u, frame.u_stride)
+        && valid_plane(&frame.v, chroma_width, chroma_height_v, frame.v_stride)
     {
         Ok(())
     } else {
@@ -460,6 +469,89 @@ fn picture_deblocking_macroblock(
     ))
 }
 
+fn decode_i_pcm_422_picture(
+    picture: &[DependencySlice],
+    sps: &crate::SpsInfo,
+) -> io::Result<crate::Yuv420Frame> {
+    let width = usize::try_from(sps.coded_width).map_err(|_| invalid("width overflow"))?;
+    let height = usize::try_from(sps.coded_height).map_err(|_| invalid("height overflow"))?;
+    let width_in_mbs = width / 16;
+    let mut y = vec![0; width * height];
+    let mut u = vec![0; width * height / 2];
+    let mut v = vec![0; u.len()];
+    let mut written = vec![false; width_in_mbs * (height / 16)];
+    for slice in picture {
+        let rbsp = crate::ebsp_to_rbsp(
+            slice
+                .nal_unit
+                .get(1..)
+                .ok_or_else(|| invalid("4:2:2 slice NAL is empty"))?,
+        )?;
+        let mut reader = crate::BitReader::new(&rbsp);
+        let offset = slice.header.slice_data_bit_offset;
+        for chunk in (0..offset).step_by(32) {
+            reader.read_bits((offset - chunk).min(32) as u8)?;
+        }
+        let mut address = slice.header.first_macroblock_in_slice as usize;
+        while reader.more_rbsp_data() {
+            if address >= written.len() || written[address] || reader.read_ue()? != 25 {
+                return Err(invalid(
+                    "4:2:2 decoder requires complete, non-overlapping I_PCM macroblocks",
+                ));
+            }
+            reader.align_to_byte();
+            let mb_x = address % width_in_mbs;
+            let mb_y = address / width_in_mbs;
+            for row in 0..16 {
+                for column in 0..16 {
+                    y[(mb_y * 16 + row) * width + mb_x * 16 + column] = reader.read_bits(8)? as u8;
+                }
+            }
+            for plane in [&mut u, &mut v] {
+                for row in 0..16 {
+                    for column in 0..8 {
+                        plane[(mb_y * 16 + row) * (width / 2) + mb_x * 8 + column] =
+                            reader.read_bits(8)? as u8;
+                    }
+                }
+            }
+            written[address] = true;
+            address += 1;
+        }
+    }
+    if written.iter().any(|complete| !complete) {
+        return Err(invalid("4:2:2 I_PCM picture is incomplete"));
+    }
+    let out_width = sps.width as usize;
+    let out_height = sps.height as usize;
+    let left = sps.frame_crop_left as usize;
+    let top = sps.frame_crop_top as usize;
+    let crop_chroma = |plane: &[u8]| {
+        (0..out_height)
+            .flat_map(|row| {
+                let start = (top + row) * (width / 2) + left / 2;
+                plane[start..start + out_width / 2].iter().copied()
+            })
+            .collect::<Vec<_>>()
+    };
+    let output_y = (0..out_height)
+        .flat_map(|row| {
+            let start = (top + row) * width + left;
+            y[start..start + out_width].iter().copied()
+        })
+        .collect();
+    Ok(crate::Yuv420Frame {
+        width: out_width,
+        height: out_height,
+        y_stride: out_width,
+        u_stride: out_width / 2,
+        v_stride: out_width / 2,
+        y: output_y,
+        u: crop_chroma(&u),
+        v: crop_chroma(&v),
+    })
+}
+
 fn slice_reference_lists(
     references: &[crate::ReferencePicture],
     header: &crate::SliceHeader,
@@ -496,6 +588,7 @@ fn slice_reference_lists(
             header.num_ref_idx_l1_active_minus1 as usize + 1,
         )?;
     }
+
     let active_l0 = if header.num_ref_idx_active_override {
         header.num_ref_idx_l0_active_minus1
     } else {
@@ -2292,6 +2385,16 @@ impl H264Decoder {
             let picture_order_count = self
                 .picture_order_count(&header, &sps)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            if sps.chroma_format_idc == 2 {
+                let frame = decode_i_pcm_422_picture(&picture, &sps)
+                    .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+                self.cache_decoded_frame(display_index, frame.clone());
+                self.last_decoded_sample_index = Some(sample_index);
+                if sample_index == target_sample_index as u64 {
+                    target_frame = Some(frame);
+                }
+                continue;
+            }
             let width_in_mbs = usize::try_from(sps.coded_width / 16)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
             let height_in_mbs = usize::try_from(sps.coded_height / 16)

@@ -23,11 +23,21 @@ pub(crate) fn frame_to_rgb(frame: &Yuv420Frame) -> io::Result<RgbImage> {
     let chroma_u = frame.u_plane_bytes()?;
     let chroma_v = frame.v_plane_bytes()?;
     let chroma_width = frame.width.div_ceil(2);
+    let chroma_height = if chroma_u.len() >= frame.u_stride * frame.height {
+        frame.height
+    } else {
+        frame.height.div_ceil(2)
+    };
     let mut data = Vec::with_capacity(size);
     for row in 0..frame.height {
         for column in 0..frame.width {
             let luma_value = f64::from(luma[row * frame.width + column]) - 16.0;
-            let chroma_offset = (row / 2) * chroma_width + column / 2;
+            let chroma_row = if chroma_height == frame.height {
+                row
+            } else {
+                row / 2
+            };
+            let chroma_offset = chroma_row * chroma_width + column / 2;
             let blue_difference = f64::from(chroma_u[chroma_offset]) - 128.0;
             let red_difference = f64::from(chroma_v[chroma_offset]) - 128.0;
             for value in [

@@ -155,9 +155,10 @@ void validate_supported_sps(const SpsInfo& info) {
         invalid("unsupported SPS profile_idc " + std::to_string(info.profile_idc) +
                 ": only progressive 8-bit 4:2:0 profiles are supported");
     }
-    if (info.chroma_format_idc != 1) {
+    if (info.chroma_format_idc != 1 && info.chroma_format_idc != 2) {
         invalid("unsupported SPS chroma_format_idc " +
-                std::to_string(info.chroma_format_idc) + ": only 4:2:0 is supported");
+                std::to_string(info.chroma_format_idc) +
+                ": only 4:2:0 and 4:2:2 are supported");
     }
     if (info.separate_colour_plane) {
         invalid("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported");

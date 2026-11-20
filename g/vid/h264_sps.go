@@ -269,8 +269,8 @@ func validateSupportedSPS(info SPSInfo) error {
 	if _, ok := supportedProfiles[info.ProfileIDC]; !ok {
 		return fmt.Errorf("unsupported SPS profile_idc %d: only progressive 8-bit 4:2:0 profiles are supported", info.ProfileIDC)
 	}
-	if info.ChromaFormatIDC != 1 {
-		return fmt.Errorf("unsupported SPS chroma_format_idc %d: only 4:2:0 is supported", info.ChromaFormatIDC)
+	if info.ChromaFormatIDC != 1 && info.ChromaFormatIDC != 2 {
+		return fmt.Errorf("unsupported SPS chroma_format_idc %d: only 4:2:0 and 4:2:2 are supported", info.ChromaFormatIDC)
 	}
 	if info.SeparateColourPlane {
 		return fmt.Errorf("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported")
