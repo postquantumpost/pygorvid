@@ -52,9 +52,9 @@ fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
     if info.separate_colour_plane && info.chroma_format_idc != 3 {
         return Err(invalid("separate_colour_plane_flag requires 4:4:4 chroma"));
     }
-    if !matches!(info.bit_depth_luma, 8 | 10) || info.bit_depth_chroma != info.bit_depth_luma {
+    if !matches!(info.bit_depth_luma, 8 | 10 | 12) || info.bit_depth_chroma != info.bit_depth_luma {
         return Err(invalid(format!(
-            "unsupported SPS bit depth {}/{}: only equal 8- or 10-bit depths are supported",
+            "unsupported SPS bit depth {}/{}: only equal 8-, 10-, or 12-bit depths are supported",
             info.bit_depth_luma, info.bit_depth_chroma
         )));
     }

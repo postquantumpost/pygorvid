@@ -66,7 +66,7 @@ def make_sps(
 def test_parse_sps_rejects_unsupported_feature_set():
     unsupported_cases = [
         make_sps(118, 0, 42, "1" + "010" + "1" + "1"),
-        make_sps(100, 0, 42, "1" + "010" + "00101" + "00101"),
+        make_sps(100, 0, 42, "1" + "010" + "00110" + "00110"),
         make_sps(100, 0, 42, "1" + "010" + "1" + "1", frame_mbs_only=False),
     ]
     for nal in unsupported_cases:
@@ -87,6 +87,11 @@ def test_parse_sps_accepts_10_bit_depth():
         make_sps(110, 0, 42, "1" + "010" + "011" + "011")
     )
     assert (info.bit_depth_luma, info.bit_depth_chroma) == (10, 10)
+
+    info = parse_sps(
+        make_sps(110, 0, 42, "1" + "010" + "00101" + "00101")
+    )
+    assert (info.bit_depth_luma, info.bit_depth_chroma) == (12, 12)
 
 
 def test_parse_sps_dimensions_and_crop_units():

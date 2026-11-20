@@ -3426,7 +3426,8 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
     if (slice_nals.empty() || !sps.frame_mbs_only ||
-        (sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10) ||
+        (sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10 &&
+         sps.bit_depth_luma != 12) ||
         sps.bit_depth_chroma != sps.bit_depth_luma) {
         throw std::runtime_error(
             "high-chroma decoding currently supports progressive 8-bit I_PCM slices");

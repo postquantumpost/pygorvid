@@ -275,9 +275,9 @@ func validateSupportedSPS(info SPSInfo) error {
 	if info.SeparateColourPlane && info.ChromaFormatIDC != 3 {
 		return fmt.Errorf("separate_colour_plane_flag requires 4:4:4 chroma")
 	}
-	if (info.BitDepthLuma != 8 && info.BitDepthLuma != 10) ||
+	if (info.BitDepthLuma != 8 && info.BitDepthLuma != 10 && info.BitDepthLuma != 12) ||
 		info.BitDepthChroma != info.BitDepthLuma {
-		return fmt.Errorf("unsupported SPS bit depth %d/%d: only equal 8- or 10-bit depths are supported", info.BitDepthLuma, info.BitDepthChroma)
+		return fmt.Errorf("unsupported SPS bit depth %d/%d: only equal 8-, 10-, or 12-bit depths are supported", info.BitDepthLuma, info.BitDepthChroma)
 	}
 	if !info.FrameMbsOnly || info.MbAdaptiveFrameField {
 		return fmt.Errorf("unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported")

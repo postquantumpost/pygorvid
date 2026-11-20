@@ -163,11 +163,12 @@ void validate_supported_sps(const SpsInfo& info) {
     if (info.separate_colour_plane && info.chroma_format_idc != 3) {
         invalid("separate_colour_plane_flag requires 4:4:4 chroma");
     }
-    if ((info.bit_depth_luma != 8 && info.bit_depth_luma != 10) ||
+    if ((info.bit_depth_luma != 8 && info.bit_depth_luma != 10 &&
+         info.bit_depth_luma != 12) ||
         info.bit_depth_chroma != info.bit_depth_luma) {
         invalid("unsupported SPS bit depth " + std::to_string(info.bit_depth_luma) + "/" +
                 std::to_string(info.bit_depth_chroma) +
-                ": only equal 8- or 10-bit depths are supported");
+                ": only equal 8-, 10-, or 12-bit depths are supported");
     }
     if (!info.frame_mbs_only || info.mb_adaptive_frame_field) {
         invalid("unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported");
