@@ -67,7 +67,10 @@ def test_parse_sps_rejects_unsupported_feature_set():
     unsupported_cases = [
         make_sps(118, 0, 42, "1" + "010" + "1" + "1"),
         make_sps(100, 0, 42, "1" + "010" + "00110" + "00110"),
-        make_sps(100, 0, 42, "1" + "010" + "1" + "1", frame_mbs_only=False),
+        make_sps(
+            100, 0, 42, "1" + "010" + "1" + "1",
+            frame_mbs_only=False, mb_adaptive_frame_field=True,
+        ),
     ]
     for nal in unsupported_cases:
         with pytest.raises(SPSParseError, match="unsupported|not supported"):

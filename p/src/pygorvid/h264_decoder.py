@@ -1511,6 +1511,7 @@ class H264Decoder:
                 if (
                     sequence_set.chroma_format_idc >= 2
                     or sequence_set.bit_depth_luma > 8
+                    or not sequence_set.frame_mbs_only
                 ):
                     frame = self._decode_i_pcm_full_chroma_picture(picture, sequence_set)
                     self._report_frame_progress(display_index, sample_index, 100)
@@ -1717,7 +1718,10 @@ class H264Decoder:
         width_in_mbs = width // 16
         written = [
             [False] * (3 if sequence_set.separate_colour_plane else 1)
-            for _ in range(width_in_mbs * (height // 16))
+            for _ in range(
+                width_in_mbs
+                * ((height // 16) // (1 if sequence_set.frame_mbs_only else 2))
+            )
         ]
         from .bitreader import BitReader, BitstreamError
         from .h264_nal import ebsp_to_rbsp
@@ -1727,6 +1731,11 @@ class H264Decoder:
                 reader = BitReader(ebsp_to_rbsp(dependency_slice.nal_unit[1:]))
                 address = dependency_slice.header.first_macroblock_in_slice
                 plane_id = dependency_slice.header.colour_plane_id
+                field_stride = 2 if dependency_slice.header.field_pic_flag else 1
+                field_offset = int(
+                    dependency_slice.header.field_pic_flag
+                    and dependency_slice.header.bottom_field_flag
+                )
                 reader._bit_offset = dependency_slice.header.slice_data_bit_offset
                 while reader.more_rbsp_data():
                     if address >= len(written) or written[address][plane_id] or reader.read_ue() != 25:
@@ -1738,23 +1747,29 @@ class H264Decoder:
                     if sequence_set.separate_colour_plane:
                         destination = (luma, chroma_u, chroma_v)[plane_id]
                         for row in range(16):
+                            output_row = (mb_y * 16 + row) * field_stride + field_offset
                             for column in range(16):
-                                destination[(mb_y * 16 + row) * width +
+                                destination[output_row * width +
                                             mb_x * 16 + column] = (
                                     reader.read_bits(sequence_set.bit_depth_luma)
                                     >> (sequence_set.bit_depth_luma - 8)
                                 )
                     else:
                         for row in range(16):
+                            output_row = (mb_y * 16 + row) * field_stride + field_offset
                             for column in range(16):
-                                luma[(mb_y * 16 + row) * width + mb_x * 16 + column] = (
+                                luma[output_row * width + mb_x * 16 + column] = (
                                     reader.read_bits(sequence_set.bit_depth_luma)
                                     >> (sequence_set.bit_depth_luma - 8)
                                 )
                         for plane in (chroma_u, chroma_v):
                             for row in range(chroma_mb_height):
+                                output_row = (
+                                    (mb_y * chroma_mb_height + row) * field_stride
+                                    + field_offset
+                                )
                                 for column in range(chroma_mb_width):
-                                    plane[(mb_y * chroma_mb_height + row) * chroma_width +
+                                    plane[output_row * chroma_width +
                                           mb_x * chroma_mb_width + column] = (
                                         reader.read_bits(sequence_set.bit_depth_chroma)
                                         >> (sequence_set.bit_depth_chroma - 8)

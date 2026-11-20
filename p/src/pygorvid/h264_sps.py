@@ -84,9 +84,9 @@ def _validate_supported_sps(info: SPSInfo) -> None:
         raise SPSParseError(
             f"unsupported SPS bit depth {info.bit_depth_luma}/{info.bit_depth_chroma}: only equal 8-, 10-, or 12-bit depths are supported"
         )
-    if not info.frame_mbs_only or info.mb_adaptive_frame_field:
+    if info.mb_adaptive_frame_field:
         raise SPSParseError(
-            "unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported"
+            "adaptive-frame-field SPS is unsupported"
         )
 
 

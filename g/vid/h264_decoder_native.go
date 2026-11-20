@@ -151,12 +151,23 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 		V: make([]byte, chromaWidth*chromaHeight),
 	}
 	widthMBs := width / 16
-	written := make([][3]bool, widthMBs*(height/16))
+	pictureHeightMBs := height / 16
+	if !sps.FrameMbsOnly {
+		pictureHeightMBs /= 2
+	}
+	written := make([][3]bool, widthMBs*pictureHeightMBs)
 	for _, slice := range slices {
 		reader := NewBitReader(slice.rbsp)
 		reader.bitOffset = slice.header.SliceDataBitOffset
 		address := int(slice.header.FirstMacroblockInSlice)
 		planeID := int(slice.header.ColourPlaneID)
+		fieldStride, fieldOffset := 1, 0
+		if slice.header.FieldPicFlag {
+			fieldStride = 2
+			if slice.header.BottomFieldFlag {
+				fieldOffset = 1
+			}
+		}
 		for reader.MoreRBSPData() {
 			mbType, err := reader.ReadUE()
 			if err != nil {
@@ -170,34 +181,37 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 			if sps.SeparateColourPlane {
 				planes := [3][]byte{frame.Y, frame.U, frame.V}
 				for row := 0; row < 16; row++ {
+					outputRow := (mbY*16+row)*fieldStride + fieldOffset
 					for column := 0; column < 16; column++ {
 						value, err := reader.ReadBits(int(sps.BitDepthLuma))
 						if err != nil {
 							return Yuv420Frame{}, err
 						}
-						planes[planeID][(mbY*16+row)*width+mbX*16+column] =
+						planes[planeID][outputRow*width+mbX*16+column] =
 							byte(value >> (sps.BitDepthLuma - 8))
 					}
 				}
 			} else {
 				for row := 0; row < 16; row++ {
+					outputRow := (mbY*16+row)*fieldStride + fieldOffset
 					for column := 0; column < 16; column++ {
 						value, err := reader.ReadBits(int(sps.BitDepthLuma))
 						if err != nil {
 							return Yuv420Frame{}, err
 						}
-						frame.Y[(mbY*16+row)*width+mbX*16+column] =
+						frame.Y[outputRow*width+mbX*16+column] =
 							byte(value >> (sps.BitDepthLuma - 8))
 					}
 				}
 				for _, plane := range [][]byte{frame.U, frame.V} {
 					for row := 0; row < chromaMBHeight; row++ {
+						outputRow := (mbY*chromaMBHeight+row)*fieldStride + fieldOffset
 						for column := 0; column < chromaMBWidth; column++ {
 							value, err := reader.ReadBits(int(sps.BitDepthChroma))
 							if err != nil {
 								return Yuv420Frame{}, err
 							}
-							plane[(mbY*chromaMBHeight+row)*chromaWidth+mbX*chromaMBWidth+column] =
+							plane[outputRow*chromaWidth+mbX*chromaMBWidth+column] =
 								byte(value >> (sps.BitDepthChroma - 8))
 						}
 					}
@@ -228,7 +242,8 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
-	if first.sps.ChromaFormatIDC >= 2 || first.sps.BitDepthLuma > 8 {
+	if !first.sps.FrameMbsOnly ||
+		first.sps.ChromaFormatIDC >= 2 || first.sps.BitDepthLuma > 8 {
 		decoder.nativeBlocks = []nativeMacroblock{{slice: first}}
 		return decodeNativeIntraPCMFullChroma(slices)
 	}

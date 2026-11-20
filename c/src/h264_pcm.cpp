@@ -3425,12 +3425,12 @@ std::uint8_t sample_chroma_fractional(
 Yuv420Frame decode_idr_i_pcm_high_sample_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
-    if (slice_nals.empty() || !sps.frame_mbs_only ||
+    if (slice_nals.empty() ||
         (sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10 &&
          sps.bit_depth_luma != 12) ||
         sps.bit_depth_chroma != sps.bit_depth_luma) {
         throw std::runtime_error(
-            "high-chroma decoding currently supports progressive 8-bit I_PCM slices");
+            "high-sample decoding requires supported I_PCM bit depth and matching components");
     }
     Yuv420Frame frame;
     frame.width = sps.coded_width;
@@ -3447,21 +3447,27 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
     frame.chroma_u.resize(
         checked_plane_size(chroma_width, chroma_height));
     frame.chroma_v.resize(frame.chroma_u.size());
+    const auto picture_macroblock_height =
+        (sps.coded_height / 16) / (sps.frame_mbs_only ? 1 : 2);
     std::vector<std::array<bool, 3>> written(
-        (sps.coded_width / 16) * (sps.coded_height / 16));
+        (sps.coded_width / 16) * picture_macroblock_height);
     for (const auto& nal : slice_nals) {
         const auto header = parse_idr_i_slice_header(nal, sps, pps);
         if (header.slice_type % 5 != 2) {
             throw std::runtime_error("high-chroma data requires I slices");
         }
         const std::vector<std::uint8_t> ebsp(nal.begin() + 1, nal.end());
-        BitReader reader(ebsp_to_rbsp(ebsp));
+        const auto rbsp = ebsp_to_rbsp(ebsp);
+        BitReader reader(rbsp);
         reader.restore_bit_offset(header.slice_data_bit_offset);
         auto address = static_cast<std::size_t>(header.first_macroblock_in_slice);
         while (reader.more_rbsp_data()) {
             const auto plane_id = static_cast<std::size_t>(header.colour_plane_id);
-            if (address >= written.size() || written[address][plane_id] ||
-                reader.read_ue() != 25) {
+            if (address >= written.size()) {
+                break;
+            }
+            const auto macroblock_type = reader.read_ue();
+            if (written[address][plane_id] || macroblock_type != 25) {
                 throw std::runtime_error(
                     "high-chroma decoder supports only complete, non-overlapping I_PCM macroblocks");
             }
@@ -3472,8 +3478,12 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
                 auto* destination = plane_id == 0 ? &frame.luma
                     : plane_id == 1 ? &frame.chroma_u : &frame.chroma_v;
                 for (std::size_t row = 0; row < 16; ++row) {
+                    const auto output_row =
+                        (mb_y * 16 + row) *
+                            (header.field_pic_flag ? 2 : 1) +
+                        (header.field_pic_flag && header.bottom_field_flag ? 1 : 0);
                     for (std::size_t column = 0; column < 16; ++column) {
-                        (*destination)[(mb_y * 16 + row) * frame.width +
+                        (*destination)[output_row * frame.width +
                                        mb_x * 16 + column] =
                             static_cast<std::uint8_t>(
                                 reader.read_bits(sps.bit_depth_luma) >>
@@ -3482,8 +3492,12 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
                 }
             } else {
                 for (std::size_t row = 0; row < 16; ++row) {
+                    const auto output_row =
+                        (mb_y * 16 + row) *
+                            (header.field_pic_flag ? 2 : 1) +
+                        (header.field_pic_flag && header.bottom_field_flag ? 1 : 0);
                     for (std::size_t column = 0; column < 16; ++column) {
-                        frame.luma[(mb_y * 16 + row) * frame.width +
+                        frame.luma[output_row * frame.width +
                                    mb_x * 16 + column] =
                             static_cast<std::uint8_t>(
                                 reader.read_bits(sps.bit_depth_luma) >>
@@ -3493,9 +3507,13 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
                 for (auto* plane : {&frame.chroma_u, &frame.chroma_v}) {
                     for (std::size_t row = 0;
                          row < chroma_macroblock_height; ++row) {
+                        const auto output_row =
+                            (mb_y * chroma_macroblock_height + row) *
+                                (header.field_pic_flag ? 2 : 1) +
+                            (header.field_pic_flag && header.bottom_field_flag ? 1 : 0);
                         for (std::size_t column = 0;
                              column < chroma_macroblock_width; ++column) {
-                            (*plane)[(mb_y * chroma_macroblock_height + row) *
+                            (*plane)[output_row *
                                          chroma_width +
                                      mb_x * chroma_macroblock_width + column] =
                                 static_cast<std::uint8_t>(
@@ -3525,7 +3543,8 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
 Yuv420Frame decode_idr_i_pcm_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
-    if (sps.chroma_format_idc >= 2 || sps.bit_depth_luma > 8) {
+    if (!sps.frame_mbs_only || sps.chroma_format_idc >= 2 ||
+        sps.bit_depth_luma > 8) {
         return decode_idr_i_pcm_high_sample_frame(slice_nals, sps, pps);
     }
     return decode_idr_i_frame_impl(slice_nals, sps, pps, true);
@@ -3534,7 +3553,8 @@ Yuv420Frame decode_idr_i_pcm_frame(
 Yuv420Frame decode_idr_i_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
-    if (sps.chroma_format_idc >= 2 || sps.bit_depth_luma > 8) {
+    if (!sps.frame_mbs_only || sps.chroma_format_idc >= 2 ||
+        sps.bit_depth_luma > 8) {
         return decode_idr_i_pcm_high_sample_frame(slice_nals, sps, pps);
     }
     return decode_idr_i_frame_impl(slice_nals, sps, pps, false);

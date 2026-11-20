@@ -58,10 +58,8 @@ fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
             info.bit_depth_luma, info.bit_depth_chroma
         )));
     }
-    if !info.frame_mbs_only || info.mb_adaptive_frame_field {
-        return Err(invalid(
-            "unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported",
-        ));
+    if info.mb_adaptive_frame_field {
+        return Err(invalid("adaptive-frame-field SPS is unsupported"));
     }
     Ok(())
 }

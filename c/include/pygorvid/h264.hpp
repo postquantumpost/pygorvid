@@ -92,6 +92,8 @@ struct IdrSliceHeader {
     std::int64_t slice_beta_offset_div2 = 0;
     std::size_t slice_data_bit_offset = 0;
     std::uint8_t colour_plane_id = 0;
+    bool field_pic_flag = false;
+    bool bottom_field_flag = false;
 };
 
 struct ReferenceListModification {

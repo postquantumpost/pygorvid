@@ -170,8 +170,8 @@ void validate_supported_sps(const SpsInfo& info) {
                 std::to_string(info.bit_depth_chroma) +
                 ": only equal 8-, 10-, or 12-bit depths are supported");
     }
-    if (!info.frame_mbs_only || info.mb_adaptive_frame_field) {
-        invalid("unsupported interlaced or adaptive-frame-field SPS: only progressive 8-bit 4:2:0 is supported");
+    if (info.mb_adaptive_frame_field) {
+        invalid("adaptive-frame-field SPS is unsupported");
     }
 }
 
@@ -499,6 +499,13 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
         result.frame_num = reader.read_bits(static_cast<std::uint8_t>(frame_num_bits));
     } catch (const std::exception& error) {
         throw context("slice", "frame_num", error);
+    }
+    if (!sps.frame_mbs_only) {
+        result.field_pic_flag = read_flag(reader, "slice", "field_pic_flag");
+        if (result.field_pic_flag) {
+            result.bottom_field_flag =
+                read_flag(reader, "slice", "bottom_field_flag");
+        }
     }
     if (header.unit_type == 5) {
         result.idr_pic_id = read_ue(reader, "slice", "idr_pic_id");
