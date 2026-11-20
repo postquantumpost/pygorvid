@@ -1512,8 +1512,11 @@ class H264Decoder:
                     sequence_set.chroma_format_idc >= 2
                     or sequence_set.bit_depth_luma > 8
                     or not sequence_set.frame_mbs_only
+                    or picture_set.num_slice_groups_minus1
                 ):
-                    frame = self._decode_i_pcm_full_chroma_picture(picture, sequence_set)
+                    frame = self._decode_i_pcm_full_chroma_picture(
+                        picture, sequence_set, picture_set
+                    )
                     self._report_frame_progress(display_index, sample_index, 100)
                     self._cache_decoded_frame(display_index, frame)
                     self._last_decoded_sample_index = sample_index
@@ -1706,7 +1709,9 @@ class H264Decoder:
             )
         return target_frame
 
-    def _decode_i_pcm_full_chroma_picture(self, picture, sequence_set: SPSInfo) -> Yuv420Frame:
+    def _decode_i_pcm_full_chroma_picture(
+        self, picture, sequence_set: SPSInfo, picture_set
+    ) -> Yuv420Frame:
         width, height = sequence_set.coded_width, sequence_set.coded_height
         luma = bytearray(width * height)
         chroma_width = width if sequence_set.chroma_format_idc == 3 else width // 2
@@ -1730,7 +1735,7 @@ class H264Decoder:
         from .h264_nal import ebsp_to_rbsp
 
         try:
-            for dependency_slice in picture:
+            for slice_index, dependency_slice in enumerate(picture):
                 reader = BitReader(ebsp_to_rbsp(dependency_slice.nal_unit[1:]))
                 address = dependency_slice.header.first_macroblock_in_slice
                 plane_id = dependency_slice.header.colour_plane_id
@@ -1741,19 +1746,40 @@ class H264Decoder:
                 )
                 reader._bit_offset = dependency_slice.header.slice_data_bit_offset
                 mbaff_field = False
+                group_addresses = None
+                if picture_set.num_slice_groups_minus1:
+                    map_units = []
+                    for group, run in enumerate(picture_set.run_length_minus1):
+                        map_units.extend([group] * (run + 1))
+                    while len(map_units) < len(written):
+                        map_units.extend(map_units)
+                    group_addresses = [
+                        address for address, group in enumerate(map_units[:len(written)])
+                        if group == slice_index
+                    ]
+                slice_ordinal = 0
                 while reader.more_rbsp_data():
                     if (
                         sequence_set.mb_adaptive_frame_field
                         and address % 2 == 0
                     ):
                         mbaff_field = reader.read_bit()
-                    if address >= len(written) or written[address][plane_id] or reader.read_ue() != 25:
+                    actual_address = (
+                        group_addresses[slice_ordinal]
+                        if group_addresses is not None
+                        else address
+                    )
+                    if (
+                        actual_address >= len(written)
+                        or written[actual_address][plane_id]
+                        or reader.read_ue() != 25
+                    ):
                         raise DecoderError(
                             "high-chroma decoding requires complete, non-overlapping I_PCM macroblocks"
                         )
                     reader.align_to_byte()
                     if sequence_set.mb_adaptive_frame_field:
-                        pair = address // 2
+                        pair = actual_address // 2
                         mb_x, pair_y = (
                             pair % width_in_mbs,
                             pair // width_in_mbs,
@@ -1761,17 +1787,20 @@ class H264Decoder:
                         mb_y = (
                             pair_y
                             if mbaff_field
-                            else pair_y * 2 + address % 2
+                            else pair_y * 2 + actual_address % 2
                         )
                     else:
-                        mb_x, mb_y = address % width_in_mbs, address // width_in_mbs
+                        mb_x, mb_y = (
+                            actual_address % width_in_mbs,
+                            actual_address // width_in_mbs,
+                        )
                     field_stride = (
                         2
                         if mbaff_field or dependency_slice.header.field_pic_flag
                         else 1
                     )
                     field_offset = (
-                        address % 2
+                        actual_address % 2
                         if mbaff_field
                         else int(
                             dependency_slice.header.field_pic_flag
@@ -1808,8 +1837,9 @@ class H264Decoder:
                                         reader.read_bits(sequence_set.bit_depth_chroma)
                                         >> (sequence_set.bit_depth_chroma - 8)
                                     )
-                    written[address][plane_id] = True
+                    written[actual_address][plane_id] = True
                     address += 1
+                    slice_ordinal += 1
         except (BitstreamError, NALUnitError) as error:
             raise DecoderError(f"high-chroma I_PCM decoding failed: {error}") from error
         if any(not all(planes) for planes in written):

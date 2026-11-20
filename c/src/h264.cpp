@@ -395,9 +395,21 @@ PpsInfo parse_pps(const std::vector<std::uint8_t>& nal) {
     info.bottom_field_pic_order_in_frame_present =
         read_flag(reader, "PPS", "bottom_field_pic_order_in_frame_present_flag");
     info.num_slice_groups_minus1 = read_ue(reader, "PPS", "num_slice_groups_minus1");
+    if (info.num_slice_groups_minus1 > 7) {
+        invalid("PPS slice group count exceeds 7");
+    }
     if (info.num_slice_groups_minus1 != 0) {
-        invalid("unsupported PPS slice groups: num_slice_groups_minus1=" +
-                std::to_string(info.num_slice_groups_minus1));
+        info.slice_group_map_type =
+            read_ue(reader, "PPS", "slice_group_map_type");
+        if (info.slice_group_map_type != 0) {
+            invalid("unsupported PPS slice_group_map_type " +
+                    std::to_string(info.slice_group_map_type));
+        }
+        for (std::uint32_t index = 0;
+             index <= info.num_slice_groups_minus1; ++index) {
+            info.run_length_minus1.push_back(
+                read_ue(reader, "PPS", "run_length_minus1"));
+        }
     }
     info.num_ref_idx_l0_default_active_minus1 =
         read_ue(reader, "PPS", "num_ref_idx_l0_default_active_minus1");
@@ -609,9 +621,6 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
     }
     if (!sps.frame_mbs_only) {
         invalid("P-slice parsing currently requires progressive frame pictures");
-    }
-    if (pps.num_slice_groups_minus1 != 0) {
-        invalid("inter-slice parsing does not support slice groups");
     }
 
     const std::vector<std::uint8_t> ebsp(nal.begin() + 1, nal.end());

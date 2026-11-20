@@ -472,6 +472,7 @@ fn picture_deblocking_macroblock(
 fn decode_i_pcm_full_chroma_picture(
     picture: &[DependencySlice],
     sps: &crate::SpsInfo,
+    pps: &crate::PpsInfo,
 ) -> io::Result<crate::Yuv420Frame> {
     let width = usize::try_from(sps.coded_width).map_err(|_| invalid("width overflow"))?;
     let height = usize::try_from(sps.coded_height).map_err(|_| invalid("height overflow"))?;
@@ -499,7 +500,7 @@ fn decode_i_pcm_full_chroma_picture(
             1
         };
     let mut written = vec![[false; 3]; width_in_mbs * picture_height_in_mbs];
-    for slice in picture {
+    for (slice_index, slice) in picture.iter().enumerate() {
         let rbsp = crate::ebsp_to_rbsp(
             slice
                 .nal_unit
@@ -517,29 +518,54 @@ fn decode_i_pcm_full_chroma_picture(
         let field_offset =
             usize::from(slice.header.field_pic_flag && slice.header.bottom_field_flag);
         let mut mbaff_field = false;
+        let group_addresses = if pps.num_slice_groups_minus1 != 0 {
+            let mut mapping = Vec::new();
+            for (group, run) in pps.run_length_minus1.iter().enumerate() {
+                mapping.extend(std::iter::repeat_n(group, (*run + 1) as usize));
+            }
+            while mapping.len() < written.len() {
+                mapping.extend_from_within(..);
+            }
+            Some(
+                mapping[..written.len()]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(address, group)| (*group == slice_index).then_some(address))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        let mut ordinal = 0;
         while reader.more_rbsp_data() {
             if sps.mb_adaptive_frame_field && address % 2 == 0 {
                 mbaff_field = reader.read_bit()?;
             }
-            if address >= written.len() || written[address][plane_id] || reader.read_ue()? != 25 {
+            let actual_address = group_addresses
+                .as_ref()
+                .map_or(address, |addresses| addresses[ordinal]);
+            if actual_address >= written.len()
+                || written[actual_address][plane_id]
+                || reader.read_ue()? != 25
+            {
                 return Err(invalid(
                     "high-chroma decoder requires complete, non-overlapping I_PCM macroblocks",
                 ));
             }
             reader.align_to_byte();
             let (mb_x, mb_y) = if sps.mb_adaptive_frame_field {
-                let pair = address / 2;
+                let pair = actual_address / 2;
                 (
                     pair % width_in_mbs,
                     pair / width_in_mbs * if mbaff_field { 1 } else { 2 }
-                        + if mbaff_field { 0 } else { address % 2 },
+                        + if mbaff_field { 0 } else { actual_address % 2 },
                 )
             } else {
-                (address % width_in_mbs, address / width_in_mbs)
+                (actual_address % width_in_mbs, actual_address / width_in_mbs)
             };
             let field_stride = if mbaff_field { 2 } else { field_stride };
             let field_offset = if mbaff_field {
-                address % 2
+                actual_address % 2
             } else {
                 field_offset
             };
@@ -579,8 +605,9 @@ fn decode_i_pcm_full_chroma_picture(
                     }
                 }
             }
-            written[address][plane_id] = true;
+            written[actual_address][plane_id] = true;
             address += 1;
+            ordinal += 1;
         }
     }
     if written
@@ -1972,7 +1999,7 @@ impl H264Decoder {
             .picture_parameter_sets
             .iter()
             .find(|pps| pps.picture_parameter_set_id == header.picture_parameter_set_id)
-            .copied()
+            .cloned()
             .ok_or_else(|| invalid("dependency slice references an unavailable PPS"))?;
         let sps = self
             .sequence_parameter_sets
@@ -2455,7 +2482,7 @@ impl H264Decoder {
                 .picture_parameter_sets
                 .iter()
                 .find(|pps| pps.picture_parameter_set_id == header.picture_parameter_set_id)
-                .copied()
+                .cloned()
                 .ok_or_else(|| {
                     DecodeError::DecodeFailure(
                         "dependency picture references an unavailable PPS".into(),
@@ -2481,8 +2508,12 @@ impl H264Decoder {
             let picture_order_count = self
                 .picture_order_count(&header, &sps)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-            if !sps.frame_mbs_only || sps.chroma_format_idc >= 2 || sps.bit_depth_luma > 8 {
-                let frame = decode_i_pcm_full_chroma_picture(&picture, &sps)
+            if !sps.frame_mbs_only
+                || sps.chroma_format_idc >= 2
+                || sps.bit_depth_luma > 8
+                || pps.num_slice_groups_minus1 != 0
+            {
+                let frame = decode_i_pcm_full_chroma_picture(&picture, &sps, &pps)
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
                 self.cache_decoded_frame(display_index, frame.clone());
                 self.last_decoded_sample_index = Some(sample_index);

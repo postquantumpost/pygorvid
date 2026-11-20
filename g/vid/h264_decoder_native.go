@@ -156,7 +156,7 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 		pictureHeightMBs /= 2
 	}
 	written := make([][3]bool, widthMBs*pictureHeightMBs)
-	for _, slice := range slices {
+	for sliceIndex, slice := range slices {
 		reader := NewBitReader(slice.rbsp)
 		reader.bitOffset = slice.header.SliceDataBitOffset
 		address := int(slice.header.FirstMacroblockInSlice)
@@ -169,6 +169,24 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 			}
 		}
 		mbaffField := false
+		var groupAddresses []int
+		if slice.pps.NumSliceGroupsMinus1 != 0 {
+			mapping := []uint32{}
+			for group := uint32(0); group <= slice.pps.NumSliceGroupsMinus1; group++ {
+				for count := uint32(0); count <= slice.pps.RunLengthMinus1[group]; count++ {
+					mapping = append(mapping, group)
+				}
+			}
+			for len(mapping) < len(written) {
+				mapping = append(mapping, mapping...)
+			}
+			for position, group := range mapping[:len(written)] {
+				if int(group) == sliceIndex {
+					groupAddresses = append(groupAddresses, position)
+				}
+			}
+		}
+		ordinal := 0
 		for reader.MoreRBSPData() {
 			if sps.MbAdaptiveFrameField && address%2 == 0 {
 				var err error
@@ -181,21 +199,25 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 			if err != nil {
 				return Yuv420Frame{}, err
 			}
-			if mbType != 25 || address >= len(written) || written[address][planeID] {
+			actualAddress := address
+			if groupAddresses != nil {
+				actualAddress = groupAddresses[ordinal]
+			}
+			if mbType != 25 || actualAddress >= len(written) || written[actualAddress][planeID] {
 				return Yuv420Frame{}, fmt.Errorf("high-chroma decoder requires complete I_PCM macroblocks")
 			}
 			reader.AlignToByte()
-			mbX, mbY := address%widthMBs, address/widthMBs
+			mbX, mbY := actualAddress%widthMBs, actualAddress/widthMBs
 			if sps.MbAdaptiveFrameField {
-				pair := address / 2
+				pair := actualAddress / 2
 				mbX, mbY = pair%widthMBs, pair/widthMBs
 				if !mbaffField {
-					mbY = mbY*2 + address%2
+					mbY = mbY*2 + actualAddress%2
 				}
 			}
 			if mbaffField {
 				fieldStride = 2
-				fieldOffset = address % 2
+				fieldOffset = actualAddress % 2
 			} else {
 				fieldStride, fieldOffset = 1, 0
 			}
@@ -238,8 +260,9 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 					}
 				}
 			}
-			written[address][planeID] = true
+			written[actualAddress][planeID] = true
 			address++
+			ordinal++
 		}
 	}
 	requiredPlanes := 1
@@ -264,7 +287,8 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 	}
 	first := slices[0]
 	if !first.sps.FrameMbsOnly ||
-		first.sps.ChromaFormatIDC >= 2 || first.sps.BitDepthLuma > 8 {
+		first.sps.ChromaFormatIDC >= 2 || first.sps.BitDepthLuma > 8 ||
+		first.pps.NumSliceGroupsMinus1 != 0 {
 		decoder.nativeBlocks = []nativeMacroblock{{slice: first}}
 		return decodeNativeIntraPCMFullChroma(slices)
 	}

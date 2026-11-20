@@ -55,6 +55,8 @@ struct PpsInfo {
     bool entropy_coding_mode = false;
     bool bottom_field_pic_order_in_frame_present = false;
     std::uint32_t num_slice_groups_minus1 = 0;
+    std::uint32_t slice_group_map_type = 0;
+    std::vector<std::uint32_t> run_length_minus1;
     std::uint32_t num_ref_idx_l0_default_active_minus1 = 0;
     std::uint32_t num_ref_idx_l1_default_active_minus1 = 0;
     bool weighted_pred = false;

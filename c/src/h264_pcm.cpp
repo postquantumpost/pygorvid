@@ -2534,9 +2534,6 @@ Yuv420Frame decode_idr_i_frame_impl(
     if (slice_nals.empty()) {
         throw std::invalid_argument("IDR picture contains no slice NAL units");
     }
-    if (pps.num_slice_groups_minus1 != 0) {
-        throw std::runtime_error("I_PCM decoding does not support slice groups");
-    }
     if (!sps.frame_mbs_only || sps.chroma_format_idc != 1 ||
         sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 ||
         sps.coded_width == 0 || sps.coded_height == 0 ||
@@ -2606,7 +2603,9 @@ Yuv420Frame decode_idr_i_frame_impl(
     IdrSliceHeader picture_header;
     std::size_t decoded_count = 0;
     std::size_t slice_id = 0;
-    for (const auto& nal : slice_nals) {
+    for (std::size_t slice_index = 0;
+         slice_index < slice_nals.size(); ++slice_index) {
+        const auto& nal = slice_nals[slice_index];
         const auto header = parse_nal_header(nal);
         if ((header.unit_type != 1 && header.unit_type != 5) ||
             header.reference_idc == 0) {
@@ -3454,7 +3453,9 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
              : 1);
     std::vector<std::array<bool, 3>> written(
         (sps.coded_width / 16) * picture_macroblock_height);
-    for (const auto& nal : slice_nals) {
+    for (std::size_t slice_index = 0;
+         slice_index < slice_nals.size(); ++slice_index) {
+        const auto& nal = slice_nals[slice_index];
         const auto header = parse_idr_i_slice_header(nal, sps, pps);
         if (header.slice_type % 5 != 2) {
             throw std::runtime_error("high-chroma data requires I slices");
@@ -3464,37 +3465,61 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
         BitReader reader(rbsp);
         reader.restore_bit_offset(header.slice_data_bit_offset);
         auto address = static_cast<std::size_t>(header.first_macroblock_in_slice);
+        std::vector<std::size_t> group_addresses;
+        if (pps.num_slice_groups_minus1 != 0) {
+            std::vector<std::uint32_t> map;
+            for (std::uint32_t group = 0;
+                 group <= pps.num_slice_groups_minus1; ++group) {
+                const auto length =
+                    pps.run_length_minus1[group] + 1;
+                map.insert(map.end(), length, group);
+            }
+            while (map.size() < written.size()) {
+                map.insert(
+                    map.end(), map.begin(), map.end());
+            }
+            for (std::size_t index = 0; index < written.size(); ++index) {
+                if (map[index] == slice_index) {
+                    group_addresses.push_back(index);
+                }
+            }
+        }
+        std::size_t ordinal = 0;
         bool mbaff_field = false;
         while (reader.more_rbsp_data()) {
             if (sps.mb_adaptive_frame_field && address % 2 == 0) {
                 mbaff_field = reader.read_bit();
             }
             const auto plane_id = static_cast<std::size_t>(header.colour_plane_id);
-            if (address >= written.size()) {
+            const auto actual_address =
+                group_addresses.empty()
+                    ? address
+                    : group_addresses.at(ordinal);
+            if (actual_address >= written.size()) {
                 break;
             }
             const auto macroblock_type = reader.read_ue();
-            if (written[address][plane_id] || macroblock_type != 25) {
+            if (written[actual_address][plane_id] || macroblock_type != 25) {
                 throw std::runtime_error(
                     "high-chroma decoder supports only complete, non-overlapping I_PCM macroblocks");
             }
             reader.align_to_byte();
             const auto macroblock_width = sps.coded_width / 16;
-            const auto pair = address / 2;
+            const auto pair = actual_address / 2;
             const auto mb_x = sps.mb_adaptive_frame_field
                 ? pair % macroblock_width
-                : address % macroblock_width;
+                : actual_address % macroblock_width;
             const auto pair_y =
                 sps.mb_adaptive_frame_field
                     ? pair / macroblock_width
                     : 0;
             const auto mb_y = sps.mb_adaptive_frame_field
-                ? (mbaff_field ? pair_y : pair_y * 2 + address % 2)
-                : address / macroblock_width;
+                ? (mbaff_field ? pair_y : pair_y * 2 + actual_address % 2)
+                : actual_address / macroblock_width;
             const auto field_stride =
                 mbaff_field ? 2 : (header.field_pic_flag ? 2 : 1);
             const auto field_offset =
-                mbaff_field ? address % 2
+                mbaff_field ? actual_address % 2
                     : (header.field_pic_flag && header.bottom_field_flag ? 1U : 0U);
             if (sps.separate_colour_plane) {
                 auto* destination = plane_id == 0 ? &frame.luma
@@ -3540,8 +3565,9 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
                     }
                 }
             }
-            written[address][plane_id] = true;
+            written[actual_address][plane_id] = true;
             ++address;
+            ++ordinal;
         }
     }
     const auto required_plane_count = sps.separate_colour_plane ? 3U : 1U;
@@ -3561,7 +3587,7 @@ Yuv420Frame decode_idr_i_pcm_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
     if (!sps.frame_mbs_only || sps.chroma_format_idc >= 2 ||
-        sps.bit_depth_luma > 8) {
+        sps.bit_depth_luma > 8 || pps.num_slice_groups_minus1) {
         return decode_idr_i_pcm_high_sample_frame(slice_nals, sps, pps);
     }
     return decode_idr_i_frame_impl(slice_nals, sps, pps, true);
@@ -3571,7 +3597,7 @@ Yuv420Frame decode_idr_i_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
     if (!sps.frame_mbs_only || sps.chroma_format_idc >= 2 ||
-        sps.bit_depth_luma > 8) {
+        sps.bit_depth_luma > 8 || pps.num_slice_groups_minus1) {
         return decode_idr_i_pcm_high_sample_frame(slice_nals, sps, pps);
     }
     return decode_idr_i_frame_impl(slice_nals, sps, pps, false);
@@ -3604,7 +3630,7 @@ Yuv420Frame decode_p_frame_with_lists(
     const auto& reference_frame = *reference_frames_l0.front();
     const auto* reference_frame_l1 =
         reference_frames_l1.empty() ? nullptr : reference_frames_l1.front();
-    if (pps.num_slice_groups_minus1 != 0 || !pps.deblocking_filter_control_present) {
+    if (!pps.deblocking_filter_control_present) {
         throw std::runtime_error(
             "P-picture decoding requires no slice groups and explicit deblocking control");
     }

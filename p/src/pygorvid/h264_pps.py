@@ -17,6 +17,8 @@ class PPSInfo:
     entropy_coding_mode: bool
     bottom_field_pic_order_in_frame_present: bool
     num_slice_groups_minus1: int
+    slice_group_map_type: int
+    run_length_minus1: tuple[int, ...]
     num_ref_idx_l0_default_active_minus1: int
     num_ref_idx_l1_default_active_minus1: int
     weighted_pred: bool
@@ -58,8 +60,20 @@ def parse_pps(nal: bytes) -> PPSInfo:
     except BitstreamError as error:
         raise PPSParseError(f"PPS bottom_field_pic_order_in_frame_present_flag: {error}") from error
     num_slice_groups_minus1 = _read_ue(reader, "num_slice_groups_minus1")
+    if num_slice_groups_minus1 > 7:
+        raise PPSParseError("PPS slice group count exceeds 7")
+    slice_group_map_type = 0
+    run_length_minus1 = ()
     if num_slice_groups_minus1:
-        raise PPSParseError(f"unsupported PPS slice groups: num_slice_groups_minus1={num_slice_groups_minus1}")
+        slice_group_map_type = _read_ue(reader, "slice_group_map_type")
+        if slice_group_map_type != 0:
+            raise PPSParseError(
+                f"unsupported PPS slice_group_map_type {slice_group_map_type}"
+            )
+        run_length_minus1 = tuple(
+            _read_ue(reader, f"run_length_minus1[{index}]")
+            for index in range(num_slice_groups_minus1 + 1)
+        )
     num_ref_idx_l0 = _read_ue(reader, "num_ref_idx_l0_default_active_minus1")
     num_ref_idx_l1 = _read_ue(reader, "num_ref_idx_l1_default_active_minus1")
     if num_ref_idx_l0 > 31 or num_ref_idx_l1 > 31:
@@ -109,6 +123,8 @@ def parse_pps(nal: bytes) -> PPSInfo:
         entropy_coding_mode=entropy_coding_mode,
         bottom_field_pic_order_in_frame_present=bottom_field_pic_order_in_frame_present,
         num_slice_groups_minus1=num_slice_groups_minus1,
+        slice_group_map_type=slice_group_map_type,
+        run_length_minus1=run_length_minus1,
         num_ref_idx_l0_default_active_minus1=num_ref_idx_l0,
         num_ref_idx_l1_default_active_minus1=num_ref_idx_l1,
         weighted_pred=weighted_pred,

@@ -33,9 +33,6 @@ func ParsePPS(nal []byte) (PPSInfo, error) {
 	if err != nil {
 		return PPSInfo{}, err
 	}
-	if info.NumSliceGroupsMinus1 != 0 {
-		return PPSInfo{}, fmt.Errorf("unsupported PPS slice groups: num_slice_groups_minus1=%d", info.NumSliceGroupsMinus1)
-	}
 	return info, nil
 }
 

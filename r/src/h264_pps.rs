@@ -2,13 +2,15 @@ use std::io::{self, ErrorKind};
 
 use crate::{ebsp_to_rbsp, parse_nal_header, BitReader};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PpsInfo {
     pub picture_parameter_set_id: u32,
     pub sequence_parameter_set_id: u32,
     pub entropy_coding_mode: bool,
     pub bottom_field_pic_order_in_frame_present: bool,
     pub num_slice_groups_minus1: u32,
+    pub slice_group_map_type: u32,
+    pub run_length_minus1: Vec<u32>,
     pub num_ref_idx_l0_default_active_minus1: u32,
     pub num_ref_idx_l1_default_active_minus1: u32,
     pub weighted_pred: bool,
@@ -69,17 +71,23 @@ fn parse_pps_impl(nal: &[u8], decoder_supported_only: bool) -> io::Result<PpsInf
             "PPS slice group count {num_slice_groups_minus1} is out of range"
         )));
     }
-    if decoder_supported_only && num_slice_groups_minus1 != 0 {
-        return Err(invalid(format!(
-            "unsupported PPS slice groups: num_slice_groups_minus1={num_slice_groups_minus1}"
-        )));
-    }
+    let mut slice_group_map_type = 0;
+    let mut run_length_minus1 = Vec::new();
     if num_slice_groups_minus1 != 0 {
         let map_type = read_ue(&mut reader, "slice_group_map_type")?;
+        slice_group_map_type = map_type;
+        if decoder_supported_only && map_type != 0 {
+            return Err(invalid(format!(
+                "unsupported PPS slice_group_map_type {map_type}"
+            )));
+        }
         match map_type {
             0 => {
                 for index in 0..=num_slice_groups_minus1 {
-                    read_ue(&mut reader, &format!("run_length_minus1[{index}]"))?;
+                    run_length_minus1.push(read_ue(
+                        &mut reader,
+                        &format!("run_length_minus1[{index}]"),
+                    )?);
                 }
             }
             1 => {}
@@ -171,6 +179,8 @@ fn parse_pps_impl(nal: &[u8], decoder_supported_only: bool) -> io::Result<PpsInf
         entropy_coding_mode,
         bottom_field_pic_order_in_frame_present,
         num_slice_groups_minus1,
+        slice_group_map_type,
+        run_length_minus1,
         num_ref_idx_l0_default_active_minus1,
         num_ref_idx_l1_default_active_minus1,
         weighted_pred,
