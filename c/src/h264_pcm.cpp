@@ -3448,7 +3448,10 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
         checked_plane_size(chroma_width, chroma_height));
     frame.chroma_v.resize(frame.chroma_u.size());
     const auto picture_macroblock_height =
-        (sps.coded_height / 16) / (sps.frame_mbs_only ? 1 : 2);
+        (sps.coded_height / 16) /
+        (parse_idr_i_slice_header(slice_nals.front(), sps, pps).field_pic_flag
+             ? 2
+             : 1);
     std::vector<std::array<bool, 3>> written(
         (sps.coded_width / 16) * picture_macroblock_height);
     for (const auto& nal : slice_nals) {
@@ -3461,7 +3464,11 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
         BitReader reader(rbsp);
         reader.restore_bit_offset(header.slice_data_bit_offset);
         auto address = static_cast<std::size_t>(header.first_macroblock_in_slice);
+        bool mbaff_field = false;
         while (reader.more_rbsp_data()) {
+            if (sps.mb_adaptive_frame_field && address % 2 == 0) {
+                mbaff_field = reader.read_bit();
+            }
             const auto plane_id = static_cast<std::size_t>(header.colour_plane_id);
             if (address >= written.size()) {
                 break;
@@ -3472,16 +3479,29 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
                     "high-chroma decoder supports only complete, non-overlapping I_PCM macroblocks");
             }
             reader.align_to_byte();
-            const auto mb_x = address % (sps.coded_width / 16);
-            const auto mb_y = address / (sps.coded_width / 16);
+            const auto macroblock_width = sps.coded_width / 16;
+            const auto pair = address / 2;
+            const auto mb_x = sps.mb_adaptive_frame_field
+                ? pair % macroblock_width
+                : address % macroblock_width;
+            const auto pair_y =
+                sps.mb_adaptive_frame_field
+                    ? pair / macroblock_width
+                    : 0;
+            const auto mb_y = sps.mb_adaptive_frame_field
+                ? (mbaff_field ? pair_y : pair_y * 2 + address % 2)
+                : address / macroblock_width;
+            const auto field_stride =
+                mbaff_field ? 2 : (header.field_pic_flag ? 2 : 1);
+            const auto field_offset =
+                mbaff_field ? address % 2
+                    : (header.field_pic_flag && header.bottom_field_flag ? 1U : 0U);
             if (sps.separate_colour_plane) {
                 auto* destination = plane_id == 0 ? &frame.luma
                     : plane_id == 1 ? &frame.chroma_u : &frame.chroma_v;
                 for (std::size_t row = 0; row < 16; ++row) {
                     const auto output_row =
-                        (mb_y * 16 + row) *
-                            (header.field_pic_flag ? 2 : 1) +
-                        (header.field_pic_flag && header.bottom_field_flag ? 1 : 0);
+                        (mb_y * 16 + row) * field_stride + field_offset;
                     for (std::size_t column = 0; column < 16; ++column) {
                         (*destination)[output_row * frame.width +
                                        mb_x * 16 + column] =
@@ -3493,9 +3513,7 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
             } else {
                 for (std::size_t row = 0; row < 16; ++row) {
                     const auto output_row =
-                        (mb_y * 16 + row) *
-                            (header.field_pic_flag ? 2 : 1) +
-                        (header.field_pic_flag && header.bottom_field_flag ? 1 : 0);
+                        (mb_y * 16 + row) * field_stride + field_offset;
                     for (std::size_t column = 0; column < 16; ++column) {
                         frame.luma[output_row * frame.width +
                                    mb_x * 16 + column] =
@@ -3509,8 +3527,7 @@ Yuv420Frame decode_idr_i_pcm_high_sample_frame(
                          row < chroma_macroblock_height; ++row) {
                         const auto output_row =
                             (mb_y * chroma_macroblock_height + row) *
-                                (header.field_pic_flag ? 2 : 1) +
-                            (header.field_pic_flag && header.bottom_field_flag ? 1 : 0);
+                                field_stride + field_offset;
                         for (std::size_t column = 0;
                              column < chroma_macroblock_width; ++column) {
                             (*plane)[output_row *

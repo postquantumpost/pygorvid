@@ -492,7 +492,12 @@ fn decode_i_pcm_full_chroma_picture(
     let mut u = vec![0; chroma_width * chroma_height];
     let mut v = vec![0; u.len()];
     let plane_count = if sps.separate_colour_plane { 3 } else { 1 };
-    let picture_height_in_mbs = (height / 16) / if sps.frame_mbs_only { 1 } else { 2 };
+    let picture_height_in_mbs = (height / 16)
+        / if picture[0].header.field_pic_flag {
+            2
+        } else {
+            1
+        };
     let mut written = vec![[false; 3]; width_in_mbs * picture_height_in_mbs];
     for slice in picture {
         let rbsp = crate::ebsp_to_rbsp(
@@ -511,15 +516,33 @@ fn decode_i_pcm_full_chroma_picture(
         let field_stride = if slice.header.field_pic_flag { 2 } else { 1 };
         let field_offset =
             usize::from(slice.header.field_pic_flag && slice.header.bottom_field_flag);
+        let mut mbaff_field = false;
         while reader.more_rbsp_data() {
+            if sps.mb_adaptive_frame_field && address % 2 == 0 {
+                mbaff_field = reader.read_bit()?;
+            }
             if address >= written.len() || written[address][plane_id] || reader.read_ue()? != 25 {
                 return Err(invalid(
                     "high-chroma decoder requires complete, non-overlapping I_PCM macroblocks",
                 ));
             }
             reader.align_to_byte();
-            let mb_x = address % width_in_mbs;
-            let mb_y = address / width_in_mbs;
+            let (mb_x, mb_y) = if sps.mb_adaptive_frame_field {
+                let pair = address / 2;
+                (
+                    pair % width_in_mbs,
+                    pair / width_in_mbs * if mbaff_field { 1 } else { 2 }
+                        + if mbaff_field { 0 } else { address % 2 },
+                )
+            } else {
+                (address % width_in_mbs, address / width_in_mbs)
+            };
+            let field_stride = if mbaff_field { 2 } else { field_stride };
+            let field_offset = if mbaff_field {
+                address % 2
+            } else {
+                field_offset
+            };
             if sps.separate_colour_plane {
                 let destination = match plane_id {
                     0 => &mut y,

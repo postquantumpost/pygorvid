@@ -58,9 +58,6 @@ fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
             info.bit_depth_luma, info.bit_depth_chroma
         )));
     }
-    if info.mb_adaptive_frame_field {
-        return Err(invalid("adaptive-frame-field SPS is unsupported"));
-    }
     Ok(())
 }
 

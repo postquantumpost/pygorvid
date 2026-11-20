@@ -1720,7 +1720,10 @@ class H264Decoder:
             [False] * (3 if sequence_set.separate_colour_plane else 1)
             for _ in range(
                 width_in_mbs
-                * ((height // 16) // (1 if sequence_set.frame_mbs_only else 2))
+                * (
+                    (height // 16)
+                    // (2 if picture[0].header.field_pic_flag else 1)
+                )
             )
         ]
         from .bitreader import BitReader, BitstreamError
@@ -1737,13 +1740,44 @@ class H264Decoder:
                     and dependency_slice.header.bottom_field_flag
                 )
                 reader._bit_offset = dependency_slice.header.slice_data_bit_offset
+                mbaff_field = False
                 while reader.more_rbsp_data():
+                    if (
+                        sequence_set.mb_adaptive_frame_field
+                        and address % 2 == 0
+                    ):
+                        mbaff_field = reader.read_bit()
                     if address >= len(written) or written[address][plane_id] or reader.read_ue() != 25:
                         raise DecoderError(
                             "high-chroma decoding requires complete, non-overlapping I_PCM macroblocks"
                         )
                     reader.align_to_byte()
-                    mb_x, mb_y = address % width_in_mbs, address // width_in_mbs
+                    if sequence_set.mb_adaptive_frame_field:
+                        pair = address // 2
+                        mb_x, pair_y = (
+                            pair % width_in_mbs,
+                            pair // width_in_mbs,
+                        )
+                        mb_y = (
+                            pair_y
+                            if mbaff_field
+                            else pair_y * 2 + address % 2
+                        )
+                    else:
+                        mb_x, mb_y = address % width_in_mbs, address // width_in_mbs
+                    field_stride = (
+                        2
+                        if mbaff_field or dependency_slice.header.field_pic_flag
+                        else 1
+                    )
+                    field_offset = (
+                        address % 2
+                        if mbaff_field
+                        else int(
+                            dependency_slice.header.field_pic_flag
+                            and dependency_slice.header.bottom_field_flag
+                        )
+                    )
                     if sequence_set.separate_colour_plane:
                         destination = (luma, chroma_u, chroma_v)[plane_id]
                         for row in range(16):

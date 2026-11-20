@@ -152,7 +152,7 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 	}
 	widthMBs := width / 16
 	pictureHeightMBs := height / 16
-	if !sps.FrameMbsOnly {
+	if first.header.FieldPicFlag {
 		pictureHeightMBs /= 2
 	}
 	written := make([][3]bool, widthMBs*pictureHeightMBs)
@@ -168,7 +168,15 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 				fieldOffset = 1
 			}
 		}
+		mbaffField := false
 		for reader.MoreRBSPData() {
+			if sps.MbAdaptiveFrameField && address%2 == 0 {
+				var err error
+				mbaffField, err = reader.ReadBit()
+				if err != nil {
+					return Yuv420Frame{}, err
+				}
+			}
 			mbType, err := reader.ReadUE()
 			if err != nil {
 				return Yuv420Frame{}, err
@@ -178,6 +186,19 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 			}
 			reader.AlignToByte()
 			mbX, mbY := address%widthMBs, address/widthMBs
+			if sps.MbAdaptiveFrameField {
+				pair := address / 2
+				mbX, mbY = pair%widthMBs, pair/widthMBs
+				if !mbaffField {
+					mbY = mbY*2 + address%2
+				}
+			}
+			if mbaffField {
+				fieldStride = 2
+				fieldOffset = address % 2
+			} else {
+				fieldStride, fieldOffset = 1, 0
+			}
 			if sps.SeparateColourPlane {
 				planes := [3][]byte{frame.Y, frame.U, frame.V}
 				for row := 0; row < 16; row++ {

@@ -170,9 +170,6 @@ void validate_supported_sps(const SpsInfo& info) {
                 std::to_string(info.bit_depth_chroma) +
                 ": only equal 8-, 10-, or 12-bit depths are supported");
     }
-    if (info.mb_adaptive_frame_field) {
-        invalid("adaptive-frame-field SPS is unsupported");
-    }
 }
 
 } // namespace

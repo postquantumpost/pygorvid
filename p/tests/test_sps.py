@@ -67,14 +67,20 @@ def test_parse_sps_rejects_unsupported_feature_set():
     unsupported_cases = [
         make_sps(118, 0, 42, "1" + "010" + "1" + "1"),
         make_sps(100, 0, 42, "1" + "010" + "00110" + "00110"),
-        make_sps(
-            100, 0, 42, "1" + "010" + "1" + "1",
-            frame_mbs_only=False, mb_adaptive_frame_field=True,
-        ),
     ]
     for nal in unsupported_cases:
         with pytest.raises(SPSParseError, match="unsupported|not supported"):
             parse_sps(nal)
+
+
+def test_parse_sps_accepts_mbaff():
+    info = parse_sps(
+        make_sps(
+            100, 0, 42, "1" + "010" + "1" + "1",
+            frame_mbs_only=False, mb_adaptive_frame_field=True,
+        )
+    )
+    assert not info.frame_mbs_only and info.mb_adaptive_frame_field
 
 
 def test_parse_sps_accepts_separate_colour_planes_for_444():

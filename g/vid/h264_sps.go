@@ -279,9 +279,6 @@ func validateSupportedSPS(info SPSInfo) error {
 		info.BitDepthChroma != info.BitDepthLuma {
 		return fmt.Errorf("unsupported SPS bit depth %d/%d: only equal 8-, 10-, or 12-bit depths are supported", info.BitDepthLuma, info.BitDepthChroma)
 	}
-	if info.MbAdaptiveFrameField {
-		return fmt.Errorf("adaptive-frame-field SPS is unsupported")
-	}
 	return nil
 }
 
