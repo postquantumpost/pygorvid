@@ -76,9 +76,13 @@ def _validate_supported_sps(info: SPSInfo) -> None:
         )
     if info.separate_colour_plane and info.chroma_format_idc != 3:
         raise SPSParseError("separate_colour_plane_flag requires 4:4:4 chroma")
-    if info.bit_depth_luma != 8 or info.bit_depth_chroma != 8:
+    if (
+        info.bit_depth_luma not in (8, 10)
+        or info.bit_depth_chroma not in (8, 10)
+        or info.bit_depth_luma != info.bit_depth_chroma
+    ):
         raise SPSParseError(
-            f"unsupported SPS bit depth {info.bit_depth_luma}/{info.bit_depth_chroma}: only 8-bit 4:2:0 is supported"
+            f"unsupported SPS bit depth {info.bit_depth_luma}/{info.bit_depth_chroma}: only equal 8- or 10-bit depths are supported"
         )
     if not info.frame_mbs_only or info.mb_adaptive_frame_field:
         raise SPSParseError(

@@ -1508,7 +1508,10 @@ class H264Decoder:
                 self._maximum_long_term_frame_idx = 0 if header.long_term_reference else None
             try:
                 picture_order_count = self._picture_order_count(header, sequence_set)
-                if sequence_set.chroma_format_idc >= 2:
+                if (
+                    sequence_set.chroma_format_idc >= 2
+                    or sequence_set.bit_depth_luma > 8
+                ):
                     frame = self._decode_i_pcm_full_chroma_picture(picture, sequence_set)
                     self._report_frame_progress(display_index, sample_index, 100)
                     self._cache_decoded_frame(display_index, frame)
@@ -1707,7 +1710,9 @@ class H264Decoder:
         luma = bytearray(width * height)
         chroma_width = width if sequence_set.chroma_format_idc == 3 else width // 2
         chroma_mb_width = 16 if sequence_set.chroma_format_idc == 3 else 8
-        chroma_u = bytearray(chroma_width * height)
+        chroma_height = height if sequence_set.chroma_format_idc >= 2 else height // 2
+        chroma_mb_height = 8 if sequence_set.chroma_format_idc == 1 else 16
+        chroma_u = bytearray(chroma_width * chroma_height)
         chroma_v = bytearray(len(chroma_u))
         width_in_mbs = width // 16
         written = [
@@ -1735,19 +1740,24 @@ class H264Decoder:
                         for row in range(16):
                             for column in range(16):
                                 destination[(mb_y * 16 + row) * width +
-                                            mb_x * 16 + column] = reader.read_bits(8)
+                                            mb_x * 16 + column] = (
+                                    reader.read_bits(sequence_set.bit_depth_luma)
+                                    >> (sequence_set.bit_depth_luma - 8)
+                                )
                     else:
                         for row in range(16):
                             for column in range(16):
                                 luma[(mb_y * 16 + row) * width + mb_x * 16 + column] = (
-                                    reader.read_bits(8)
+                                    reader.read_bits(sequence_set.bit_depth_luma)
+                                    >> (sequence_set.bit_depth_luma - 8)
                                 )
                         for plane in (chroma_u, chroma_v):
-                            for row in range(16):
+                            for row in range(chroma_mb_height):
                                 for column in range(chroma_mb_width):
-                                    plane[(mb_y * 16 + row) * chroma_width +
+                                    plane[(mb_y * chroma_mb_height + row) * chroma_width +
                                           mb_x * chroma_mb_width + column] = (
-                                        reader.read_bits(8)
+                                        reader.read_bits(sequence_set.bit_depth_chroma)
+                                        >> (sequence_set.bit_depth_chroma - 8)
                                     )
                     written[address][plane_id] = True
                     address += 1
@@ -1758,6 +1768,10 @@ class H264Decoder:
         left, top = sequence_set.frame_crop_left, sequence_set.frame_crop_top
         out_width, out_height = sequence_set.width, sequence_set.height
         crop_left = out_width if sequence_set.chroma_format_idc == 3 else out_width // 2
+        output_chroma_height = (
+            out_height if sequence_set.chroma_format_idc >= 2 else out_height // 2
+        )
+        chroma_top = top if sequence_set.chroma_format_idc >= 2 else top // 2
         output_y = b"".join(
             luma[(top + row) * width + left:(top + row) * width + left + out_width]
             for row in range(out_height)
@@ -1769,7 +1783,7 @@ class H264Decoder:
                       row * chroma_width + (
                           left if sequence_set.chroma_format_idc == 3 else left // 2
                       ) + crop_left]
-            for row in range(top, top + out_height)
+            for row in range(chroma_top, chroma_top + output_chroma_height)
         )
         output_v = b"".join(
             chroma_v[row * chroma_width + (
@@ -1778,7 +1792,7 @@ class H264Decoder:
                       row * chroma_width + (
                           left if sequence_set.chroma_format_idc == 3 else left // 2
                       ) + crop_left]
-            for row in range(top, top + out_height)
+            for row in range(chroma_top, chroma_top + output_chroma_height)
         )
         return Yuv420Frame(
             out_width, out_height, out_width, crop_left, crop_left,

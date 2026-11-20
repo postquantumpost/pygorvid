@@ -482,8 +482,14 @@ fn decode_i_pcm_full_chroma_picture(
         width / 2
     };
     let chroma_mb_width = if sps.chroma_format_idc == 3 { 16 } else { 8 };
+    let chroma_height = if sps.chroma_format_idc == 1 {
+        height / 2
+    } else {
+        height
+    };
+    let chroma_mb_height = if sps.chroma_format_idc == 1 { 8 } else { 16 };
     let mut y = vec![0; width * height];
-    let mut u = vec![0; chroma_width * height];
+    let mut u = vec![0; chroma_width * chroma_height];
     let mut v = vec![0; u.len()];
     let plane_count = if sps.separate_colour_plane { 3 } else { 1 };
     let mut written = vec![[false; 3]; width_in_mbs * (height / 16)];
@@ -519,22 +525,26 @@ fn decode_i_pcm_full_chroma_picture(
                 for row in 0..16 {
                     for column in 0..16 {
                         destination[(mb_y * 16 + row) * width + mb_x * 16 + column] =
-                            reader.read_bits(8)? as u8;
+                            (reader.read_bits(sps.bit_depth_luma)? >> (sps.bit_depth_luma - 8))
+                                as u8;
                     }
                 }
             } else {
                 for row in 0..16 {
                     for column in 0..16 {
                         y[(mb_y * 16 + row) * width + mb_x * 16 + column] =
-                            reader.read_bits(8)? as u8;
+                            (reader.read_bits(sps.bit_depth_luma)? >> (sps.bit_depth_luma - 8))
+                                as u8;
                     }
                 }
                 for plane in [&mut u, &mut v] {
-                    for row in 0..16 {
+                    for row in 0..chroma_mb_height {
                         for column in 0..chroma_mb_width {
-                            plane[(mb_y * 16 + row) * chroma_width
+                            plane[(mb_y * chroma_mb_height + row) * chroma_width
                                 + mb_x * chroma_mb_width
-                                + column] = reader.read_bits(8)? as u8;
+                                + column] = (reader.read_bits(sps.bit_depth_chroma)?
+                                >> (sps.bit_depth_chroma - 8))
+                                as u8;
                         }
                     }
                 }
@@ -554,9 +564,19 @@ fn decode_i_pcm_full_chroma_picture(
     let left = sps.frame_crop_left as usize;
     let top = sps.frame_crop_top as usize;
     let crop_chroma = |plane: &[u8]| {
-        (0..out_height)
+        let output_height = if sps.chroma_format_idc == 1 {
+            out_height / 2
+        } else {
+            out_height
+        };
+        let chroma_top = if sps.chroma_format_idc == 1 {
+            top / 2
+        } else {
+            top
+        };
+        (0..output_height)
             .flat_map(|row| {
-                let start = (top + row) * chroma_width
+                let start = (chroma_top + row) * chroma_width
                     + if sps.chroma_format_idc == 3 {
                         left
                     } else {
@@ -2431,7 +2451,7 @@ impl H264Decoder {
             let picture_order_count = self
                 .picture_order_count(&header, &sps)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-            if sps.chroma_format_idc >= 2 {
+            if sps.chroma_format_idc >= 2 || sps.bit_depth_luma > 8 {
                 let frame = decode_i_pcm_full_chroma_picture(&picture, &sps)
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
                 self.cache_decoded_frame(display_index, frame.clone());

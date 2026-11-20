@@ -3422,12 +3422,12 @@ std::uint8_t sample_chroma_fractional(
 
 } // namespace
 
-Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
+Yuv420Frame decode_idr_i_pcm_high_sample_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
-    if (slice_nals.empty() || sps.chroma_format_idc < 2 ||
-        !sps.frame_mbs_only || sps.bit_depth_luma != 8 ||
-        sps.bit_depth_chroma != 8) {
+    if (slice_nals.empty() || !sps.frame_mbs_only ||
+        (sps.bit_depth_luma != 8 && sps.bit_depth_luma != 10) ||
+        sps.bit_depth_chroma != sps.bit_depth_luma) {
         throw std::runtime_error(
             "high-chroma decoding currently supports progressive 8-bit I_PCM slices");
     }
@@ -3437,10 +3437,14 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
     frame.luma.resize(checked_plane_size(frame.width, frame.height));
     const auto chroma_width =
         sps.chroma_format_idc == 3 ? frame.width : frame.width / 2;
+    const auto chroma_height =
+        sps.chroma_format_idc == 1 ? frame.height / 2 : frame.height;
     const auto chroma_macroblock_width =
         sps.chroma_format_idc == 3 ? 16U : 8U;
+    const auto chroma_macroblock_height =
+        sps.chroma_format_idc == 1 ? 8U : 16U;
     frame.chroma_u.resize(
-        checked_plane_size(chroma_width, frame.height));
+        checked_plane_size(chroma_width, chroma_height));
     frame.chroma_v.resize(frame.chroma_u.size());
     std::vector<std::array<bool, 3>> written(
         (sps.coded_width / 16) * (sps.coded_height / 16));
@@ -3470,7 +3474,9 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
                     for (std::size_t column = 0; column < 16; ++column) {
                         (*destination)[(mb_y * 16 + row) * frame.width +
                                        mb_x * 16 + column] =
-                            static_cast<std::uint8_t>(reader.read_bits(8));
+                            static_cast<std::uint8_t>(
+                                reader.read_bits(sps.bit_depth_luma) >>
+                                (sps.bit_depth_luma - 8));
                     }
                 }
             } else {
@@ -3478,16 +3484,22 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
                     for (std::size_t column = 0; column < 16; ++column) {
                         frame.luma[(mb_y * 16 + row) * frame.width +
                                    mb_x * 16 + column] =
-                            static_cast<std::uint8_t>(reader.read_bits(8));
+                            static_cast<std::uint8_t>(
+                                reader.read_bits(sps.bit_depth_luma) >>
+                                (sps.bit_depth_luma - 8));
                     }
                 }
                 for (auto* plane : {&frame.chroma_u, &frame.chroma_v}) {
-                    for (std::size_t row = 0; row < 16; ++row) {
+                    for (std::size_t row = 0;
+                         row < chroma_macroblock_height; ++row) {
                         for (std::size_t column = 0;
                              column < chroma_macroblock_width; ++column) {
-                            (*plane)[(mb_y * 16 + row) * chroma_width +
+                            (*plane)[(mb_y * chroma_macroblock_height + row) *
+                                         chroma_width +
                                      mb_x * chroma_macroblock_width + column] =
-                                static_cast<std::uint8_t>(reader.read_bits(8));
+                                static_cast<std::uint8_t>(
+                                    reader.read_bits(sps.bit_depth_chroma) >>
+                                    (sps.bit_depth_chroma - 8));
                         }
                     }
                 }
@@ -3512,8 +3524,8 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
 Yuv420Frame decode_idr_i_pcm_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
-    if (sps.chroma_format_idc >= 2) {
-        return decode_idr_i_pcm_full_chroma_frame(slice_nals, sps, pps);
+    if (sps.chroma_format_idc >= 2 || sps.bit_depth_luma > 8) {
+        return decode_idr_i_pcm_high_sample_frame(slice_nals, sps, pps);
     }
     return decode_idr_i_frame_impl(slice_nals, sps, pps, true);
 }
@@ -3521,8 +3533,8 @@ Yuv420Frame decode_idr_i_pcm_frame(
 Yuv420Frame decode_idr_i_frame(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps) {
-    if (sps.chroma_format_idc >= 2) {
-        return decode_idr_i_pcm_full_chroma_frame(slice_nals, sps, pps);
+    if (sps.chroma_format_idc >= 2 || sps.bit_depth_luma > 8) {
+        return decode_idr_i_pcm_high_sample_frame(slice_nals, sps, pps);
     }
     return decode_idr_i_frame_impl(slice_nals, sps, pps, false);
 }
