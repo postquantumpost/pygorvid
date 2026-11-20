@@ -64,6 +64,8 @@ class SliceHeader:
     memory_management_operations: tuple[MemoryManagementOperation, ...]
     cabac_init_idc: int | None
     slice_qp_delta: int
+    slice_qs_delta: int
+    sp_for_switch_flag: bool
     disable_deblocking_filter_idc: int | None
     slice_alpha_c0_offset_div2: int
     slice_beta_offset_div2: int
@@ -206,6 +208,8 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
         "memory_management_operations": (),
         "cabac_init_idc": None,
         "slice_qp_delta": 0,
+        "slice_qs_delta": 0,
+        "sp_for_switch_flag": False,
         "disable_deblocking_filter_idc": None,
         "slice_alpha_c0_offset_div2": 0,
         "slice_beta_offset_div2": 0,
@@ -241,7 +245,7 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
         result["has_redundant_pic_cnt"] = True
 
     normalized_slice_type = slice_type % 5
-    if normalized_slice_type in (0, 1):
+    if normalized_slice_type in (0, 1, 3):
         if normalized_slice_type == 1:
             try:
                 result["direct_spatial_mv_pred"] = reader.read_bit()
@@ -264,10 +268,10 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
             result["num_ref_idx_l0_active_minus1"] = pps.num_ref_idx_l0_default_active_minus1
             if normalized_slice_type == 1:
                 result["num_ref_idx_l1_active_minus1"] = pps.num_ref_idx_l1_default_active_minus1
-    elif normalized_slice_type not in (2,):
+    elif normalized_slice_type not in (2, 4):
         raise SliceHeaderError(f"unsupported slice_type {slice_type}")
 
-    if normalized_slice_type in (0, 1):
+    if normalized_slice_type in (0, 1, 3):
         result["ref_pic_list_reordering_l0"] = _read_ref_pic_list_reordering(reader, "l0")
         if normalized_slice_type == 1:
             result["ref_pic_list_reordering_l1"] = _read_ref_pic_list_reordering(reader, "l1")
@@ -299,7 +303,7 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
             if result["adaptive_ref_pic_marking"]:
                 result["memory_management_operations"] = _read_memory_management_operations(reader)
 
-    if pps.entropy_coding_mode and normalized_slice_type != 2:
+    if pps.entropy_coding_mode and normalized_slice_type not in (2, 4):
         cabac_init_idc = _read_ue(reader, "cabac_init_idc")
         if cabac_init_idc > 2:
             raise SliceHeaderError(f"cabac_init_idc {cabac_init_idc} exceeds 2")
@@ -310,6 +314,17 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
     qp_bd_offset_y = 6 * (sps.bit_depth_luma - 8)
     if not -qp_bd_offset_y <= slice_qpy <= 51:
         raise SliceHeaderError(f"slice QP {slice_qpy} is out of range")
+
+    if normalized_slice_type in (3, 4):
+        if normalized_slice_type == 3:
+            try:
+                result["sp_for_switch_flag"] = reader.read_bit()
+            except BitstreamError as error:
+                raise SliceHeaderError(f"slice sp_for_switch_flag: {error}") from error
+        result["slice_qs_delta"] = _read_se(reader, "slice_qs_delta")
+        slice_qsy = 26 + pps.pic_init_qs_minus26 + result["slice_qs_delta"]
+        if not 0 <= slice_qsy <= 51:
+            raise SliceHeaderError(f"slice QS {slice_qsy} is out of range")
 
     if pps.deblocking_filter_control_present:
         disable_idc = _read_ue(reader, "disable_deblocking_filter_idc")

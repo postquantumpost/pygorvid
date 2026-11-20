@@ -27,6 +27,8 @@ func makeSliceNAL(header byte, firstMB, sliceType, ppsID uint32, suffix string) 
 		typePrefix = "0" // reference-count override flag
 	case 1:
 		typePrefix = "00" // direct prediction and reference-count override flags
+	case 3:
+		typePrefix = "0" // reference-count override flag
 	}
 	return makeSliceNALWithTypePrefix(header, firstMB, sliceType, ppsID, suffix, typePrefix)
 }
@@ -34,7 +36,7 @@ func makeSliceNAL(header byte, firstMB, sliceType, ppsID uint32, suffix string) 
 func makeSliceNALWithTypePrefix(header byte, firstMB, sliceType, ppsID uint32, suffix, typePrefix string) []byte {
 	bits := ueBits(firstMB) + ueBits(sliceType) + ueBits(ppsID) + suffix + typePrefix
 	normalizedType := sliceType % 5
-	if normalizedType == 0 || normalizedType == 1 {
+	if normalizedType == 0 || normalizedType == 1 || normalizedType == 3 {
 		bits += "0" // ref_pic_list_reordering_flag_l0
 		if normalizedType == 1 {
 			bits += "0" // ref_pic_list_reordering_flag_l1
@@ -45,10 +47,16 @@ func makeSliceNALWithTypePrefix(header byte, firstMB, sliceType, ppsID uint32, s
 	} else if header&0x60 != 0 {
 		bits += "0" // adaptive_ref_pic_marking_mode_flag
 	}
-	if normalizedType != 2 {
+	if normalizedType != 2 && normalizedType != 4 {
 		bits += ueBits(0) // cabac_init_idc
 	}
-	bits += seBits(0) + ueBits(0) + seBits(0) + seBits(0) // QP and deblocking syntax
+	bits += seBits(0) // slice_qp_delta
+	if normalizedType == 3 {
+		bits += "0" + seBits(0)
+	} else if normalizedType == 4 {
+		bits += seBits(0)
+	}
+	bits += ueBits(0) + seBits(0) + seBits(0) // deblocking syntax
 	for len(bits)%8 != 0 {
 		bits += "1"
 	}
@@ -209,7 +217,6 @@ func TestParseSliceHeaderRejectsUnsupportedSliceClassAndOverrides(t *testing.T) 
 		suffix string
 		kind   string
 	}{
-		{name: "SP-slice", typeID: 3, suffix: prefix, kind: "unsupported slice_type"},
 		{name: "L0-override-out-of-range", typeID: 0, suffix: prefix, kind: "l0_active_minus1 exceeds 31"},
 		{name: "B-L1-override-out-of-range", typeID: 1, suffix: prefix, kind: "l1_active_minus1 exceeds 31"},
 	} {
@@ -217,13 +224,25 @@ func TestParseSliceHeaderRejectsUnsupportedSliceClassAndOverrides(t *testing.T) 
 		if test.typeID == 1 {
 			typePrefix = "1" + "1" + ueBits(0) + ueBits(32)
 		}
-		if test.typeID == 3 {
-			typePrefix = ""
-		}
+
 		_, err := ParseSliceHeader(makeSliceNALWithTypePrefix(0x41, 0, test.typeID, 0, test.suffix, typePrefix), sps, pps)
 		if err == nil || !strings.Contains(err.Error(), test.kind) {
 			t.Errorf("%s error = %v; want %q", test.name, err, test.kind)
 		}
+	}
+}
+
+func TestParseSliceHeaderAcceptsSwitchingSlices(t *testing.T) {
+	sps := parseTestSPS(t, makeCompleteSPS(100, 0, 42, "1"+"010"+"1"+"1", 0, 0, true, [4]uint32{}))
+	pps := makeSlicePPS(false)
+	identity := fixedSliceBits(0, 4) + fixedSliceBits(0, 4)
+	sp, err := ParseSliceHeader(makeSliceNAL(0x41, 0, 3, 0, identity), sps, pps)
+	if err != nil || sp.SliceType != 3 || sp.SPForSwitchFlag || sp.SliceQSDelta != 0 {
+		t.Fatalf("SP slice = %+v, %v", sp, err)
+	}
+	si, err := ParseSliceHeader(makeSliceNAL(0x41, 0, 4, 0, identity), sps, pps)
+	if err != nil || si.SliceType != 4 || si.SliceQSDelta != 0 {
+		t.Fatalf("SI slice = %+v, %v", si, err)
 	}
 }
 

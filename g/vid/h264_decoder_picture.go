@@ -190,7 +190,7 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 			break
 		}
 	}
-	if decoder.nativeSyncSample != int64(samples[0].Index) || decoder.nativeLastSample < 0 ||
+	if decoder.nativeLastSample < 0 ||
 		(targetSampleIndex >= 0 && decoder.nativeLastSample >= int64(targetSampleIndex)) {
 		decoder.referencePictureBuffer = &ReferencePictureBuffer{}
 		decoder.nativeReferenceBlocks = make(map[uint32][]nativeMacroblock)
@@ -227,7 +227,7 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 			return Yuv420Frame{}, err
 		}
 		var coded Yuv420Frame
-		if first.header.SliceType%5 == 2 {
+		if first.header.SliceType%5 == 2 || first.header.SliceType%5 == 4 {
 			coded, err = decoder.decodeNativeCodedIntraSample(sample)
 		} else {
 			coded, err = decoder.decodeNativeInterSample(sample, poc)

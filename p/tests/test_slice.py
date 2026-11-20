@@ -85,17 +85,26 @@ def make_slice(
     if redundant_pic_count is not None:
         bits += ue_bits(redundant_pic_count)
     if type_prefix is None:
-        type_prefix = "0" if normalized_type == 0 else "00" if normalized_type == 1 else ""
+        type_prefix = (
+            "00" if normalized_type == 1
+            else "0" if normalized_type in (0, 3)
+            else ""
+        )
     bits += type_prefix
-    if normalized_type in (0, 1):
+    if normalized_type in (0, 1, 3):
         bits += "0" + ("0" if normalized_type == 1 else "")
     if header & 0x1F == 5:
         bits += "00"
     elif header & 0x60:
         bits += "0"
-    if normalized_type != 2:
+    if normalized_type not in (2, 4):
         bits += ue_bits(0)
-    bits += se_bits(0) + ue_bits(0) + se_bits(0) + se_bits(0)
+    bits += se_bits(0)
+    if normalized_type == 3:
+        bits += "0" + se_bits(0)
+    elif normalized_type == 4:
+        bits += se_bits(0)
+    bits += ue_bits(0) + se_bits(0) + se_bits(0)
     while len(bits) % 8:
         bits += "1"
     return bytes((header,)) + pack_bits(bits)
@@ -220,8 +229,10 @@ def test_slice_header_rejects_mismatched_or_invalid_prefix():
     with pytest.raises(SliceHeaderError):
         truncated = b"\x41" + pack_bits(ue_bits(0) + ue_bits(0) + ue_bits(0) + "00")
         parse_with(truncated)
-    with pytest.raises(SliceHeaderError, match="unsupported slice_type"):
-        parse_with(make_slice(0x41, 0, 3, 0, fixed_bits(0, 4) + fixed_bits(0, 4)))
+    sp = parse_with(make_slice(0x41, 0, 3, 0, fixed_bits(0, 4) + fixed_bits(0, 4)))
+    assert sp.slice_type == 3 and not sp.sp_for_switch_flag and sp.slice_qs_delta == 0
+    si = parse_with(make_slice(0x41, 0, 4, 0, fixed_bits(0, 4) + fixed_bits(0, 4)))
+    assert si.slice_type == 4 and si.slice_qs_delta == 0
     identity_bits = fixed_bits(0, 4) + fixed_bits(0, 4)
     with pytest.raises(SliceHeaderError, match="l0_active_minus1 exceeds 31"):
         parse_with(make_slice(0x41, 0, 0, 0, identity_bits, type_prefix="1" + ue_bits(32)))

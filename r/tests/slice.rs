@@ -168,7 +168,7 @@ fn make_pps_with_ids(
 fn make_slice(header: u8, first_mb: u32, slice_type: u32, pps_id: u32, suffix: &str) -> Vec<u8> {
     let normalized_type = slice_type % 5;
     let type_prefix = match normalized_type {
-        0 => "0",
+        0 | 3 => "0",
         1 => "00",
         _ => "",
     };
@@ -198,7 +198,7 @@ fn make_slice_with_prefix(
         bits += &ue_bits(redundant_pic_cnt);
     }
     bits += type_prefix;
-    if normalized_type == 0 || normalized_type == 1 {
+    if matches!(normalized_type, 0 | 1 | 3) {
         bits += "0";
         if normalized_type == 1 {
             bits += "0";
@@ -209,10 +209,16 @@ fn make_slice_with_prefix(
     } else if header & 0x60 != 0 {
         bits += "0";
     }
-    if normalized_type != 2 {
+    if !matches!(normalized_type, 2 | 4) {
         bits += &ue_bits(0); // cabac_init_idc
     }
     bits += &se_bits(0); // slice_qp_delta
+    if normalized_type == 3 {
+        bits.push('0');
+        bits += &se_bits(0);
+    } else if normalized_type == 4 {
+        bits += &se_bits(0);
+    }
     bits += &ue_bits(0); // disable_deblocking_filter_idc
     bits += &se_bits(0);
     bits += &se_bits(0);
@@ -740,11 +746,13 @@ fn rejects_unhandled_slice_classes_and_override_bounds() {
     let sps = make_sps(0, false, true);
     let pps = make_pps(false);
     let prefix = fixed_bits(0, 4) + &fixed_bits(0, 4);
-    let sp_slice = make_slice(0x41, 0, 3, 0, &prefix);
-    assert!(parse_slice_header(&sp_slice, &sps, &pps)
-        .unwrap_err()
-        .to_string()
-        .contains("unsupported slice_type"));
+    let sp_slice = parse_slice_header(&make_slice(0x41, 0, 3, 0, &prefix), &sps, &pps).unwrap();
+    assert_eq!(sp_slice.slice_type, 3);
+    assert!(!sp_slice.sp_for_switch_flag);
+    assert_eq!(sp_slice.slice_qs_delta, 0);
+    let si_slice = parse_slice_header(&make_slice(0x41, 0, 4, 0, &prefix), &sps, &pps).unwrap();
+    assert_eq!(si_slice.slice_type, 4);
+    assert_eq!(si_slice.slice_qs_delta, 0);
     let l0_slice =
         make_slice_with_prefix(0x41, 0, 0, 0, &prefix, &format!("1{}", ue_bits(32)), None);
     assert!(parse_slice_header(&l0_slice, &sps, &pps)

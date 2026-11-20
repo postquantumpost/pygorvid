@@ -45,8 +45,17 @@ class CAVLCSyntax:
         return not self.skip_remaining and not reader.more_rbsp_data()
 
     def mb_type(self, reader, slice_type):
-        base = {2: 0, 0: 5, 1: 23}[slice_type % 5]
+        normalized_type = slice_type % 5
         value = reader.read_ue()
+        if normalized_type == 4:
+            if value == 0:
+                raise CAVLCError("SI macroblock type is unsupported")
+            value -= 1
+            base = 0
+        else:
+            base = {2: 0, 0: 5, 1: 23, 3: 5}.get(normalized_type)
+            if base is None:
+                raise CAVLCError("unsupported CAVLC slice type")
         if value > base + 25:
             raise CAVLCError("CAVLC mb_type exceeds slice range")
         self.intra = value >= base

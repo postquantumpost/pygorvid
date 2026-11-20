@@ -104,7 +104,7 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
-	if first.header.SliceType%5 != 2 {
+	if first.header.SliceType%5 != 2 && first.header.SliceType%5 != 4 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 	}
 	builder, err := NewYuv420FrameBuilder(int(first.sps.CodedWidth/16), int(first.sps.CodedHeight/16), 0, 0, 0, 0)

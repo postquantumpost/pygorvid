@@ -63,15 +63,23 @@ func (syntax *cavlcSyntax) mbType(reader *BitReader, sliceType uint8) (uint8, er
 	if err != nil {
 		return 0, err
 	}
+	normalizedType := sliceType % 5
 	base := uint32(0)
-	switch sliceType % 5 {
-	case 0:
-		base = 5
-	case 1:
-		base = 23
-	case 2:
-	default:
-		return 0, errors.New("unsupported CAVLC slice type")
+	if normalizedType == 4 {
+		if value == 0 {
+			return 0, errors.New("SI macroblock type is unsupported")
+		}
+		value--
+	} else {
+		switch normalizedType {
+		case 0, 3:
+			base = 5
+		case 1:
+			base = 23
+		case 2:
+		default:
+			return 0, errors.New("unsupported CAVLC slice type")
+		}
 	}
 	if value > base+25 {
 		return 0, errors.New("CAVLC mb_type exceeds slice range")

@@ -17,4 +17,8 @@ set -x
 #./pygorvid --slideshow --input samples/drone64.mp4
 #./pygorvid --slideshow --input samples/drone1_320x240.mp4
 #./pygorvid --slideshow --input samples/drone2_320x240.mp4
-./pygorvid --slideshow --input jr_grey.mp4
+#./pygorvid --slideshow --input jr_grey.mp4
+for f in *.mp4
+do
+./pygorvid --slideshow --input $f
+done

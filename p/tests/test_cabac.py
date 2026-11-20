@@ -848,7 +848,7 @@ def test_mb_skip_flag_rejects_intra_slice_types():
     decoder._code_offset = 0
     decoder._terminated = False
     contexts = [CABACContextModel(0, 63, 26) for _ in range(3)]
-    for slice_type in (2, 3, 4, 7, 8, 9, 10):
+    for slice_type in (2, 4, 7, 9, 10):
         with pytest.raises(CABACError, match="unsupported for this slice type"):
             decoder.decode_mb_skip_flag(slice_type, contexts, False, False, False, False)
 

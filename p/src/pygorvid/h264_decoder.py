@@ -767,7 +767,7 @@ class H264Decoder:
             raise DecoderError("H.264 decoder requires a sample reader")
         if not isinstance(dependency_slice, DependencySlice):
             raise DecoderError("dependency slice is invalid")
-        if dependency_slice.header.slice_type % 5 not in (0, 1, 2):
+        if dependency_slice.header.slice_type % 5 not in (0, 1, 2, 3, 4):
             raise DecoderError("history input builder requires an I-, P-, or B-slice")
         configuration = getattr(self.sample_reader, "configuration", None)
         if configuration is None:
@@ -1046,11 +1046,11 @@ class H264Decoder:
         if not isinstance(dependency_slice, DependencySlice):
             raise DecoderError("dependency slice is invalid")
         slice_type = dependency_slice.header.slice_type % 5
-        if slice_type == 2:
+        if slice_type in (2, 4):
             return self.intra_macroblock_input_from_history(
                 dependency_slice, macroblock_address, history
             )
-        if slice_type in (0, 1):
+        if slice_type in (0, 1, 3):
             return self.inter_macroblock_input_from_history(
                 dependency_slice, macroblock_address, history
             )
@@ -1084,7 +1084,7 @@ class H264Decoder:
         )
 
         header = dependency_slice.header
-        if header.slice_type % 5 not in (0, 1):
+        if header.slice_type % 5 not in (0, 1, 3):
             raise DecoderError("inter history input builder requires a P- or B-slice")
         configuration = getattr(self.sample_reader, "configuration", None)
         if configuration is None:
@@ -1341,7 +1341,7 @@ class H264Decoder:
         header = dependency_slice.header
         references = self.reference_picture_buffer.references()
         max_frame_num = 1 << (sequence_set.log2_max_frame_num_minus4 + 4)
-        if header.slice_type % 5 == 0:
+        if header.slice_type % 5 in (0, 3):
             list0 = build_p_reference_list(references, header.frame_num, max_frame_num)
             list1 = []
         else:
@@ -1439,8 +1439,7 @@ class H264Decoder:
 
         gop_sync_sample_index = picture_groups[0][0].sample_index
         if (
-            self._gop_sync_sample_index != gop_sync_sample_index
-            or self._last_decoded_sample_index is None
+            self._last_decoded_sample_index is None
             or target_sample_index <= self._last_decoded_sample_index
         ):
             self.reference_picture_buffer.clear()
@@ -1528,7 +1527,7 @@ class H264Decoder:
                         picture_set,
                         sequence_set,
                         picture_order_count,
-                    ) if header.slice_type % 5 in (0, 1) else ([], [])
+                    ) if header.slice_type % 5 in (0, 1, 3) else ([], [])
                     slice_results = self.decode_dependency_slice_data(
                         dependency_slice,
                         builder,

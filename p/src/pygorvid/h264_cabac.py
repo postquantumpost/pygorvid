@@ -708,7 +708,7 @@ def derive_cabac_inter_macroblock_neighbor_state_from_history(
         macroblock_address < 0
         or picture_width_in_mbs <= 0
         or not 0 <= slice_type <= 9
-        or slice_type % 5 not in (0, 1)
+        or slice_type % 5 not in (0, 1, 3)
         or min(partition_x, partition_y) < 0
         or min(partition_width, partition_height) <= 0
         or partition_x + partition_width > 16
@@ -1612,7 +1612,7 @@ class CABACArithmeticDecoder:
     ) -> bool:
         if getattr(self, "_cavlc", None) is not None:
             return self._cavlc.skipped(self._bits)
-        if slice_type > 9 or slice_type % 5 not in (0, 1):
+        if slice_type > 9 or slice_type % 5 not in (0, 1, 3):
             raise CABACError("CABAC mb_skip_flag is unsupported for this slice type")
         if not isinstance(contexts, list) or len(contexts) != 3:
             raise CABACError("mb_skip_flag requires three P- or B-slice context models")
@@ -1628,7 +1628,10 @@ class CABACArithmeticDecoder:
     ) -> CABACPSkipMacroblockResult:
         """Decode one P_Skip flag and, when true, motion-compensate RefPicList0[0]."""
         _validate_slice_contexts(contexts)
-        if not isinstance(input, CABACPSkipMacroblockInput) or input.slice_type % 5 != 0:
+        if (
+            not isinstance(input, CABACPSkipMacroblockInput)
+            or input.slice_type % 5 not in (0, 3)
+        ):
             raise CABACError("P_Skip requires a P-slice macroblock input")
         if builder is None:
             raise CABACError("P_Skip frame builder is required")
@@ -2017,7 +2020,7 @@ class CABACArithmeticDecoder:
     ) -> int:
         if getattr(self, "_cavlc", None) is not None:
             return self._cavlc.mb_type(self._bits, slice_type)
-        if slice_type > 9 or slice_type % 5 != 2:
+        if slice_type > 9 or slice_type % 5 not in (2, 4):
             raise CABACError("I-slice mb_type is unsupported for this slice type")
         if not isinstance(contexts, list) or len(contexts) != 8 or any(
             not isinstance(model, CABACContextModel) or not 0 <= model._state_index < 64
@@ -2043,6 +2046,8 @@ class CABACArithmeticDecoder:
         first_context = int(left_available and left_intra16_or_pcm)
         first_context += int(top_available and top_intra16_or_pcm)
         if not trial.decode_bin(trial_contexts[first_context]):
+            if slice_type % 5 == 4:
+                raise CABACError("SI macroblock type is unsupported")
             mb_type = 0
         elif trial.decode_terminate_bin():
             mb_type = 25
@@ -2862,11 +2867,11 @@ class CABACArithmeticDecoder:
         B neighbor flags report available B_Skip/B_Direct_16x16 neighbors
         (clause 9.3.3.1.1.3); P slices ignore neighbors.
         """
-        if not isinstance(slice_type, int) or not 0 <= slice_type <= 9 or slice_type % 5 not in (0, 1):
+        if not isinstance(slice_type, int) or not 0 <= slice_type <= 9 or slice_type % 5 not in (0, 1, 3):
             raise CABACError("CABAC inter mb_type is unsupported for this slice type")
         _validate_slice_contexts(contexts)
         trial, trial_contexts = self._slice_trial(contexts)
-        if slice_type % 5 == 0:
+        if slice_type % 5 in (0, 3):
             mb_type = trial._decode_p_mb_type(trial_contexts)
         else:
             increment = int(bool(left_available) and not left_b_skip_or_direct)
@@ -2921,7 +2926,7 @@ class CABACArithmeticDecoder:
         if getattr(self, "_cavlc", None) is not None:
             return CAVLCSyntax.unsigned(self._bits, 3 if slice_type % 5 == 0 else 12)
         """Decode sub_mb_type for P/SP (0-3, ctxIdx 21-23) or B (0-12, ctxIdx 36-39)."""
-        if not isinstance(slice_type, int) or not 0 <= slice_type <= 9 or slice_type % 5 not in (0, 1):
+        if not isinstance(slice_type, int) or not 0 <= slice_type <= 9 or slice_type % 5 not in (0, 1, 3):
             raise CABACError("CABAC sub_mb_type is unsupported for this slice type")
         _validate_slice_contexts(contexts)
         trial, trial_contexts = self._slice_trial(contexts)
@@ -2929,7 +2934,7 @@ class CABACArithmeticDecoder:
         def bin_(ctx_idx: int) -> int:
             return int(trial.decode_bin(trial_contexts[ctx_idx]))
 
-        if slice_type % 5 == 0:
+        if slice_type % 5 in (0, 3):
             if bin_(21):
                 sub_type = 0
             elif not bin_(22):
@@ -2989,7 +2994,7 @@ class CABACArithmeticDecoder:
             raise CABACError("P/B macroblock-layer input is invalid")
         inter_input = input.inter_input
         trial, trial_contexts = self._slice_trial(contexts)
-        if inter_input.slice_type % 5 == 0:
+        if inter_input.slice_type % 5 in (0, 3):
             if not inter_input.reference_lists or not inter_input.reference_lists[0]:
                 raise CABACError("P_Skip reference picture is required")
             if not inter_input.partition_neighbors:
@@ -3069,7 +3074,7 @@ class CABACArithmeticDecoder:
             not isinstance(slice_type, int)
             or isinstance(slice_type, bool)
             or not 0 <= slice_type <= 9
-            or slice_type % 5 not in (0, 1, 2)
+            or slice_type % 5 not in (0, 1, 2, 3, 4)
             or not isinstance(first_macroblock_address, int)
             or isinstance(first_macroblock_address, bool)
             or not isinstance(picture_macroblock_count, int)
@@ -3083,7 +3088,7 @@ class CABACArithmeticDecoder:
             raise CABACError("CABAC slice_data inputs are invalid or unsupported")
 
         if (
-            slice_type % 5 == 2
+            slice_type % 5 in (2, 4)
             or picture_macroblock_count < 4096
             or not _parallel_reconstruction_available(threads)
         ):
@@ -3156,7 +3161,7 @@ class CABACArithmeticDecoder:
             macroblock_address += 1
 
     def _decode_slice_macroblock(self, slice_type, macroblock_input, contexts, builder, macroblock_address):
-        if slice_type % 5 == 2:
+        if slice_type % 5 in (2, 4):
             if not isinstance(macroblock_input, CABACIIntraMacroblockInput):
                 raise CABACError("I-slice input provider returned a non-intra macroblock")
             return self.decode_i_intra_macroblock(
@@ -3186,7 +3191,7 @@ class CABACArithmeticDecoder:
             or not isinstance(input.slice_type, int)
             or isinstance(input.slice_type, bool)
             or input.slice_type > 9
-            or input.slice_type % 5 not in (0, 1)
+            or input.slice_type % 5 not in (0, 1, 3)
             or any(
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
                 for value in (input.macroblock_x, input.macroblock_y)

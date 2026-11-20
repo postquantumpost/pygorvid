@@ -68,11 +68,20 @@ impl CavlcSyntax {
 
     pub(crate) fn mb_type(&mut self, reader: &mut BitReader<'_>, slice_type: u8) -> io::Result<u8> {
         let value = reader.read_ue()?;
-        let base = match slice_type % 5 {
-            2 => 0,
-            0 => 5,
-            1 => 23,
-            _ => return Err(invalid("unsupported CAVLC slice type")),
+        let normalized_type = slice_type % 5;
+        let (value, base) = if normalized_type == 4 {
+            if value == 0 {
+                return Err(invalid("SI macroblock type is unsupported"));
+            }
+            (value - 1, 0)
+        } else {
+            let base = match normalized_type {
+                2 => 0,
+                0 | 3 => 5,
+                1 => 23,
+                _ => return Err(invalid("unsupported CAVLC slice type")),
+            };
+            (value, base)
         };
         if value > base + 25 {
             return Err(invalid("CAVLC mb_type exceeds slice range"));

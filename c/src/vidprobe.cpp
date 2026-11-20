@@ -269,7 +269,9 @@ std::size_t decode_video(
             });
         const auto& selected_sps_info = *selected_sps;
         const auto& selected_pps_info = *selected_pps;
-        const bool is_i_slice = slice_type(slices.front()) % 5 == 2;
+        const auto normalized_slice_type = slice_type(slices.front()) % 5;
+        const bool is_i_slice =
+            normalized_slice_type == 2 || normalized_slice_type == 4;
         const bool is_idr_slice =
             pygorvid::parse_nal_header(slices.front()).unit_type == 5;
         const auto slice_header =

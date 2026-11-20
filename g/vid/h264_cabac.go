@@ -457,7 +457,7 @@ func (decoder *CABACArithmeticDecoder) DecodeMBSkipFlag(sliceType uint8, context
 	if contexts == nil {
 		return false, ErrCABACContextState
 	}
-	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1) {
+	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1 && sliceType%5 != 3) {
 		return false, ErrCABACUnsupportedSyntax
 	}
 	contextIndex := 0
@@ -727,7 +727,7 @@ func (decoder *CABACArithmeticDecoder) DecodeIIntraMBType(sliceType uint8, conte
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
-	if sliceType > 9 || sliceType%5 != 2 {
+	if sliceType > 9 || sliceType%5 != 2 && sliceType%5 != 4 {
 		return 0, ErrCABACUnsupportedSyntax
 	}
 	for index := range contexts {
@@ -752,6 +752,9 @@ func (decoder *CABACArithmeticDecoder) DecodeIIntraMBType(sliceType uint8, conte
 		return 0, err
 	}
 	if !first {
+		if sliceType%5 == 4 {
+			return 0, ErrCABACUnsupportedSyntax
+		}
 		decoder.commitTrial(&trial, &readerCopy)
 		*contexts = trialContexts
 		return 0, nil
@@ -1754,7 +1757,7 @@ func (decoder *CABACArithmeticDecoder) DecodeInterMBType(sliceType uint8, contex
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
-	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1) {
+	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1 && sliceType%5 != 3) {
 		return 0, ErrCABACUnsupportedSyntax
 	}
 	readerCopy := *decoder.bits
@@ -1764,7 +1767,7 @@ func (decoder *CABACArithmeticDecoder) DecodeInterMBType(sliceType uint8, contex
 	trialContexts := *contexts
 	var mbType uint8
 	var err error
-	if sliceType%5 == 0 {
+	if sliceType%5 == 0 || sliceType%5 == 3 {
 		mbType, err = trial.decodePMBType(&trialContexts)
 	} else {
 		increment := 0
@@ -1916,7 +1919,7 @@ func (decoder *CABACArithmeticDecoder) DecodeSubMBType(sliceType uint8, contexts
 	if contexts == nil {
 		return 0, ErrCABACContextState
 	}
-	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1) {
+	if sliceType > 9 || (sliceType%5 != 0 && sliceType%5 != 1 && sliceType%5 != 3) {
 		return 0, ErrCABACUnsupportedSyntax
 	}
 	readerCopy := *decoder.bits
@@ -1935,11 +1938,11 @@ func (decoder *CABACArithmeticDecoder) DecodeSubMBType(sliceType uint8, contexts
 	}
 	var subType uint8
 	switch {
-	case sliceType%5 == 0 && bin(21) == 1:
+	case (sliceType%5 == 0 || sliceType%5 == 3) && bin(21) == 1:
 		subType = 0
-	case sliceType%5 == 0 && bin(22) == 0:
+	case (sliceType%5 == 0 || sliceType%5 == 3) && bin(22) == 0:
 		subType = 1
-	case sliceType%5 == 0:
+	case sliceType%5 == 0 || sliceType%5 == 3:
 		subType = 3 - bin(23)
 	case bin(36) == 0:
 		subType = 0

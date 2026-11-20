@@ -912,7 +912,7 @@ pub fn derive_cabac_inter_macroblock_neighbor_state_from_history(
 ) -> io::Result<CabacInterMacroblockNeighborState> {
     if picture_width_in_mbs == 0
         || slice_type > 9
-        || !matches!(slice_type % 5, 0 | 1)
+        || !matches!(slice_type % 5, 0 | 1 | 3)
         || partition_width == 0
         || partition_height == 0
         || partition_x + partition_width > 16
@@ -1305,7 +1305,7 @@ fn cabac_inter_partition_specs(
     sub_types: &[u8],
 ) -> io::Result<Vec<CabacInterPartitionSpec>> {
     let mut output = Vec::new();
-    if slice_type.is_multiple_of(5) {
+    if matches!(slice_type % 5, 0 | 3) {
         match macroblock_type {
             0 => output.push(CabacInterPartitionSpec {
                 x: 0,
@@ -2663,7 +2663,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         if let Some(syntax) = self.cavlc.as_mut() {
             return syntax.skipped(&mut self.bits);
         }
-        if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
+        if slice_type > 9 || !matches!(slice_type % 5, 0 | 1 | 3) {
             return Err(invalid(
                 "CABAC mb_skip_flag is unsupported for this slice type",
             ));
@@ -2681,7 +2681,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         builder: &mut crate::Yuv420FrameBuilder,
         address: usize,
     ) -> io::Result<CabacPSkipMacroblockResult> {
-        if input.slice_type % 5 != 0 {
+        if !matches!(input.slice_type % 5, 0 | 3) {
             return Err(invalid("P_Skip requires a P-slice macroblock input"));
         }
         let mut trial = Self {
@@ -3123,7 +3123,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         if let Some(syntax) = self.cavlc.as_mut() {
             return syntax.mb_type(&mut self.bits, slice_type);
         }
-        if slice_type > 9 || slice_type % 5 != 2 {
+        if slice_type > 9 || !matches!(slice_type % 5, 2 | 4) {
             return Err(invalid(
                 "I-slice mb_type is unsupported for this slice type",
             ));
@@ -3146,6 +3146,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
             + usize::from(top_available && top_intra16_or_pcm);
         let first = trial.decode_bin(&mut trial_contexts[first_context])?;
         let mb_type = if !first {
+            if slice_type % 5 == 4 {
+                return Err(invalid("SI macroblock type is unsupported"));
+            }
             0
         } else if trial.decode_terminate_bin()? {
             25
@@ -4108,7 +4111,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         if let Some(syntax) = self.cavlc.as_mut() {
             return syntax.mb_type(&mut self.bits, slice_type);
         }
-        if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
+        if slice_type > 9 || !matches!(slice_type % 5, 0 | 1 | 3) {
             return Err(invalid(
                 "CABAC inter mb_type is unsupported for this slice type",
             ));
@@ -4124,7 +4127,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             cavlc: self.cavlc.clone(),
         };
         let mut trial_contexts = contexts.to_vec();
-        let mb_type = if slice_type.is_multiple_of(5) {
+        let mb_type = if matches!(slice_type % 5, 0 | 3) {
             trial.decode_p_mb_type(&mut trial_contexts)?
         } else {
             let increment = usize::from(left_available && !left_b_skip_or_direct)
@@ -4217,10 +4220,14 @@ impl<'a> CabacArithmeticDecoder<'a> {
         if self.cavlc.is_some() {
             return crate::h264_cavlc_syntax::CavlcSyntax::unsigned(
                 &mut self.bits,
-                if slice_type % 5 == 0 { 3 } else { 12 },
+                if matches!(slice_type % 5, 0 | 3) {
+                    3
+                } else {
+                    12
+                },
             );
         }
-        if slice_type > 9 || !matches!(slice_type % 5, 0 | 1) {
+        if slice_type > 9 || !matches!(slice_type % 5, 0 | 1 | 3) {
             return Err(invalid(
                 "CABAC sub_mb_type is unsupported for this slice type",
             ));
@@ -4236,7 +4243,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             cavlc: self.cavlc.clone(),
         };
         let mut c = contexts.to_vec();
-        let sub_type = if slice_type.is_multiple_of(5) {
+        let sub_type = if matches!(slice_type % 5, 0 | 3) {
             if trial.decode_bins(&mut c, 21, 1)? == 1 {
                 0
             } else if trial.decode_bins(&mut c, 22, 1)? == 0 {
@@ -4281,7 +4288,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         };
         let mut trial_contexts = *contexts;
         let inter_input = input.inter_input;
-        let skip_prediction = if inter_input.slice_type % 5 == 0 {
+        let skip_prediction = if matches!(inter_input.slice_type % 5, 0 | 3) {
             let reference = inter_input.reference_lists[0]
                 .first()
                 .ok_or_else(|| invalid("P_Skip reference picture is required"))?;
@@ -4412,7 +4419,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         F: FnMut(usize, &[CabacDecodedSliceMacroblock]) -> io::Result<CabacSliceMacroblockInput>,
     {
         if slice_type > 9
-            || !matches!(slice_type % 5, 0 | 1 | 2)
+            || !matches!(slice_type % 5, 0 | 1 | 2 | 3 | 4)
             || picture_macroblock_count == 0
             || first_macroblock_address >= picture_macroblock_count
         {
@@ -4420,7 +4427,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 "CABAC slice_data inputs are invalid or unsupported",
             ));
         }
-        if threads <= 1 || slice_type % 5 == 2 || reconstruction_is_deferred() {
+        if threads <= 1 || matches!(slice_type % 5, 2 | 4) || reconstruction_is_deferred() {
             return self.decode_slice_macroblocks(
                 slice_type,
                 first_macroblock_address,
@@ -4573,7 +4580,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         builder: &mut crate::Yuv420FrameBuilder,
         macroblock_address: usize,
     ) -> io::Result<CabacSliceMacroblockResult> {
-        if slice_type % 5 == 2 {
+        if matches!(slice_type % 5, 2 | 4) {
             let CabacSliceMacroblockInput::Intra(input) = macroblock_input else {
                 return Err(invalid("I-slice provider returned a non-intra macroblock"));
             };
@@ -4646,7 +4653,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
         builder: &mut crate::Yuv420FrameBuilder,
         address: usize,
     ) -> io::Result<CabacPBMacroblockPrediction> {
-        if input.slice_type > 9 || !matches!(input.slice_type % 5, 0 | 1) {
+        if input.slice_type > 9 || !matches!(input.slice_type % 5, 0 | 1 | 3) {
             return Err(invalid("inter macroblock slice type is unsupported"));
         }
         if input.reference_lists[0].is_empty()
@@ -4851,7 +4858,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 } else {
                     neighbors.list1
                 };
-                let decoded_reference_index = if input.slice_type % 5 == 0 && macroblock_type == 4 {
+                let decoded_reference_index = if matches!(input.slice_type % 5, 0 | 3)
+                    && macroblock_type == 4
+                {
                     0
                 } else {
                     let mut ref_contexts: [CabacContextModel; 6] = trial_contexts[54..60]
@@ -7581,7 +7590,7 @@ mod tests {
     fn rejects_mb_skip_flag_for_non_p_b_slice_types() {
         let mut decoder = decoder_with_state(&[], 510, 0);
         let mut contexts = [CabacContextModel::new(0, 63, 26).unwrap(); 3];
-        for slice_type in [2, 3, 4, 7, 8, 9, 10] {
+        for slice_type in [2, 4, 7, 9, 10] {
             assert!(decoder
                 .decode_mb_skip_flag(slice_type, &mut contexts, false, false, false, false)
                 .is_err());

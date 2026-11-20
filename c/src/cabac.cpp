@@ -256,7 +256,8 @@ bool CabacArithmeticDecoder::decode_p_skip_flag(
     std::uint8_t slice_type, bool left_available, bool left_skipped,
     bool top_available, bool top_skipped,
     std::vector<CabacContextModel>& contexts) {
-    if (slice_type > 9 || slice_type % 5 != 0) {
+    if (slice_type > 9 ||
+        (slice_type % 5 != 0 && slice_type % 5 != 3)) {
         throw std::invalid_argument(
             "mb_skip_flag is unsupported for this slice type");
     }
@@ -286,7 +287,8 @@ bool CabacArithmeticDecoder::decode_b_skip_flag(
 std::uint8_t CabacArithmeticDecoder::decode_p_mb_type(
     std::uint8_t slice_type,
     std::vector<CabacContextModel>& contexts) {
-    if (slice_type > 9 || slice_type % 5 != 0) {
+    if (slice_type > 9 ||
+        (slice_type % 5 != 0 && slice_type % 5 != 3)) {
         throw std::invalid_argument("P mb_type is unsupported for this slice type");
     }
     if (contexts.size() < 21) {
@@ -622,7 +624,8 @@ std::uint8_t CabacArithmeticDecoder::decode_i_intra_mb_type(
     std::uint8_t slice_type, std::vector<CabacContextModel>& contexts,
     bool left_available, bool left_intra16_or_pcm,
     bool top_available, bool top_intra16_or_pcm) {
-    if (slice_type > 9 || slice_type % 5 != 2) {
+    if (slice_type > 9 ||
+        (slice_type % 5 != 2 && slice_type % 5 != 4)) {
         throw std::invalid_argument(
             "I-slice mb_type is unsupported for this slice type");
     }

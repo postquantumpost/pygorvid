@@ -467,7 +467,7 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
     if (slice_type > 9) {
         invalid("slice_type " + std::to_string(slice_type) + " exceeds 9");
     }
-    if (slice_type % 5 != 2) {
+    if (slice_type % 5 != 2 && slice_type % 5 != 4) {
         invalid("C++ IDR decoder currently supports I slices only");
     }
     result.slice_type = static_cast<std::uint8_t>(slice_type);
@@ -538,6 +538,14 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
     if (slice_qpy < -qp_bd_offset_y || slice_qpy > 51) {
         invalid("slice QP " + std::to_string(slice_qpy) + " is out of range");
     }
+    if (slice_type % 5 == 4) {
+        result.slice_qs_delta = read_se(reader, "SI slice", "slice_qs_delta");
+        const auto slice_qsy =
+            26 + pps.pic_init_qs_minus26 + result.slice_qs_delta;
+        if (slice_qsy < 0 || slice_qsy > 51) {
+            invalid("SI slice QS is outside [0,51]");
+        }
+    }
     if (pps.deblocking_filter_control_present) {
         const auto disable_idc = read_ue(reader, "slice", "disable_deblocking_filter_idc");
         if (disable_idc > 2) {
@@ -598,8 +606,9 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
     }
     const auto normalized_slice_type =
         static_cast<std::uint8_t>(slice_type % 5);
-    if (normalized_slice_type != 0 && normalized_slice_type != 1) {
-        invalid("inter slice parsing supports P and B slices only");
+    if (normalized_slice_type != 0 && normalized_slice_type != 1 &&
+        normalized_slice_type != 3) {
+        invalid("inter slice parsing supports P, B, and SP slices only");
     }
     result.slice_type = normalized_slice_type;
     result.picture_parameter_set_id =
@@ -712,7 +721,8 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
             "ref_pic_list_modification_l1",
             result.ref_pic_list_modifications_l1);
     }
-    if ((normalized_slice_type == 0 && pps.weighted_pred) ||
+    if (((normalized_slice_type == 0 || normalized_slice_type == 3) &&
+         pps.weighted_pred) ||
         (normalized_slice_type == 1 && pps.weighted_bipred_idc == 1)) {
         PredictionWeightTable table;
         const auto luma_denominator =
@@ -840,6 +850,16 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
         26 + pps.pic_init_qp_minus26 + result.slice_qp_delta;
     if (slice_qpy < 0 || slice_qpy > 51) {
         invalid("P slice QP is outside [0,51]");
+    }
+    if (normalized_slice_type == 3) {
+        result.sp_for_switch_flag =
+            read_flag(reader, "SP slice", "sp_for_switch_flag");
+        result.slice_qs_delta = read_se(reader, "SP slice", "slice_qs_delta");
+        const auto slice_qsy =
+            26 + pps.pic_init_qs_minus26 + result.slice_qs_delta;
+        if (slice_qsy < 0 || slice_qsy > 51) {
+            invalid("SP slice QS is outside [0,51]");
+        }
     }
     if (pps.deblocking_filter_control_present) {
         const auto disable_idc =

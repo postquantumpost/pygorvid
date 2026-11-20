@@ -2659,7 +2659,7 @@ Yuv420Frame decode_idr_i_frame_impl(
                            macroblock_slice_ids[neighbor_address] == slice_id &&
                            macroblock_intra16_or_pcm[neighbor_address];
                 };
-            const auto macroblock_type = cabac_decoder
+            auto macroblock_type = cabac_decoder
                 ? cabac_decoder->decode_i_intra_mb_type(
                       slice_header.slice_type, cabac_contexts,
                       left_available,
@@ -2667,6 +2667,13 @@ Yuv420Frame decode_idr_i_frame_impl(
                       top_available,
                       neighbor_is_intra16_or_pcm(top_address, top_available))
                 : reader.read_ue();
+            if (slice_header.slice_type % 5 == 4) {
+                if (macroblock_type == 0) {
+                    throw std::runtime_error(
+                        "SI macroblock prediction is unsupported");
+                }
+                --macroblock_type;
+            }
             const auto luma_neighbor_coded =
                 [&](std::uint32_t neighbor_x, std::uint32_t neighbor_y,
                     bool neighbor_exists) {
@@ -6196,7 +6203,8 @@ Yuv420Frame decode_h264_reference_frame_impl(
         const auto rbsp = ebsp_to_rbsp(ebsp);
         BitReader slice_type_reader(rbsp);
         (void)slice_type_reader.read_ue();
-        if (slice_type_reader.read_ue() % 5 == 2) {
+        const auto slice_type = slice_type_reader.read_ue() % 5;
+        if (slice_type == 2 || slice_type == 4) {
             return decode_idr_i_frame(slice_nals, sps, pps);
         }
         if (reference_frames_l0.empty() ||

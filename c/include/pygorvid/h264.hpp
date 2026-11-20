@@ -85,6 +85,8 @@ struct IdrSliceHeader {
     bool no_output_of_prior_pics = false;
     bool long_term_reference = false;
     std::int64_t slice_qp_delta = 0;
+    std::int64_t slice_qs_delta = 0;
+    bool sp_for_switch_flag = false;
     std::uint8_t disable_deblocking_filter_idc = 0;
     std::int64_t slice_alpha_c0_offset_div2 = 0;
     std::int64_t slice_beta_offset_div2 = 0;
@@ -132,6 +134,8 @@ struct PSliceHeader {
     std::vector<MemoryManagementOperation> memory_management_operations;
     std::uint8_t cabac_init_idc = 0;
     std::int64_t slice_qp_delta = 0;
+    std::int64_t slice_qs_delta = 0;
+    bool sp_for_switch_flag = false;
     std::uint8_t disable_deblocking_filter_idc = 0;
     std::int64_t slice_alpha_c0_offset_div2 = 0;
     std::int64_t slice_beta_offset_div2 = 0;

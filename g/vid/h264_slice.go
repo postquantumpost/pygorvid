@@ -44,6 +44,8 @@ type SliceHeader struct {
 	CabacInitIDC               uint8
 	HasCabacInitIDC            bool
 	SliceQPDelta               int64
+	SliceQSDelta               int64
+	SPForSwitchFlag            bool
 	DisableDeblockingFilterIDC uint8
 	HasDeblockingFilterIDC     bool
 	SliceAlphaC0OffsetDiv2     int64
@@ -300,7 +302,7 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 	normalizedSliceType := header.SliceType % 5
 	switch normalizedSliceType {
 	case 2:
-	case 0, 1:
+	case 0, 1, 3:
 		if normalizedSliceType == 1 {
 			header.DirectSpatialMVPred, err = reader.ReadBit()
 			if err != nil {
@@ -335,10 +337,11 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 				header.NumRefIdxL1ActiveMinus1 = pps.NumRefIdxL1DefaultActiveMinus1
 			}
 		}
+	case 4:
 	default:
 		return SliceHeader{}, fmt.Errorf("unsupported slice_type %d", header.SliceType)
 	}
-	if normalizedSliceType != 2 {
+	if normalizedSliceType != 2 && normalizedSliceType != 4 {
 		header.RefPicListReorderingL0, header.RefPicListL0, err = parseRefPicListReordering(reader, "l0")
 		if err != nil {
 			return SliceHeader{}, err
@@ -382,7 +385,7 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 			}
 		}
 	}
-	if pps.EntropyCodingMode && normalizedSliceType != 2 {
+	if pps.EntropyCodingMode && normalizedSliceType != 2 && normalizedSliceType != 4 {
 		cabacInitIDC, err := readSliceUE(reader, "cabac_init_idc")
 		if err != nil {
 			return SliceHeader{}, err
@@ -401,6 +404,22 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 	sliceQPY := int64(26) + pps.PicInitQpMinus26 + header.SliceQPDelta
 	if sliceQPY < -qpBdOffsetY || sliceQPY > 51 {
 		return SliceHeader{}, fmt.Errorf("slice QP %d is out of range", sliceQPY)
+	}
+	if normalizedSliceType == 3 || normalizedSliceType == 4 {
+		if normalizedSliceType == 3 {
+			header.SPForSwitchFlag, err = reader.ReadBit()
+			if err != nil {
+				return SliceHeader{}, fmt.Errorf("slice sp_for_switch_flag: %w", err)
+			}
+		}
+		header.SliceQSDelta, err = reader.ReadSE()
+		if err != nil {
+			return SliceHeader{}, fmt.Errorf("slice slice_qs_delta: %w", err)
+		}
+		sliceQSY := int64(26) + pps.PicInitQsMinus26 + header.SliceQSDelta
+		if sliceQSY < 0 || sliceQSY > 51 {
+			return SliceHeader{}, fmt.Errorf("slice QS %d is out of range", sliceQSY)
+		}
 	}
 	if pps.DeblockingFilterControlPresent {
 		disableIDC, err := readSliceUE(reader, "disable_deblocking_filter_idc")

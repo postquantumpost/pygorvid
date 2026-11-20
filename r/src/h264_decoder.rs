@@ -470,7 +470,7 @@ fn slice_reference_lists(
     let max_frame_num = 1_u32
         .checked_shl(sps.log2_max_frame_num_minus4 + 4)
         .ok_or_else(|| invalid("MaxFrameNum is outside the supported range"))?;
-    let (mut list0, mut list1) = if header.slice_type % 5 == 0 {
+    let (mut list0, mut list1) = if matches!(header.slice_type % 5, 0 | 3) {
         (
             crate::build_p_reference_list(references, header.frame_num, max_frame_num)?,
             Vec::new(),
@@ -1333,10 +1333,10 @@ impl H264Decoder {
         history: &[crate::CabacDecodedSliceMacroblock],
     ) -> io::Result<crate::CabacSliceMacroblockInput> {
         match dependency_slice.header.slice_type % 5 {
-            2 => self
+            2 | 4 => self
                 .intra_macroblock_input_from_history(dependency_slice, macroblock_address, history)
                 .map(crate::CabacSliceMacroblockInput::Intra),
-            0 | 1 => self
+            0 | 1 | 3 => self
                 .inter_macroblock_input_from_history(dependency_slice, macroblock_address, history)
                 .map(crate::CabacSliceMacroblockInput::Inter),
             _ => Err(invalid(
@@ -1402,7 +1402,7 @@ impl H264Decoder {
         macroblock_address: usize,
         history: &[crate::CabacDecodedSliceMacroblock],
     ) -> io::Result<crate::CabacIIntraMacroblockInput> {
-        if !matches!(dependency_slice.header.slice_type % 5, 0 | 1 | 2) {
+        if !matches!(dependency_slice.header.slice_type % 5, 0 | 1 | 2 | 3 | 4) {
             return Err(invalid(
                 "history input builder requires an I-, P-, or B-slice",
             ));
@@ -1752,7 +1752,7 @@ impl H264Decoder {
         history: &[crate::CabacDecodedSliceMacroblock],
     ) -> io::Result<crate::CabacPBMacroblockLayerInput> {
         let header = &dependency_slice.header;
-        if !matches!(header.slice_type % 5, 0 | 1) {
+        if !matches!(header.slice_type % 5, 0 | 1 | 3) {
             return Err(invalid(
                 "inter history input builder requires a P- or B-slice",
             ));
@@ -1776,7 +1776,7 @@ impl H264Decoder {
         let current_poc = self.picture_order_count(header, &sps)?;
 
         let references = self.reference_picture_buffer.references();
-        let (mut list0, mut list1) = if header.slice_type % 5 == 0 {
+        let (mut list0, mut list1) = if matches!(header.slice_type % 5, 0 | 3) {
             (
                 crate::build_p_reference_list(&references, header.frame_num, max_frame_num)?,
                 Vec::new(),
@@ -2195,8 +2195,7 @@ impl H264Decoder {
         let target_already_decoded = self
             .last_decoded_sample_index
             .is_some_and(|last| target_sample_index as u64 <= last);
-        if self.gop_sync_sample_index != Some(gop_sync_sample_index)
-            || self.last_decoded_sample_index.is_none()
+        if self.last_decoded_sample_index.is_none()
             || target_already_decoded
             || self
                 .last_decoded_sample_index

@@ -815,6 +815,43 @@ void test_h264_p_skip_picture() {
     assert(header.disable_deblocking_filter_idc == 1);
     assert(header.slice_data_bit_offset > 0);
 
+    BitWriter sp_syntax;
+    sp_syntax.ue(0);
+    sp_syntax.ue(3);
+    sp_syntax.ue(0);
+    sp_syntax.bits(1, 4);
+    sp_syntax.bits(1, 4);
+    sp_syntax.bit(false);
+    sp_syntax.bit(false);
+    sp_syntax.bit(false);
+    sp_syntax.se(0);
+    sp_syntax.bit(false);
+    sp_syntax.se(0);
+    sp_syntax.ue(1);
+    std::vector<std::uint8_t> sp_nal{0x41};
+    append(sp_nal, rbsp_to_ebsp(sp_syntax.finish()));
+    const auto sp_header = pygorvid::parse_p_slice_header(sp_nal, sps, pps);
+    assert(sp_header.slice_type == 3);
+    assert(!sp_header.sp_for_switch_flag);
+    assert(sp_header.slice_qs_delta == 0);
+
+    BitWriter si_syntax;
+    si_syntax.ue(0);
+    si_syntax.ue(4);
+    si_syntax.ue(0);
+    si_syntax.bits(1, 4);
+    si_syntax.bits(1, 4);
+    si_syntax.bit(false);
+    si_syntax.se(0);
+    si_syntax.se(0);
+    si_syntax.ue(1);
+    std::vector<std::uint8_t> si_nal{0x41};
+    append(si_nal, rbsp_to_ebsp(si_syntax.finish()));
+    const auto si_header =
+        pygorvid::parse_idr_i_slice_header(si_nal, sps, pps);
+    assert(si_header.slice_type == 4);
+    assert(si_header.slice_qs_delta == 0);
+
     std::array<std::uint8_t, 256> first_luma{};
     std::array<std::uint8_t, 256> second_luma{};
     std::array<std::uint8_t, 64> chroma_u{};

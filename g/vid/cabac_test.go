@@ -955,7 +955,7 @@ func TestCABACReferenceIndexMaximumTermination(t *testing.T) {
 func TestCABACMBSkipFlagRejectsOtherSliceTypes(t *testing.T) {
 	decoder := &CABACArithmeticDecoder{bits: NewBitReader(nil), codeRange: 510, codeOffset: 0}
 	contexts := [3]CABACContextModel{}
-	for _, sliceType := range []uint8{2, 3, 4, 7, 8, 9, 10} {
+	for _, sliceType := range []uint8{2, 4, 7, 9, 10} {
 		if _, err := decoder.DecodeMBSkipFlag(sliceType, &contexts, false, false, false, false); !errors.Is(err, ErrCABACUnsupportedSyntax) {
 			t.Errorf("slice_type %d error = %v; want unsupported syntax", sliceType, err)
 		}

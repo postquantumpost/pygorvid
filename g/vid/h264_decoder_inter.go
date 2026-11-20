@@ -173,7 +173,7 @@ func (decoder *H264Decoder) nativeReferenceLists(slice nativeSlice, poc int64) (
 	var lists [2][]ReferencePicture
 	var decoded [2][]DecodedReferencePicture
 	references := decoder.referencePictureBuffer.References()
-	if slice.header.SliceType%5 == 0 {
+	if slice.header.SliceType%5 == 0 || slice.header.SliceType%5 == 3 {
 		list, err := BuildPReferenceList(references, slice.header.FrameNum, 1<<(slice.sps.Log2MaxFrameNumMinus4+4))
 		if err != nil {
 			return decoded, err
@@ -341,7 +341,7 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
-	if first.header.SliceType%5 != 0 && first.header.SliceType%5 != 1 {
+	if first.header.SliceType%5 != 0 && first.header.SliceType%5 != 1 && first.header.SliceType%5 != 3 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 	}
 	width, height := int(first.sps.CodedWidth/16), int(first.sps.CodedHeight/16)

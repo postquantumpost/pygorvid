@@ -40,6 +40,8 @@ pub struct SliceHeader {
     pub memory_management_operations: Vec<MemoryManagementOperation>,
     pub cabac_init_idc: Option<u8>,
     pub slice_qp_delta: i64,
+    pub slice_qs_delta: i64,
+    pub sp_for_switch_flag: bool,
     pub disable_deblocking_filter_idc: Option<u8>,
     pub slice_alpha_c0_offset_div2: i64,
     pub slice_beta_offset_div2: i64,
@@ -265,6 +267,8 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
         memory_management_operations: Vec::new(),
         cabac_init_idc: None,
         slice_qp_delta: 0,
+        slice_qs_delta: 0,
+        sp_for_switch_flag: false,
         disable_deblocking_filter_idc: None,
         slice_alpha_c0_offset_div2: 0,
         slice_beta_offset_div2: 0,
@@ -314,7 +318,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
     }
     match header.slice_type % 5 {
         2 => {}
-        0 | 1 => {
+        0 | 1 | 3 => {
             if header.slice_type % 5 == 1 {
                 header.direct_spatial_mv_pred = reader
                     .read_bit()
@@ -344,6 +348,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
                 }
             }
         }
+        4 => {}
         _ => {
             return Err(invalid(format!(
                 "unsupported slice_type {}",
@@ -352,7 +357,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
         }
     }
     let normalized_slice_type = header.slice_type % 5;
-    if normalized_slice_type != 2 {
+    if normalized_slice_type != 2 && normalized_slice_type != 4 {
         header.ref_pic_list_reordering_l0 = read_ref_pic_list_reordering(&mut reader, "l0")?;
         if normalized_slice_type == 1 {
             header.ref_pic_list_reordering_l1 = read_ref_pic_list_reordering(&mut reader, "l1")?;
@@ -365,7 +370,10 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
         header.prediction_weight_table = Some(crate::PredictionWeightTable::read(
             &mut reader,
             sps,
-            [header.num_ref_idx_l0_active_minus1, header.num_ref_idx_l1_active_minus1],
+            [
+                header.num_ref_idx_l0_active_minus1,
+                header.num_ref_idx_l1_active_minus1,
+            ],
             normalized_slice_type == 1,
         )?);
     }
@@ -387,7 +395,7 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
             }
         }
     }
-    if pps.entropy_coding_mode && normalized_slice_type != 2 {
+    if pps.entropy_coding_mode && normalized_slice_type != 2 && normalized_slice_type != 4 {
         let cabac_init_idc = read_ue(&mut reader, "cabac_init_idc")?;
         if cabac_init_idc > 2 {
             return Err(invalid(format!(
@@ -401,6 +409,18 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
     let slice_qpy = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
     if slice_qpy < -qp_bd_offset_y || slice_qpy > 51 {
         return Err(invalid(format!("slice QP {slice_qpy} is out of range")));
+    }
+    if matches!(normalized_slice_type, 3 | 4) {
+        if normalized_slice_type == 3 {
+            header.sp_for_switch_flag = reader
+                .read_bit()
+                .map_err(|error| context("sp_for_switch_flag", error))?;
+        }
+        header.slice_qs_delta = read_se(&mut reader, "slice_qs_delta")?;
+        let slice_qsy = 26 + pps.pic_init_qs_minus26 + header.slice_qs_delta;
+        if !(0..=51).contains(&slice_qsy) {
+            return Err(invalid(format!("slice QS {slice_qsy} is out of range")));
+        }
     }
     if pps.deblocking_filter_control_present {
         let disable_idc = read_ue(&mut reader, "disable_deblocking_filter_idc")?;
