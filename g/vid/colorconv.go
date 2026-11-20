@@ -33,11 +33,17 @@ func upsampleChroma420(chroma []byte, width, height, stride int) []byte {
 	return upsampled
 }
 
-func upsampleChroma(chroma []byte, width, height, stride int, chroma422 bool) []byte {
+func upsampleChroma(chroma []byte, width, height, stride int, chroma422, chroma444 bool) []byte {
 	if !chroma422 {
 		return upsampleChroma420(chroma, width, height, stride)
 	}
 	upsampled := make([]byte, width*height)
+	if chroma444 {
+		for y := 0; y < height; y++ {
+			copy(upsampled[y*width:(y+1)*width], chroma[y*stride:y*stride+width])
+		}
+		return upsampled
+	}
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			upsampled[y*width+x] = chroma[y*stride+x/2]
@@ -81,6 +87,7 @@ func (c PixelConverter) ConvertYUV420ToRGB(width, height int, y, u, v []byte, yS
 		return PixelBuffer{}, fmt.Errorf("%w: chroma and luma strides are too small", ErrPixelConverter)
 	}
 	chroma422 := len(u) >= uStride*height && len(v) >= vStride*height
+	chroma444 := chroma422 && uStride >= width && vStride >= width
 	chromaHeight := (height + 1) / 2
 	if chroma422 {
 		chromaHeight = height
@@ -90,8 +97,8 @@ func (c PixelConverter) ConvertYUV420ToRGB(width, height int, y, u, v []byte, yS
 	}
 	outStride := width * 3
 	outData := make([]byte, outStride*height)
-	uUpsampled := upsampleChroma(u, width, height, uStride, chroma422)
-	vUpsampled := upsampleChroma(v, width, height, vStride, chroma422)
+	uUpsampled := upsampleChroma(u, width, height, uStride, chroma422, chroma444)
+	vUpsampled := upsampleChroma(v, width, height, vStride, chroma422, chroma444)
 	for row := 0; row < height; row++ {
 		for col := 0; col < width; col++ {
 			offset := row*outStride + col*3

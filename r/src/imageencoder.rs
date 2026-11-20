@@ -23,6 +23,11 @@ pub(crate) fn frame_to_rgb(frame: &Yuv420Frame) -> io::Result<RgbImage> {
     let chroma_u = frame.u_plane_bytes()?;
     let chroma_v = frame.v_plane_bytes()?;
     let chroma_width = frame.width.div_ceil(2);
+    let chroma_width = if chroma_u.len() >= frame.width * frame.height {
+        frame.width
+    } else {
+        chroma_width
+    };
     let chroma_height = if chroma_u.len() >= frame.u_stride * frame.height {
         frame.height
     } else {
@@ -37,7 +42,12 @@ pub(crate) fn frame_to_rgb(frame: &Yuv420Frame) -> io::Result<RgbImage> {
             } else {
                 row / 2
             };
-            let chroma_offset = chroma_row * chroma_width + column / 2;
+            let chroma_column = if chroma_width == frame.width {
+                column
+            } else {
+                column / 2
+            };
+            let chroma_offset = chroma_row * chroma_width + chroma_column;
             let blue_difference = f64::from(chroma_u[chroma_offset]) - 128.0;
             let red_difference = f64::from(chroma_v[chroma_offset]) - 128.0;
             for value in [

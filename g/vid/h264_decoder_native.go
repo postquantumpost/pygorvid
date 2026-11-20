@@ -127,16 +127,22 @@ func (decoder *H264Decoder) decodeNativeIntraSample(sample CompressedSample) (Yu
 	return cropNativeFrame(frame, decoder.nativeBlocks[0].slice.sps), nil
 }
 
-func decodeNativeIntraPCM422(slices []nativeSlice) (Yuv420Frame, error) {
+func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 	first := slices[0]
 	sps := first.sps
 	width, height := int(sps.CodedWidth), int(sps.CodedHeight)
+	chromaWidth := width / 2
+	chromaMBWidth := 8
+	if sps.ChromaFormatIDC == 3 {
+		chromaWidth = width
+		chromaMBWidth = 16
+	}
 	frame := Yuv420Frame{
 		Width: width, Height: height,
-		YStride: width, UStride: width / 2, VStride: width / 2,
+		YStride: width, UStride: chromaWidth, VStride: chromaWidth,
 		Y: make([]byte, width*height),
-		U: make([]byte, width*height/2),
-		V: make([]byte, width*height/2),
+		U: make([]byte, chromaWidth*height),
+		V: make([]byte, chromaWidth*height),
 	}
 	widthMBs := width / 16
 	written := make([]bool, widthMBs*(height/16))
@@ -150,7 +156,7 @@ func decodeNativeIntraPCM422(slices []nativeSlice) (Yuv420Frame, error) {
 				return Yuv420Frame{}, err
 			}
 			if mbType != 25 || address >= len(written) || written[address] {
-				return Yuv420Frame{}, fmt.Errorf("4:2:2 decoder requires complete I_PCM macroblocks")
+				return Yuv420Frame{}, fmt.Errorf("high-chroma decoder requires complete I_PCM macroblocks")
 			}
 			reader.AlignToByte()
 			mbX, mbY := address%widthMBs, address/widthMBs
@@ -165,12 +171,12 @@ func decodeNativeIntraPCM422(slices []nativeSlice) (Yuv420Frame, error) {
 			}
 			for _, plane := range [][]byte{frame.U, frame.V} {
 				for row := 0; row < 16; row++ {
-					for column := 0; column < 8; column++ {
+					for column := 0; column < chromaMBWidth; column++ {
 						value, err := reader.ReadBits(8)
 						if err != nil {
 							return Yuv420Frame{}, err
 						}
-						plane[(mbY*16+row)*(width/2)+mbX*8+column] = byte(value)
+						plane[(mbY*16+row)*chromaWidth+mbX*chromaMBWidth+column] = byte(value)
 					}
 				}
 			}
@@ -180,7 +186,7 @@ func decodeNativeIntraPCM422(slices []nativeSlice) (Yuv420Frame, error) {
 	}
 	for _, complete := range written {
 		if !complete {
-			return Yuv420Frame{}, fmt.Errorf("4:2:2 I_PCM picture is incomplete")
+			return Yuv420Frame{}, fmt.Errorf("high-chroma I_PCM picture is incomplete")
 		}
 	}
 	return frame, nil
@@ -192,8 +198,8 @@ func (decoder *H264Decoder) decodeNativeCodedIntraSample(sample CompressedSample
 		return Yuv420Frame{}, err
 	}
 	first := slices[0]
-	if first.sps.ChromaFormatIDC == 2 {
-		return decodeNativeIntraPCM422(slices)
+	if first.sps.ChromaFormatIDC >= 2 {
+		return decodeNativeIntraPCMFullChroma(slices)
 	}
 	if first.header.SliceType%5 != 2 && first.header.SliceType%5 != 4 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
@@ -268,16 +274,19 @@ func cropNativeFrame(coded Yuv420Frame, sps SPSInfo) Yuv420Frame {
 	width, height := int(sps.Width), int(sps.Height)
 	frame := Yuv420Frame{Width: width, Height: height, YStride: width, UStride: width / 2, VStride: width / 2}
 	planes := [3][]byte{coded.Y, coded.U, coded.V}
-	chromaHeightDivisor := 2
-	if sps.ChromaFormatIDC == 2 {
+	chromaWidthDivisor, chromaHeightDivisor := 2, 2
+	if sps.ChromaFormatIDC >= 2 {
 		chromaHeightDivisor = 1
+	}
+	if sps.ChromaFormatIDC == 3 {
+		chromaWidthDivisor = 1
 	}
 	packed := [3][]byte{}
 	for component, plane := range planes {
 		widthDivisor := 1
 		heightDivisor := 1
 		if component > 0 {
-			widthDivisor = 2
+			widthDivisor = chromaWidthDivisor
 			heightDivisor = chromaHeightDivisor
 		}
 		stride := coded.Width / widthDivisor

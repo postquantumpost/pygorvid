@@ -32,21 +32,19 @@ class Yuv420Frame:
         return self._plane_bytes(self.y, self.width, self.height, self.y_stride)
 
     def u_plane_bytes(self) -> bytes:
-        chroma_width = self.width // 2 + self.width % 2
-        chroma_height = (
-            self.height
-            if len(self.u) >= self.u_stride * self.height
-            else self.height // 2 + self.height % 2
+        chroma_width = (
+            self.width if len(self.u) >= self.width * self.height
+            else self.width // 2 + self.width % 2
         )
+        chroma_height = self.height if len(self.u) >= self.u_stride * self.height else self.height // 2 + self.height % 2
         return self._plane_bytes(self.u, chroma_width, chroma_height, self.u_stride)
 
     def v_plane_bytes(self) -> bytes:
-        chroma_width = self.width // 2 + self.width % 2
-        chroma_height = (
-            self.height
-            if len(self.v) >= self.v_stride * self.height
-            else self.height // 2 + self.height % 2
+        chroma_width = (
+            self.width if len(self.v) >= self.width * self.height
+            else self.width // 2 + self.width % 2
         )
+        chroma_height = self.height if len(self.v) >= self.v_stride * self.height else self.height // 2 + self.height % 2
         return self._plane_bytes(self.v, chroma_width, chroma_height, self.v_stride)
 
     def luma_plane_matches(self, reference: bytes) -> bool:

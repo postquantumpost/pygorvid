@@ -1497,8 +1497,8 @@ class H264Decoder:
                 self._maximum_long_term_frame_idx = 0 if header.long_term_reference else None
             try:
                 picture_order_count = self._picture_order_count(header, sequence_set)
-                if sequence_set.chroma_format_idc == 2:
-                    frame = self._decode_i_pcm_422_picture(picture, sequence_set)
+                if sequence_set.chroma_format_idc >= 2:
+                    frame = self._decode_i_pcm_full_chroma_picture(picture, sequence_set)
                     self._report_frame_progress(display_index, sample_index, 100)
                     self._cache_decoded_frame(display_index, frame)
                     self._last_decoded_sample_index = sample_index
@@ -1691,10 +1691,12 @@ class H264Decoder:
             )
         return target_frame
 
-    def _decode_i_pcm_422_picture(self, picture, sequence_set: SPSInfo) -> Yuv420Frame:
+    def _decode_i_pcm_full_chroma_picture(self, picture, sequence_set: SPSInfo) -> Yuv420Frame:
         width, height = sequence_set.coded_width, sequence_set.coded_height
         luma = bytearray(width * height)
-        chroma_u = bytearray((width // 2) * height)
+        chroma_width = width if sequence_set.chroma_format_idc == 3 else width // 2
+        chroma_mb_width = 16 if sequence_set.chroma_format_idc == 3 else 8
+        chroma_u = bytearray(chroma_width * height)
         chroma_v = bytearray(len(chroma_u))
         width_in_mbs = width // 16
         written = [False] * (width_in_mbs * (height // 16))
@@ -1709,7 +1711,7 @@ class H264Decoder:
                 while reader.more_rbsp_data():
                     if address >= len(written) or written[address] or reader.read_ue() != 25:
                         raise DecoderError(
-                            "4:2:2 decoding requires complete, non-overlapping I_PCM macroblocks"
+                            "high-chroma decoding requires complete, non-overlapping I_PCM macroblocks"
                         )
                     reader.align_to_byte()
                     mb_x, mb_y = address % width_in_mbs, address // width_in_mbs
@@ -1720,31 +1722,40 @@ class H264Decoder:
                             )
                     for plane in (chroma_u, chroma_v):
                         for row in range(16):
-                            for column in range(8):
-                                plane[(mb_y * 16 + row) * (width // 2) + mb_x * 8 + column] = (
+                            for column in range(chroma_mb_width):
+                                plane[(mb_y * 16 + row) * chroma_width +
+                                      mb_x * chroma_mb_width + column] = (
                                     reader.read_bits(8)
                                 )
                     written[address] = True
                     address += 1
         except (BitstreamError, NALUnitError) as error:
-            raise DecoderError(f"4:2:2 I_PCM decoding failed: {error}") from error
+            raise DecoderError(f"high-chroma I_PCM decoding failed: {error}") from error
         if not all(written):
-            raise DecoderError("4:2:2 I_PCM picture is incomplete")
+            raise DecoderError("high-chroma I_PCM picture is incomplete")
         left, top = sequence_set.frame_crop_left, sequence_set.frame_crop_top
         out_width, out_height = sequence_set.width, sequence_set.height
-        crop_left = out_width // 2
+        crop_left = out_width if sequence_set.chroma_format_idc == 3 else out_width // 2
         output_y = b"".join(
             luma[(top + row) * width + left:(top + row) * width + left + out_width]
             for row in range(out_height)
         )
         output_u = b"".join(
-            chroma_u[row * (width // 2) + left // 2:
-                      row * (width // 2) + left // 2 + out_width // 2]
+            chroma_u[row * chroma_width + (
+                left if sequence_set.chroma_format_idc == 3 else left // 2
+            ):
+                      row * chroma_width + (
+                          left if sequence_set.chroma_format_idc == 3 else left // 2
+                      ) + crop_left]
             for row in range(top, top + out_height)
         )
         output_v = b"".join(
-            chroma_v[row * (width // 2) + left // 2:
-                      row * (width // 2) + left // 2 + out_width // 2]
+            chroma_v[row * chroma_width + (
+                left if sequence_set.chroma_format_idc == 3 else left // 2
+            ):
+                      row * chroma_width + (
+                          left if sequence_set.chroma_format_idc == 3 else left // 2
+                      ) + crop_left]
             for row in range(top, top + out_height)
         )
         return Yuv420Frame(

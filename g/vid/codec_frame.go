@@ -43,6 +43,9 @@ func (frame Yuv420Frame) LumaPlaneBytes() ([]byte, error) {
 
 func (frame Yuv420Frame) UPlaneBytes() ([]byte, error) {
 	chromaWidth := frame.Width/2 + frame.Width%2
+	if len(frame.U) >= frame.Width*frame.Height {
+		chromaWidth = frame.Width
+	}
 	chromaHeight := frame.Height/2 + frame.Height%2
 	if len(frame.U) >= frame.UStride*frame.Height {
 		chromaHeight = frame.Height
@@ -52,6 +55,9 @@ func (frame Yuv420Frame) UPlaneBytes() ([]byte, error) {
 
 func (frame Yuv420Frame) VPlaneBytes() ([]byte, error) {
 	chromaWidth := frame.Width/2 + frame.Width%2
+	if len(frame.V) >= frame.Width*frame.Height {
+		chromaWidth = frame.Width
+	}
 	chromaHeight := frame.Height/2 + frame.Height%2
 	if len(frame.V) >= frame.VStride*frame.Height {
 		chromaHeight = frame.Height

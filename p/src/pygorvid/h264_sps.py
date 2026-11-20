@@ -70,9 +70,9 @@ def _validate_supported_sps(info: SPSInfo) -> None:
         raise SPSParseError(
             f"unsupported SPS profile_idc {info.profile_idc}: only progressive 8-bit 4:2:0 profiles are supported"
         )
-    if info.chroma_format_idc not in (1, 2):
+    if info.chroma_format_idc not in (1, 2, 3):
         raise SPSParseError(
-            f"unsupported SPS chroma_format_idc {info.chroma_format_idc}: only 4:2:0 and 4:2:2 are supported"
+            f"unsupported SPS chroma_format_idc {info.chroma_format_idc}: only 4:2:0, 4:2:2, and 4:4:4 are supported"
         )
     if info.separate_colour_plane:
         raise SPSParseError("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported")

@@ -469,15 +469,21 @@ fn picture_deblocking_macroblock(
     ))
 }
 
-fn decode_i_pcm_422_picture(
+fn decode_i_pcm_full_chroma_picture(
     picture: &[DependencySlice],
     sps: &crate::SpsInfo,
 ) -> io::Result<crate::Yuv420Frame> {
     let width = usize::try_from(sps.coded_width).map_err(|_| invalid("width overflow"))?;
     let height = usize::try_from(sps.coded_height).map_err(|_| invalid("height overflow"))?;
     let width_in_mbs = width / 16;
+    let chroma_width = if sps.chroma_format_idc == 3 {
+        width
+    } else {
+        width / 2
+    };
+    let chroma_mb_width = if sps.chroma_format_idc == 3 { 16 } else { 8 };
     let mut y = vec![0; width * height];
-    let mut u = vec![0; width * height / 2];
+    let mut u = vec![0; chroma_width * height];
     let mut v = vec![0; u.len()];
     let mut written = vec![false; width_in_mbs * (height / 16)];
     for slice in picture {
@@ -485,7 +491,7 @@ fn decode_i_pcm_422_picture(
             slice
                 .nal_unit
                 .get(1..)
-                .ok_or_else(|| invalid("4:2:2 slice NAL is empty"))?,
+                .ok_or_else(|| invalid("high-chroma slice NAL is empty"))?,
         )?;
         let mut reader = crate::BitReader::new(&rbsp);
         let offset = slice.header.slice_data_bit_offset;
@@ -496,7 +502,7 @@ fn decode_i_pcm_422_picture(
         while reader.more_rbsp_data() {
             if address >= written.len() || written[address] || reader.read_ue()? != 25 {
                 return Err(invalid(
-                    "4:2:2 decoder requires complete, non-overlapping I_PCM macroblocks",
+                    "high-chroma decoder requires complete, non-overlapping I_PCM macroblocks",
                 ));
             }
             reader.align_to_byte();
@@ -509,8 +515,8 @@ fn decode_i_pcm_422_picture(
             }
             for plane in [&mut u, &mut v] {
                 for row in 0..16 {
-                    for column in 0..8 {
-                        plane[(mb_y * 16 + row) * (width / 2) + mb_x * 8 + column] =
+                    for column in 0..chroma_mb_width {
+                        plane[(mb_y * 16 + row) * chroma_width + mb_x * chroma_mb_width + column] =
                             reader.read_bits(8)? as u8;
                     }
                 }
@@ -520,7 +526,7 @@ fn decode_i_pcm_422_picture(
         }
     }
     if written.iter().any(|complete| !complete) {
-        return Err(invalid("4:2:2 I_PCM picture is incomplete"));
+        return Err(invalid("high-chroma I_PCM picture is incomplete"));
     }
     let out_width = sps.width as usize;
     let out_height = sps.height as usize;
@@ -529,8 +535,18 @@ fn decode_i_pcm_422_picture(
     let crop_chroma = |plane: &[u8]| {
         (0..out_height)
             .flat_map(|row| {
-                let start = (top + row) * (width / 2) + left / 2;
-                plane[start..start + out_width / 2].iter().copied()
+                let start = (top + row) * chroma_width
+                    + if sps.chroma_format_idc == 3 {
+                        left
+                    } else {
+                        left / 2
+                    };
+                let output_width = if sps.chroma_format_idc == 3 {
+                    out_width
+                } else {
+                    out_width / 2
+                };
+                plane[start..start + output_width].iter().copied()
             })
             .collect::<Vec<_>>()
     };
@@ -544,8 +560,16 @@ fn decode_i_pcm_422_picture(
         width: out_width,
         height: out_height,
         y_stride: out_width,
-        u_stride: out_width / 2,
-        v_stride: out_width / 2,
+        u_stride: if sps.chroma_format_idc == 3 {
+            out_width
+        } else {
+            out_width / 2
+        },
+        v_stride: if sps.chroma_format_idc == 3 {
+            out_width
+        } else {
+            out_width / 2
+        },
         y: output_y,
         u: crop_chroma(&u),
         v: crop_chroma(&v),
@@ -2385,8 +2409,8 @@ impl H264Decoder {
             let picture_order_count = self
                 .picture_order_count(&header, &sps)
                 .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-            if sps.chroma_format_idc == 2 {
-                let frame = decode_i_pcm_422_picture(&picture, &sps)
+            if sps.chroma_format_idc >= 2 {
+                let frame = decode_i_pcm_full_chroma_picture(&picture, &sps)
                     .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
                 self.cache_decoded_frame(display_index, frame.clone());
                 self.last_decoded_sample_index = Some(sample_index);

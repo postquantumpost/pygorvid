@@ -59,16 +59,30 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
                 frame.height as u32,
             )
             .map_err(|e| format!("create slideshow texture: {e}"))?;
-        let chroma_422 = frame.u.len() >= frame.u_stride * frame.height;
-        let (display_u, display_v) = if chroma_422 {
+        let chroma_full_height = frame.u.len() >= frame.u_stride * frame.height;
+        let (display_u, display_v, display_stride) = if chroma_full_height {
             let downsample = |plane: &[u8], stride: usize| {
-                let mut output = vec![0; stride * frame.height.div_ceil(2)];
+                let output_stride = frame.width.div_ceil(2);
+                let chroma_444 = stride >= frame.width;
+                let mut output = vec![0; output_stride * frame.height.div_ceil(2)];
                 for row in 0..frame.height.div_ceil(2) {
-                    for column in 0..stride {
-                        let first = plane[row * 2 * stride + column];
-                        let second = plane[((row * 2 + 1).min(frame.height - 1)) * stride + column];
-                        output[row * stride + column] =
-                            ((u16::from(first) + u16::from(second) + 1) / 2) as u8;
+                    for column in 0..output_stride {
+                        let sample = |source_row: usize| {
+                            if chroma_444 {
+                                let x = column * 2;
+                                (u16::from(plane[source_row * stride + x.min(frame.width - 1)])
+                                    + u16::from(
+                                        plane[source_row * stride + (x + 1).min(frame.width - 1)],
+                                    )
+                                    + 1)
+                                    / 2
+                            } else {
+                                u16::from(plane[source_row * stride + column])
+                            }
+                        };
+                        output[row * output_stride + column] =
+                            ((sample(row * 2) + sample((row * 2 + 1).min(frame.height - 1)) + 1)
+                                / 2) as u8;
                     }
                 }
                 output
@@ -76,9 +90,10 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
             (
                 downsample(&frame.u, frame.u_stride),
                 downsample(&frame.v, frame.v_stride),
+                frame.width.div_ceil(2),
             )
         } else {
-            (frame.u.clone(), frame.v.clone())
+            (frame.u.clone(), frame.v.clone(), frame.u_stride)
         };
         texture
             .update_yuv(
@@ -86,9 +101,9 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
                 &frame.y,
                 frame.y_stride,
                 &display_u,
-                frame.u_stride,
+                display_stride,
                 &display_v,
-                frame.v_stride,
+                display_stride,
             )
             .map_err(|e| format!("update slideshow texture: {e}"))?;
         canvas.clear();
