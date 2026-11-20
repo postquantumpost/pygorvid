@@ -451,7 +451,8 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
                                         const SpsInfo& sps,
                                         const PpsInfo& pps) {
     const auto header = parse_nal_header(nal);
-    if (header.unit_type != 1 && header.unit_type != 5) {
+    if (header.unit_type != 1 && header.unit_type != 2 &&
+        header.unit_type != 5) {
         invalid("NAL unit is not an I slice");
     }
     if (pps.sequence_parameter_set_id != sps.sps_id) {
@@ -891,6 +892,134 @@ PSliceHeader parse_p_slice_header(const std::vector<std::uint8_t>& nal,
         }
     }
     result.slice_data_bit_offset = reader.bit_offset();
+    return result;
+}
+
+namespace {
+
+std::vector<std::uint8_t> rbsp_to_ebsp(
+    const std::vector<std::uint8_t>& rbsp) {
+    std::vector<std::uint8_t> ebsp;
+    ebsp.reserve(rbsp.size() + rbsp.size() / 32);
+    std::size_t zero_count = 0;
+    for (const auto value : rbsp) {
+        if (zero_count >= 2 && value <= 3) {
+            ebsp.push_back(3);
+            zero_count = 0;
+        }
+        ebsp.push_back(value);
+        zero_count = value == 0 ? zero_count + 1 : 0;
+    }
+    return ebsp;
+}
+
+void append_bits(std::vector<std::uint8_t>& destination,
+                 const std::vector<std::uint8_t>& source,
+                 std::size_t begin, std::size_t end) {
+    for (auto offset = begin; offset < end; ++offset) {
+        destination.push_back(
+            (source[offset / 8] >> (7 - offset % 8)) & 1);
+    }
+}
+
+std::vector<std::uint8_t> pack_bits(
+    const std::vector<std::uint8_t>& bits) {
+    std::vector<std::uint8_t> packed(bits.size() / 8, 0);
+    for (std::size_t index = 0; index < bits.size(); ++index) {
+        packed[index / 8] |= static_cast<std::uint8_t>(
+            bits[index] << (7 - index % 8));
+    }
+    return packed;
+}
+
+} // namespace
+
+std::vector<std::vector<std::uint8_t>> coalesce_data_partition_slices(
+    const std::vector<std::vector<std::uint8_t>>& nals,
+    const SpsInfo& sps, const PpsInfo& pps) {
+    std::vector<std::vector<std::uint8_t>> result;
+    result.reserve(nals.size());
+    for (std::size_t index = 0; index < nals.size(); ++index) {
+        const auto nal_header = parse_nal_header(nals[index]);
+        if (nal_header.unit_type < 2 || nal_header.unit_type > 4) {
+            result.push_back(nals[index]);
+            continue;
+        }
+        if (nal_header.unit_type != 2 || index + 2 >= nals.size()) {
+            invalid("incomplete H.264 data partition");
+        }
+        const auto& partition_a = nals[index];
+        const auto& partition_b = nals[index + 1];
+        const auto& partition_c = nals[index + 2];
+        if (parse_nal_header(partition_b).unit_type != 3 ||
+            parse_nal_header(partition_c).unit_type != 4) {
+            invalid("H.264 data partitions are out of order");
+        }
+        auto pseudo_a = partition_a;
+        pseudo_a[0] = static_cast<std::uint8_t>((pseudo_a[0] & 0xe0) | 1);
+        const auto slice_header =
+            parse_idr_i_slice_header(pseudo_a, sps, pps);
+        if (slice_header.slice_type % 5 != 2) {
+            invalid("data partitioning supports I_PCM slices only");
+        }
+
+        const std::vector<std::uint8_t> a_ebsp(
+            partition_a.begin() + 1, partition_a.end());
+        const auto a_rbsp = ebsp_to_rbsp(a_ebsp);
+        BitReader a_reader(a_rbsp);
+        a_reader.restore_bit_offset(slice_header.slice_data_bit_offset);
+        const auto slice_id = a_reader.read_ue();
+        const auto body_start = a_reader.bit_offset();
+        if (a_reader.read_ue() != 25) {
+            invalid("partition A requires an I_PCM macroblock");
+        }
+        const auto body_end = a_reader.bit_offset();
+
+        const std::vector<std::uint8_t> b_ebsp(
+            partition_b.begin() + 1, partition_b.end());
+        const auto b_rbsp = ebsp_to_rbsp(b_ebsp);
+        BitReader b_reader(b_rbsp);
+        if (b_reader.read_ue() != slice_id) {
+            invalid("partition B slice_id does not match partition A");
+        }
+        const auto b_start =
+            (b_reader.bit_offset() + 7) / 8 * 8;
+        if (b_rbsp.empty() || b_rbsp.size() * 8 < 8 ||
+            b_rbsp.back() != 0x80) {
+            invalid("partition B lacks valid RBSP trailing bits");
+        }
+        const auto b_end = b_rbsp.size() * 8 - 8;
+        if (b_end < b_start) {
+            invalid("partition B lacks valid RBSP trailing bits");
+        }
+
+        const std::vector<std::uint8_t> c_ebsp(
+            partition_c.begin() + 1, partition_c.end());
+        const auto c_rbsp = ebsp_to_rbsp(c_ebsp);
+        BitReader c_reader(c_rbsp);
+        if (c_reader.read_ue() != slice_id ||
+            c_reader.more_rbsp_data()) {
+            invalid("partition C carries invalid or mismatched data");
+        }
+
+        std::vector<std::uint8_t> bits;
+        append_bits(
+            bits, a_rbsp, 0, slice_header.slice_data_bit_offset);
+        append_bits(bits, a_rbsp, body_start, body_end);
+        while (bits.size() % 8 != 0) {
+            bits.push_back(0);
+        }
+        append_bits(bits, b_rbsp, b_start, b_end);
+        bits.push_back(1);
+        while (bits.size() % 8 != 0) {
+            bits.push_back(0);
+        }
+        const auto rbsp = pack_bits(bits);
+        auto ebsp = rbsp_to_ebsp(rbsp);
+        ebsp.insert(ebsp.begin(), pseudo_a[0]);
+        result.push_back(std::move(ebsp));
+        index += 2;
+    }
     return result;
 }
 

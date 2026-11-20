@@ -211,18 +211,41 @@ std::size_t decode_video(
     for (std::size_t sample_index = 0; sample_index < sample_count;
          ++sample_index) {
         const auto sample = sample_reader.sample_at(sample_index);
-        const auto nals = pygorvid::split_h264_sample_nals(
+        auto nals = pygorvid::split_h264_sample_nals(
             sample.data, configuration.nal_length_size);
+        for (const auto& nal : nals) {
+            if (pygorvid::parse_nal_header(nal).unit_type != 2) {
+                continue;
+            }
+            const auto pps_id = slice_pps_id(nal);
+            const auto pps = std::find_if(
+                picture_parameter_sets.begin(), picture_parameter_sets.end(),
+                [pps_id](const auto& entry) {
+                    return entry.picture_parameter_set_id == pps_id;
+                });
+            if (pps == picture_parameter_sets.end()) {
+                throw std::runtime_error(
+                    "partitioned slice references a PPS missing from avcC");
+            }
+            const auto sps = std::find_if(
+                sequence_parameter_sets.begin(), sequence_parameter_sets.end(),
+                [&pps](const auto& entry) {
+                    return entry.sps_id == pps->sequence_parameter_set_id;
+                });
+            if (sps == sequence_parameter_sets.end()) {
+                throw std::runtime_error(
+                    "partitioned slice PPS references an SPS missing from avcC");
+            }
+            nals = pygorvid::coalesce_data_partition_slices(
+                nals, *sps, *pps);
+            break;
+        }
         std::vector<std::vector<std::uint8_t>> slices;
         const pygorvid::SpsInfo* selected_sps = nullptr;
         const pygorvid::PpsInfo* selected_pps = nullptr;
         for (const auto& nal : nals) {
             const auto header = pygorvid::parse_nal_header(nal);
             if (header.unit_type != 1 && header.unit_type != 5) {
-                if (header.unit_type >= 2 && header.unit_type <= 4) {
-                    throw std::runtime_error(
-                        "data-partitioned H.264 slices are unsupported");
-                }
                 continue;
             }
             const auto pps_id = slice_pps_id(nal);

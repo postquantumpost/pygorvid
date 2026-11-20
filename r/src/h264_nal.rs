@@ -75,3 +75,17 @@ pub fn ebsp_to_rbsp(ebsp: &[u8]) -> io::Result<Vec<u8>> {
     }
     Ok(rbsp)
 }
+
+pub fn rbsp_to_ebsp(rbsp: &[u8]) -> Vec<u8> {
+    let mut ebsp = Vec::with_capacity(rbsp.len() + rbsp.len() / 32);
+    let mut zero_count = 0;
+    for &value in rbsp {
+        if zero_count >= 2 && value <= 0x03 {
+            ebsp.push(0x03);
+            zero_count = 0;
+        }
+        ebsp.push(value);
+        zero_count = if value == 0 { zero_count + 1 } else { 0 };
+    }
+    ebsp
+}

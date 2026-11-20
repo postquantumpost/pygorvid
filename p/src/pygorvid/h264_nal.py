@@ -55,3 +55,15 @@ def ebsp_to_rbsp(ebsp: bytes) -> bytes:
         rbsp.append(value)
         zero_count = zero_count + 1 if value == 0 else 0
     return bytes(rbsp)
+
+
+def rbsp_to_ebsp(rbsp: bytes) -> bytes:
+    ebsp = bytearray()
+    zero_count = 0
+    for value in rbsp:
+        if zero_count >= 2 and value <= 0x03:
+            ebsp.append(0x03)
+            zero_count = 0
+        ebsp.append(value)
+        zero_count = zero_count + 1 if value == 0 else 0
+    return bytes(ebsp)

@@ -37,6 +37,35 @@ func (decoder *H264Decoder) nativeSlices(sample CompressedSample) ([]nativeSlice
 	if err != nil {
 		return nil, err
 	}
+	for _, nal := range nals {
+		header, err := ParseNALHeader(nal)
+		if err != nil {
+			return nil, err
+		}
+		if header.UnitType != 2 {
+			continue
+		}
+		coalesced := false
+		for _, pps := range decoder.pictureParameterSets {
+			for _, sps := range decoder.sequenceParameterSets {
+				if sps.ID != pps.SequenceParameterSetID {
+					continue
+				}
+				nals, err = CoalesceDataPartitionSlices(nals, sps, pps)
+				if err == nil {
+					coalesced = true
+					break
+				}
+			}
+			if coalesced {
+				break
+			}
+		}
+		if !coalesced {
+			return nil, fmt.Errorf("cannot associate H.264 data partitions: %w", err)
+		}
+		break
+	}
 	var slices []nativeSlice
 	for _, nal := range nals {
 		nalHeader, err := ParseNALHeader(nal)

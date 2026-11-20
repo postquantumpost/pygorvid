@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from .bitreader import BitReader, BitstreamError
-from .h264_nal import NALUnitError, ebsp_to_rbsp, parse_nal_header
+from .h264_nal import NALUnitError, ebsp_to_rbsp, parse_nal_header, rbsp_to_ebsp
 from .h264_pps import PPSInfo
 from .h264_sps import SPSInfo
 from .h264_weighted_prediction import (
@@ -123,7 +123,7 @@ class PictureIdentity:
 def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
     try:
         nal_header = parse_nal_header(nal)
-        if nal_header.unit_type not in (1, 5):
+        if nal_header.unit_type not in (1, 2, 5):
             raise SliceHeaderError(f"NAL unit type {nal_header.unit_type} is not a coded slice")
         rbsp = ebsp_to_rbsp(nal[1:])
     except NALUnitError as error:
@@ -348,6 +348,83 @@ def parse_slice_header(nal: bytes, sps: SPSInfo, pps: PPSInfo) -> SliceHeader:
                 raise SliceHeaderError("slice cabac_alignment_one_bit is not 1")
     result["slice_data_bit_offset"] = reader.bit_offset
     return SliceHeader(**result)
+
+
+def coalesce_data_partition_slices(
+    nals: tuple[bytes, ...] | list[bytes], sps: SPSInfo, pps: PPSInfo
+) -> list[bytes]:
+    """Reassemble supported I_PCM partition A/B/C triplets as regular I-slice NALs."""
+    result: list[bytes] = []
+    index = 0
+    while index < len(nals):
+        nal = nals[index]
+        unit_type = parse_nal_header(nal).unit_type
+        if unit_type not in (2, 3, 4):
+            result.append(nal)
+            index += 1
+            continue
+        if unit_type != 2 or index + 2 >= len(nals):
+            raise SliceHeaderError("incomplete H.264 data partition")
+        partition_a, partition_b, partition_c = nals[index : index + 3]
+        if (
+            parse_nal_header(partition_b).unit_type != 3
+            or parse_nal_header(partition_c).unit_type != 4
+        ):
+            raise SliceHeaderError("H.264 data partitions are out of order")
+
+        header_byte = (partition_a[0] & 0xE0) | 1
+        pseudo_a = bytes((header_byte,)) + partition_a[1:]
+        header = parse_slice_header(pseudo_a, sps, pps)
+        if header.slice_type % 5 != 2:
+            raise SliceHeaderError("data partitioning supports I_PCM slices only")
+
+        a_rbsp = ebsp_to_rbsp(partition_a[1:])
+        a_reader = BitReader(a_rbsp)
+        a_reader.read_bits(header.slice_data_bit_offset)
+        slice_id = a_reader.read_ue()
+        body_start = a_reader.bit_offset
+        if a_reader.read_ue() != 25:
+            raise SliceHeaderError("partition A requires an I_PCM macroblock")
+        a_body_end = a_reader.bit_offset
+
+        b_rbsp = ebsp_to_rbsp(partition_b[1:])
+        b_reader = BitReader(b_rbsp)
+        if b_reader.read_ue() != slice_id:
+            raise SliceHeaderError("partition B slice_id does not match partition A")
+        b_start = (b_reader.bit_offset + 7) // 8 * 8
+        if len(b_rbsp) * 8 <= b_start or b_rbsp[-1] != 0x80:
+            raise SliceHeaderError("partition B lacks valid RBSP trailing bits")
+        b_end = len(b_rbsp) * 8 - 8
+
+        c_rbsp = ebsp_to_rbsp(partition_c[1:])
+        c_reader = BitReader(c_rbsp)
+        if c_reader.read_ue() != slice_id:
+            raise SliceHeaderError("partition C slice_id does not match partition A")
+        if c_reader.more_rbsp_data():
+            raise SliceHeaderError("partition C carries unsupported residual data")
+
+        bits = [
+            (a_rbsp[bit // 8] >> (7 - bit % 8)) & 1
+            for bit in range(header.slice_data_bit_offset)
+        ]
+        bits.extend(
+            (a_rbsp[bit // 8] >> (7 - bit % 8)) & 1
+            for bit in range(body_start, a_body_end)
+        )
+        bits.extend([0] * ((-len(bits)) % 8))
+        bits.extend(
+            (b_rbsp[bit // 8] >> (7 - bit % 8)) & 1
+            for bit in range(b_start, b_end)
+        )
+        bits.append(1)
+        bits.extend([0] * ((-len(bits)) % 8))
+        rbsp = bytes(
+            sum(bits[offset + bit] << (7 - bit) for bit in range(8))
+            for offset in range(0, len(bits), 8)
+        )
+        result.append(bytes((header_byte,)) + rbsp_to_ebsp(rbsp))
+        index += 3
+    return result
 
 
 def _read_ue(reader: BitReader, field: str) -> int:

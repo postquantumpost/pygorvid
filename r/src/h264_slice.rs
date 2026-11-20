@@ -168,7 +168,7 @@ pub fn group_slices_into_pictures(slices: &[SliceHeader]) -> Vec<Vec<SliceHeader
 
 pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Result<SliceHeader> {
     let nal_header = parse_nal_header(nal)?;
-    if nal_header.unit_type != 1 && nal_header.unit_type != 5 {
+    if !matches!(nal_header.unit_type, 1 | 2 | 5) {
         return Err(invalid(format!(
             "NAL unit type {} is not a coded slice",
             nal_header.unit_type
@@ -452,6 +452,109 @@ pub fn parse_slice_header(nal: &[u8], sps: &SpsInfo, pps: &PpsInfo) -> io::Resul
     }
     header.slice_data_bit_offset = reader.bit_offset();
     Ok(header)
+}
+
+pub fn coalesce_data_partition_slices(
+    nals: &[Vec<u8>],
+    sps: &SpsInfo,
+    pps: &PpsInfo,
+) -> io::Result<Vec<Vec<u8>>> {
+    let mut output = Vec::with_capacity(nals.len());
+    let mut index = 0;
+    while index < nals.len() {
+        let nal_header = parse_nal_header(&nals[index])?;
+        if !(2..=4).contains(&nal_header.unit_type) {
+            output.push(nals[index].clone());
+            index += 1;
+            continue;
+        }
+        if nal_header.unit_type != 2 || index + 2 >= nals.len() {
+            return Err(invalid("incomplete H.264 data partition"));
+        }
+        let (partition_a, partition_b, partition_c) =
+            (&nals[index], &nals[index + 1], &nals[index + 2]);
+        if parse_nal_header(partition_b)?.unit_type != 3
+            || parse_nal_header(partition_c)?.unit_type != 4
+        {
+            return Err(invalid("H.264 data partitions are out of order"));
+        }
+        let mut pseudo_a = partition_a.clone();
+        pseudo_a[0] = (pseudo_a[0] & 0xe0) | 1;
+        let header = parse_slice_header(&pseudo_a, sps, pps)?;
+        if header.slice_type % 5 != 2 {
+            return Err(invalid("data partitioning supports I_PCM slices only"));
+        }
+
+        let a_rbsp = ebsp_to_rbsp(&partition_a[1..])?;
+        let mut a_reader = BitReader::new(&a_rbsp);
+        let mut remaining = header.slice_data_bit_offset;
+        while remaining > 0 {
+            let count = remaining.min(32) as u8;
+            a_reader.read_bits(count)?;
+            remaining -= usize::from(count);
+        }
+        let slice_id = read_ue(&mut a_reader, "slice_id")?;
+        let body_start = a_reader.bit_offset();
+        if read_ue(&mut a_reader, "mb_type")? != 25 {
+            return Err(invalid("partition A requires an I_PCM macroblock"));
+        }
+        let a_body_end = a_reader.bit_offset();
+
+        let b_rbsp = ebsp_to_rbsp(&partition_b[1..])?;
+        let mut b_reader = BitReader::new(&b_rbsp);
+        if read_ue(&mut b_reader, "partition B slice_id")? != slice_id {
+            return Err(invalid("partition B slice_id does not match partition A"));
+        }
+        let b_start = (b_reader.bit_offset() + 7) / 8 * 8;
+        let b_end = b_rbsp
+            .len()
+            .checked_mul(8)
+            .and_then(|bits| bits.checked_sub(8))
+            .ok_or_else(|| invalid("partition B lacks RBSP trailing bits"))?;
+        if b_end < b_start || b_rbsp.last() != Some(&0x80) {
+            return Err(invalid("partition B lacks valid RBSP trailing bits"));
+        }
+
+        let c_rbsp = ebsp_to_rbsp(&partition_c[1..])?;
+        let mut c_reader = BitReader::new(&c_rbsp);
+        if read_ue(&mut c_reader, "partition C slice_id")? != slice_id {
+            return Err(invalid("partition C slice_id does not match partition A"));
+        }
+        if c_reader.more_rbsp_data() {
+            return Err(invalid("partition C carries unsupported residual data"));
+        }
+
+        let mut bits = copy_bits(&a_rbsp, 0, header.slice_data_bit_offset);
+        bits.extend(copy_bits(&a_rbsp, body_start, a_body_end));
+        while bits.len() % 8 != 0 {
+            bits.push(0);
+        }
+        bits.extend(copy_bits(&b_rbsp, b_start, b_end));
+        bits.push(1);
+        while bits.len() % 8 != 0 {
+            bits.push(0);
+        }
+        let rbsp = pack_bits(&bits);
+        let mut nal = vec![pseudo_a[0]];
+        nal.extend(crate::rbsp_to_ebsp(&rbsp));
+        output.push(nal);
+        index += 3;
+    }
+    Ok(output)
+}
+
+fn copy_bits(source: &[u8], start: usize, end: usize) -> Vec<u8> {
+    (start..end)
+        .map(|offset| (source[offset / 8] >> (7 - offset % 8)) & 1)
+        .collect()
+}
+
+fn pack_bits(bits: &[u8]) -> Vec<u8> {
+    let mut output = vec![0; bits.len() / 8];
+    for (index, &bit) in bits.iter().enumerate() {
+        output[index / 8] |= bit << (7 - index % 8);
+    }
+    output
 }
 
 fn read_ref_pic_list_reordering(

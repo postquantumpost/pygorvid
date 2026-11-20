@@ -1084,7 +1084,29 @@ impl H264Decoder {
         for sample in samples {
             let nal_units = crate::split_h264_sample_nals(&sample.data, nal_length_size)
                 .map_err(|error| invalid(format!("sample {}: {error}", sample.index)))?;
-            for nal_unit in nal_units {
+            let mut owned_nal_units: Vec<Vec<u8>> =
+                nal_units.into_iter().map(<[u8]>::to_vec).collect();
+            if owned_nal_units.iter().any(|nal| nal[0] & 0x1f == 2) {
+                let mut coalesced = None;
+                for pps_nal in &picture_parameter_sets {
+                    let pps = crate::parse_pps(pps_nal)?;
+                    let Some(sps) = sequence_parameter_sets
+                        .iter()
+                        .find(|sps| sps.sps_id == pps.sequence_parameter_set_id)
+                    else {
+                        continue;
+                    };
+                    if let Ok(nals) =
+                        crate::coalesce_data_partition_slices(&owned_nal_units, sps, &pps)
+                    {
+                        coalesced = Some(nals);
+                        break;
+                    }
+                }
+                owned_nal_units =
+                    coalesced.ok_or_else(|| invalid("cannot associate H.264 data partitions"))?;
+            }
+            for nal_unit in &owned_nal_units {
                 let nal_header = crate::parse_nal_header(nal_unit)
                     .map_err(|error| invalid(format!("sample {}: {error}", sample.index)))?;
                 if !matches!(nal_header.unit_type, 1 | 5) {

@@ -168,6 +168,9 @@ std::vector<std::vector<std::uint8_t>> split_length_prefixed_nals(
     const std::vector<std::uint8_t>& data, std::size_t length_size);
 std::vector<std::vector<std::uint8_t>> split_h264_sample_nals(
     const std::vector<std::uint8_t>& data, std::size_t length_size);
+std::vector<std::vector<std::uint8_t>> coalesce_data_partition_slices(
+    const std::vector<std::vector<std::uint8_t>>& nals,
+    const SpsInfo& sps, const PpsInfo& pps);
 SpsInfo parse_sps(const std::vector<std::uint8_t>& nal);
 PpsInfo parse_pps(const std::vector<std::uint8_t>& nal);
 IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,

@@ -176,7 +176,7 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 	if err != nil {
 		return SliceHeader{}, err
 	}
-	if nalHeader.UnitType != 1 && nalHeader.UnitType != 5 {
+	if nalHeader.UnitType != 1 && nalHeader.UnitType != 2 && nalHeader.UnitType != 5 {
 		return SliceHeader{}, fmt.Errorf("NAL unit type %d is not a coded slice", nalHeader.UnitType)
 	}
 	if pps.SequenceParameterSetID != sps.ID {
@@ -459,6 +459,130 @@ func ParseSliceHeader(nal []byte, sps SPSInfo, pps PPSInfo) (SliceHeader, error)
 	}
 	header.SliceDataBitOffset = reader.bitOffset
 	return header, nil
+}
+
+// CoalesceDataPartitionSlices reconstructs supported I_PCM A/B/C partitions as normal I slices.
+func CoalesceDataPartitionSlices(nals [][]byte, sps SPSInfo, pps PPSInfo) ([][]byte, error) {
+	result := make([][]byte, 0, len(nals))
+	for index := 0; index < len(nals); index++ {
+		header, err := ParseNALHeader(nals[index])
+		if err != nil {
+			return nil, err
+		}
+		if header.UnitType < 2 || header.UnitType > 4 {
+			result = append(result, nals[index])
+			continue
+		}
+		if header.UnitType != 2 || index+2 >= len(nals) {
+			return nil, fmt.Errorf("incomplete H.264 data partition")
+		}
+		partitionA, partitionB, partitionC := nals[index], nals[index+1], nals[index+2]
+		headerB, err := ParseNALHeader(partitionB)
+		if err != nil {
+			return nil, err
+		}
+		headerC, err := ParseNALHeader(partitionC)
+		if err != nil {
+			return nil, err
+		}
+		if headerB.UnitType != 3 || headerC.UnitType != 4 {
+			return nil, fmt.Errorf("H.264 data partitions are out of order")
+		}
+		pseudoA := append([]byte{partitionA[0]&0xe0 | 1}, partitionA[1:]...)
+		sliceHeader, err := ParseSliceHeader(pseudoA, sps, pps)
+		if err != nil {
+			return nil, err
+		}
+		if sliceHeader.SliceType%5 != 2 {
+			return nil, fmt.Errorf("data partitioning supports I_PCM slices only")
+		}
+
+		aRBSP, err := EBSPToRBSP(partitionA[1:])
+		if err != nil {
+			return nil, err
+		}
+		aReader := NewBitReader(aRBSP)
+		if _, err := aReader.ReadBits(int(sliceHeader.SliceDataBitOffset)); err != nil {
+			return nil, err
+		}
+		sliceID, err := aReader.ReadUE()
+		if err != nil {
+			return nil, err
+		}
+		bodyStart := aReader.bitOffset
+		mbType, err := aReader.ReadUE()
+		if err != nil {
+			return nil, err
+		}
+		if mbType != 25 {
+			return nil, fmt.Errorf("partition A requires an I_PCM macroblock")
+		}
+		aBodyEnd := aReader.bitOffset
+
+		bRBSP, err := EBSPToRBSP(partitionB[1:])
+		if err != nil {
+			return nil, err
+		}
+		bReader := NewBitReader(bRBSP)
+		bSliceID, err := bReader.ReadUE()
+		if err != nil {
+			return nil, err
+		}
+		if bSliceID != sliceID {
+			return nil, fmt.Errorf("partition B slice_id does not match partition A")
+		}
+		bStart := (bReader.bitOffset + 7) / 8 * 8
+		bEnd := uint64(len(bRBSP))*8 - 8
+		if bEnd < bStart || bRBSP[len(bRBSP)-1] != 0x80 {
+			return nil, fmt.Errorf("partition B lacks valid RBSP trailing bits")
+		}
+
+		cRBSP, err := EBSPToRBSP(partitionC[1:])
+		if err != nil {
+			return nil, err
+		}
+		cReader := NewBitReader(cRBSP)
+		cSliceID, err := cReader.ReadUE()
+		if err != nil {
+			return nil, err
+		}
+		if cSliceID != sliceID {
+			return nil, fmt.Errorf("partition C slice_id does not match partition A")
+		}
+		if cReader.MoreRBSPData() {
+			return nil, fmt.Errorf("partition C carries unsupported residual data")
+		}
+
+		bits := appendBits(nil, aRBSP, 0, sliceHeader.SliceDataBitOffset)
+		bits = appendBits(bits, aRBSP, bodyStart, aBodyEnd)
+		for len(bits)%8 != 0 {
+			bits = append(bits, 0)
+		}
+		bits = appendBits(bits, bRBSP, bStart, bEnd)
+		bits = append(bits, 1)
+		for len(bits)%8 != 0 {
+			bits = append(bits, 0)
+		}
+		rbsp := packBits(bits)
+		result = append(result, append([]byte{pseudoA[0]}, RBSPToEBSP(rbsp)...))
+		index += 2
+	}
+	return result, nil
+}
+
+func appendBits(dst []byte, source []byte, start, end uint64) []byte {
+	for offset := start; offset < end; offset++ {
+		dst = append(dst, (source[offset/8]>>(7-offset%8))&1)
+	}
+	return dst
+}
+
+func packBits(bits []byte) []byte {
+	packed := make([]byte, len(bits)/8)
+	for index, bit := range bits {
+		packed[index/8] |= bit << (7 - index%8)
+	}
+	return packed
 }
 
 func parseRefPicListReordering(reader *BitReader, listName string) (bool, []RefPicListModification, error) {

@@ -83,7 +83,8 @@ pub use imageencoder::{encode_jpeg_frame, encode_png_frame};
 pub use mp4file::Mp4File;
 pub use mp4writer::{Mp4Metadata, Mp4Writer};
 pub use nal::{
-    ebsp_to_rbsp, parse_nal_header, split_h264_sample_nals, split_length_prefixed_nals, NalHeader,
+    ebsp_to_rbsp, parse_nal_header, rbsp_to_ebsp, split_h264_sample_nals,
+    split_length_prefixed_nals, NalHeader,
 };
 pub use pps::{parse_pps, parse_pps_syntax, PpsInfo};
 pub use reconstruction::{
@@ -134,8 +135,8 @@ pub use reconstruction::{
     ReferencePictureBuffer, Yuv420FrameBuilder,
 };
 pub use slice::{
-    group_slices_into_pictures, parse_slice_header, same_primary_picture, PictureIdentity,
-    RefPicListModification, SliceHeader,
+    coalesce_data_partition_slices, group_slices_into_pictures, parse_slice_header,
+    same_primary_picture, PictureIdentity, RefPicListModification, SliceHeader,
 };
 pub use sps::{parse_sps, parse_sps_syntax, SpsInfo};
 mod h264_weighted_prediction;

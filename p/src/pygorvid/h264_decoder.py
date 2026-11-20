@@ -34,6 +34,7 @@ from .h264_slice import (
     MemoryManagementOperation,
     SliceHeader,
     SliceHeaderError,
+    coalesce_data_partition_slices,
     parse_slice_header,
     same_primary_picture,
 )
@@ -585,6 +586,17 @@ class H264Decoder:
                 nal_units = split_h264_sample_nals(sample.data, configuration.nal_length_size)
             except NALUnitError as error:
                 raise DecoderError(f"sample {sample.index}: {error}") from error
+            matching_sets = []
+            for picture_set in picture_sets_by_id.values():
+                sequence_set = sequence_by_id.get(picture_set.sequence_parameter_set_id)
+                if sequence_set is not None:
+                    matching_sets.append((sequence_set, picture_set))
+            if matching_sets:
+                nal_units = tuple(
+                    coalesce_data_partition_slices(
+                        nal_units, matching_sets[0][0], matching_sets[0][1]
+                    )
+                )
             for nal_unit in nal_units:
                 try:
                     nal_header = parse_nal_header(nal_unit)

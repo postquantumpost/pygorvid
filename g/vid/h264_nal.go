@@ -124,3 +124,22 @@ func EBSPToRBSP(ebsp []byte) ([]byte, error) {
 	}
 	return rbsp, nil
 }
+
+// RBSPToEBSP inserts emulation-prevention bytes into RBSP data.
+func RBSPToEBSP(rbsp []byte) []byte {
+	ebsp := make([]byte, 0, len(rbsp)+len(rbsp)/32)
+	zeroCount := 0
+	for _, value := range rbsp {
+		if zeroCount >= 2 && value <= 0x03 {
+			ebsp = append(ebsp, 0x03)
+			zeroCount = 0
+		}
+		ebsp = append(ebsp, value)
+		if value == 0 {
+			zeroCount++
+		} else {
+			zeroCount = 0
+		}
+	}
+	return ebsp
+}
