@@ -186,9 +186,13 @@ func (syntax *cavlcSyntax) nc(plane, block int) int {
 	return max(0, max(left, top))
 }
 
+func (syntax *cavlcSyntax) dcNC() int {
+	return syntax.nc(0, 0)
+}
+
 func (syntax *cavlcSyntax) residual(reader *BitReader, category uint8) ([16]int32, bool, error) {
 	var levels [16]int32
-	plane, block, capacity, nc := 0, 0, 16, syntax.nc(0, 0)
+	plane, block, capacity, nc := 0, 0, 16, syntax.dcNC()
 	switch category {
 	case 0:
 	case 1, 2:

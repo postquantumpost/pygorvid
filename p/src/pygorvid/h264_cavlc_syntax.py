@@ -113,7 +113,7 @@ class CAVLCSyntax:
         return left if left is not None else top if top is not None else 0
 
     def residual(self, reader, category):
-        plane, block, capacity, nc = 0, 0, 16, self.nc(0, 0)
+        plane, block, capacity, nc = 0, 0, 16, self._dc_nc()
         if category in (1, 2):
             while self.luma_index < 16 and not self.luma_cbp & (1 << (self.luma_index // 4)):
                 self.luma_index += 1
@@ -140,6 +140,9 @@ class CAVLCSyntax:
             offset = 0 if plane == 0 else 16 + (plane - 1) * 4
             self.counts[offset + block] = decoded.total_coeff
         return list(decoded.coefficients) + [0] * (16 - capacity), bool(decoded.total_coeff)
+
+    def _dc_nc(self):
+        return self.nc(0, 0)
 
     def residual8x8(self, reader):
         levels = [0] * 64

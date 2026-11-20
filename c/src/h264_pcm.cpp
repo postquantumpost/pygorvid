@@ -2858,7 +2858,46 @@ Yuv420Frame decode_idr_i_frame_impl(
                     macroblock_luma_dc_coded[macroblock_address] =
                         decoded.coded;
                 } else {
-                    luma_dc = decode_cavlc_residual_block(reader, 0, 16);
+                    const auto dc_neighbor_count =
+                        [&](std::uint32_t neighbor_x,
+                            std::uint32_t neighbor_y, bool available)
+                            -> std::optional<std::uint8_t> {
+                        if (!available ||
+                            !decoded_macroblocks[
+                                static_cast<std::size_t>(neighbor_y / 4) *
+                                    macroblock_width +
+                                neighbor_x / 4] ||
+                            macroblock_slice_ids[
+                                static_cast<std::size_t>(neighbor_y / 4) *
+                                    macroblock_width +
+                                neighbor_x / 4] !=
+                                slice_id) {
+                            return std::nullopt;
+                        }
+                        return luma_total_coefficients[
+                            static_cast<std::size_t>(neighbor_y) *
+                                luma_block_width +
+                            neighbor_x];
+                    };
+                    const auto left_dc_count =
+                        dc_neighbor_count(
+                            macroblock_x == 0 ? 0 : macroblock_x * 4 - 1,
+                            macroblock_y * 4, left_available);
+                    const auto top_dc_count =
+                        dc_neighbor_count(
+                            macroblock_x * 4,
+                            macroblock_y == 0 ? 0 : macroblock_y * 4 - 1,
+                            top_available);
+                    const auto dc_nc = left_dc_count && top_dc_count
+                        ? (static_cast<std::int32_t>(*left_dc_count) +
+                           static_cast<std::int32_t>(*top_dc_count) + 1) / 2
+                        : left_dc_count
+                            ? static_cast<std::int32_t>(*left_dc_count)
+                            : top_dc_count
+                                ? static_cast<std::int32_t>(*top_dc_count)
+                                : 0;
+                    luma_dc = decode_cavlc_residual_block(
+                        reader, dc_nc, 16);
                     macroblock_luma_dc_coded[macroblock_address] =
                         luma_dc.total_coeff != 0;
                 }
@@ -3630,10 +3669,6 @@ Yuv420Frame decode_p_frame_with_lists(
     const auto& reference_frame = *reference_frames_l0.front();
     const auto* reference_frame_l1 =
         reference_frames_l1.empty() ? nullptr : reference_frames_l1.front();
-    if (!pps.deblocking_filter_control_present) {
-        throw std::runtime_error(
-            "P-picture decoding requires no slice groups and explicit deblocking control");
-    }
     if (!sps.frame_mbs_only || sps.chroma_format_idc != 1 ||
         sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 ||
         sps.coded_width == 0 || sps.coded_height == 0 ||
@@ -4991,7 +5026,45 @@ Yuv420Frame decode_p_frame_with_lists(
                     macroblock_luma_dc_coded[macroblock_address] =
                         residual.coded;
                 } else {
-                    luma_dc = decode_cavlc_residual_block(reader, 0, 16);
+                    const auto dc_neighbor_count =
+                        [&](std::uint32_t neighbor_x,
+                            std::uint32_t neighbor_y, bool available)
+                            -> std::optional<std::uint8_t> {
+                        if (!available ||
+                            !decoded_macroblocks[
+                                static_cast<std::size_t>(neighbor_y / 4) *
+                                    macroblock_width +
+                                neighbor_x / 4] ||
+                            macroblock_slice_ids[
+                                static_cast<std::size_t>(neighbor_y / 4) *
+                                    macroblock_width +
+                                neighbor_x / 4] != slice_id) {
+                            return std::nullopt;
+                        }
+                        return luma_total_coefficients[
+                            static_cast<std::size_t>(neighbor_y) *
+                                luma_block_width +
+                            neighbor_x];
+                    };
+                    const auto left_dc_count =
+                        dc_neighbor_count(
+                            macroblock_x == 0 ? 0 : macroblock_x * 4 - 1,
+                            macroblock_y * 4, left_available);
+                    const auto top_dc_count =
+                        dc_neighbor_count(
+                            macroblock_x * 4,
+                            macroblock_y == 0 ? 0 : macroblock_y * 4 - 1,
+                            top_available);
+                    const auto dc_nc = left_dc_count && top_dc_count
+                        ? (static_cast<std::int32_t>(*left_dc_count) +
+                           static_cast<std::int32_t>(*top_dc_count) + 1) / 2
+                        : left_dc_count
+                            ? static_cast<std::int32_t>(*left_dc_count)
+                            : top_dc_count
+                                ? static_cast<std::int32_t>(*top_dc_count)
+                                : 0;
+                    luma_dc = decode_cavlc_residual_block(
+                        reader, dc_nc, 16);
                     macroblock_luma_dc_coded[macroblock_address] =
                         luma_dc.total_coeff != 0;
                 }

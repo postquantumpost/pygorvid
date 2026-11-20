@@ -170,13 +170,17 @@ impl CavlcSyntax {
         }
     }
 
+    fn dc_nc(&self) -> i32 {
+        self.nc(0, 0)
+    }
+
     pub(crate) fn residual(
         &mut self,
         reader: &mut BitReader<'_>,
         category: u8,
     ) -> io::Result<([i32; 16], bool)> {
         let (plane, block, capacity, nc) = match category {
-            0 => (0, 0, 16, self.nc(0, 0)),
+            0 => (0, 0, 16, self.dc_nc()),
             1 | 2 => {
                 while self.luma_index < 16 && self.luma_cbp & (1 << (self.luma_index / 4)) == 0 {
                     self.luma_index += 1;
