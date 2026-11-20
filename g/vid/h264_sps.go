@@ -272,8 +272,8 @@ func validateSupportedSPS(info SPSInfo) error {
 	if info.ChromaFormatIDC < 1 || info.ChromaFormatIDC > 3 {
 		return fmt.Errorf("unsupported SPS chroma_format_idc %d: only 4:2:0, 4:2:2, and 4:4:4 are supported", info.ChromaFormatIDC)
 	}
-	if info.SeparateColourPlane {
-		return fmt.Errorf("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported")
+	if info.SeparateColourPlane && info.ChromaFormatIDC != 3 {
+		return fmt.Errorf("separate_colour_plane_flag requires 4:4:4 chroma")
 	}
 	if info.BitDepthLuma != 8 || info.BitDepthChroma != 8 {
 		return fmt.Errorf("unsupported SPS bit depth %d/%d: only 8-bit 4:2:0 is supported", info.BitDepthLuma, info.BitDepthChroma)

@@ -145,47 +145,68 @@ func decodeNativeIntraPCMFullChroma(slices []nativeSlice) (Yuv420Frame, error) {
 		V: make([]byte, chromaWidth*height),
 	}
 	widthMBs := width / 16
-	written := make([]bool, widthMBs*(height/16))
+	written := make([][3]bool, widthMBs*(height/16))
 	for _, slice := range slices {
 		reader := NewBitReader(slice.rbsp)
 		reader.bitOffset = slice.header.SliceDataBitOffset
 		address := int(slice.header.FirstMacroblockInSlice)
+		planeID := int(slice.header.ColourPlaneID)
 		for reader.MoreRBSPData() {
 			mbType, err := reader.ReadUE()
 			if err != nil {
 				return Yuv420Frame{}, err
 			}
-			if mbType != 25 || address >= len(written) || written[address] {
+			if mbType != 25 || address >= len(written) || written[address][planeID] {
 				return Yuv420Frame{}, fmt.Errorf("high-chroma decoder requires complete I_PCM macroblocks")
 			}
 			reader.AlignToByte()
 			mbX, mbY := address%widthMBs, address/widthMBs
-			for row := 0; row < 16; row++ {
-				for column := 0; column < 16; column++ {
-					value, err := reader.ReadBits(8)
-					if err != nil {
-						return Yuv420Frame{}, err
-					}
-					frame.Y[(mbY*16+row)*width+mbX*16+column] = byte(value)
-				}
-			}
-			for _, plane := range [][]byte{frame.U, frame.V} {
+			if sps.SeparateColourPlane {
+				planes := [3][]byte{frame.Y, frame.U, frame.V}
 				for row := 0; row < 16; row++ {
-					for column := 0; column < chromaMBWidth; column++ {
+					for column := 0; column < 16; column++ {
 						value, err := reader.ReadBits(8)
 						if err != nil {
 							return Yuv420Frame{}, err
 						}
-						plane[(mbY*16+row)*chromaWidth+mbX*chromaMBWidth+column] = byte(value)
+						planes[planeID][(mbY*16+row)*width+mbX*16+column] = byte(value)
+					}
+				}
+			} else {
+				for row := 0; row < 16; row++ {
+					for column := 0; column < 16; column++ {
+						value, err := reader.ReadBits(8)
+						if err != nil {
+							return Yuv420Frame{}, err
+						}
+						frame.Y[(mbY*16+row)*width+mbX*16+column] = byte(value)
+					}
+				}
+				for _, plane := range [][]byte{frame.U, frame.V} {
+					for row := 0; row < 16; row++ {
+						for column := 0; column < chromaMBWidth; column++ {
+							value, err := reader.ReadBits(8)
+							if err != nil {
+								return Yuv420Frame{}, err
+							}
+							plane[(mbY*16+row)*chromaWidth+mbX*chromaMBWidth+column] = byte(value)
+						}
 					}
 				}
 			}
-			written[address] = true
+			written[address][planeID] = true
 			address++
 		}
 	}
-	for _, complete := range written {
-		if !complete {
+	requiredPlanes := 1
+	if sps.SeparateColourPlane {
+		requiredPlanes = 3
+	}
+	for _, planes := range written {
+		for plane := 0; plane < requiredPlanes; plane++ {
+			if planes[plane] {
+				continue
+			}
 			return Yuv420Frame{}, fmt.Errorf("high-chroma I_PCM picture is incomplete")
 		}
 	}

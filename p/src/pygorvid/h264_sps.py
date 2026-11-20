@@ -74,8 +74,8 @@ def _validate_supported_sps(info: SPSInfo) -> None:
         raise SPSParseError(
             f"unsupported SPS chroma_format_idc {info.chroma_format_idc}: only 4:2:0, 4:2:2, and 4:4:4 are supported"
         )
-    if info.separate_colour_plane:
-        raise SPSParseError("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported")
+    if info.separate_colour_plane and info.chroma_format_idc != 3:
+        raise SPSParseError("separate_colour_plane_flag requires 4:4:4 chroma")
     if info.bit_depth_luma != 8 or info.bit_depth_chroma != 8:
         raise SPSParseError(
             f"unsupported SPS bit depth {info.bit_depth_luma}/{info.bit_depth_chroma}: only 8-bit 4:2:0 is supported"

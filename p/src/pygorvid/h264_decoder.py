@@ -632,7 +632,18 @@ class H264Decoder:
                     nal_unit=nal_unit,
                     header=parsed_header,
                 )
-                if not groups or not same_primary_picture(groups[-1][0].header, parsed_header):
+                if (
+                    not groups
+                    or groups[-1][0].sample_index != sample.index
+                    or (
+                        not parsed_header.separate_colour_plane
+                        and not same_primary_picture(groups[-1][0].header, parsed_header)
+                    )
+                    or (
+                        parsed_header.separate_colour_plane
+                        and groups[-1][0].header.colour_plane_id != 0
+                    )
+                ):
                     groups.append([dependency_slice])
                 else:
                     groups[-1].append(dependency_slice)
@@ -1699,7 +1710,10 @@ class H264Decoder:
         chroma_u = bytearray(chroma_width * height)
         chroma_v = bytearray(len(chroma_u))
         width_in_mbs = width // 16
-        written = [False] * (width_in_mbs * (height // 16))
+        written = [
+            [False] * (3 if sequence_set.separate_colour_plane else 1)
+            for _ in range(width_in_mbs * (height // 16))
+        ]
         from .bitreader import BitReader, BitstreamError
         from .h264_nal import ebsp_to_rbsp
 
@@ -1707,31 +1721,39 @@ class H264Decoder:
             for dependency_slice in picture:
                 reader = BitReader(ebsp_to_rbsp(dependency_slice.nal_unit[1:]))
                 address = dependency_slice.header.first_macroblock_in_slice
+                plane_id = dependency_slice.header.colour_plane_id
                 reader._bit_offset = dependency_slice.header.slice_data_bit_offset
                 while reader.more_rbsp_data():
-                    if address >= len(written) or written[address] or reader.read_ue() != 25:
+                    if address >= len(written) or written[address][plane_id] or reader.read_ue() != 25:
                         raise DecoderError(
                             "high-chroma decoding requires complete, non-overlapping I_PCM macroblocks"
                         )
                     reader.align_to_byte()
                     mb_x, mb_y = address % width_in_mbs, address // width_in_mbs
-                    for row in range(16):
-                        for column in range(16):
-                            luma[(mb_y * 16 + row) * width + mb_x * 16 + column] = (
-                                reader.read_bits(8)
-                            )
-                    for plane in (chroma_u, chroma_v):
+                    if sequence_set.separate_colour_plane:
+                        destination = (luma, chroma_u, chroma_v)[plane_id]
                         for row in range(16):
-                            for column in range(chroma_mb_width):
-                                plane[(mb_y * 16 + row) * chroma_width +
-                                      mb_x * chroma_mb_width + column] = (
+                            for column in range(16):
+                                destination[(mb_y * 16 + row) * width +
+                                            mb_x * 16 + column] = reader.read_bits(8)
+                    else:
+                        for row in range(16):
+                            for column in range(16):
+                                luma[(mb_y * 16 + row) * width + mb_x * 16 + column] = (
                                     reader.read_bits(8)
                                 )
-                    written[address] = True
+                        for plane in (chroma_u, chroma_v):
+                            for row in range(16):
+                                for column in range(chroma_mb_width):
+                                    plane[(mb_y * 16 + row) * chroma_width +
+                                          mb_x * chroma_mb_width + column] = (
+                                        reader.read_bits(8)
+                                    )
+                    written[address][plane_id] = True
                     address += 1
         except (BitstreamError, NALUnitError) as error:
             raise DecoderError(f"high-chroma I_PCM decoding failed: {error}") from error
-        if not all(written):
+        if any(not all(planes) for planes in written):
             raise DecoderError("high-chroma I_PCM picture is incomplete")
         left, top = sequence_set.frame_crop_left, sequence_set.frame_crop_top
         out_width, out_height = sequence_set.width, sequence_set.height

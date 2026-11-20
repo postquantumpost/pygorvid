@@ -180,7 +180,7 @@ fn rejects_unsupported_sps_feature_set() {
             false,
             [0; 4],
         ),
-        make_sps(100, 0, 42, concat!("1", "00100", "1", "1", "1")),
+        make_sps(100, 0, 42, concat!("1", "011", "1", "1", "1")),
     ] {
         assert!(parse_sps(&nal).is_err(), "accepted unsupported SPS {nal:?}");
     }

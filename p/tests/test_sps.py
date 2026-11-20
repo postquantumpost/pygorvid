@@ -68,11 +68,18 @@ def test_parse_sps_rejects_unsupported_feature_set():
         make_sps(118, 0, 42, "1" + "010" + "1" + "1"),
         make_sps(100, 0, 42, "1" + "00100" + "1" + "011" + "010"),
         make_sps(100, 0, 42, "1" + "010" + "1" + "1", frame_mbs_only=False),
-        make_sps(100, 0, 42, "1" + "00100" + "1" + "1" + "1"),
     ]
     for nal in unsupported_cases:
         with pytest.raises(SPSParseError, match="unsupported|not supported"):
             parse_sps(nal)
+
+
+def test_parse_sps_accepts_separate_colour_planes_for_444():
+    info = parse_sps(
+        make_sps(100, 0, 42, "1" + "00100" + "1" + "1" + "1")
+    )
+    assert info.chroma_format_idc == 3
+    assert info.separate_colour_plane
 
 
 def test_parse_sps_dimensions_and_crop_units():

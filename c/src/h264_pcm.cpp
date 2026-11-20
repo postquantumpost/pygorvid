@@ -3427,7 +3427,7 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
     const SpsInfo& sps, const PpsInfo& pps) {
     if (slice_nals.empty() || sps.chroma_format_idc < 2 ||
         !sps.frame_mbs_only || sps.bit_depth_luma != 8 ||
-        sps.bit_depth_chroma != 8 || sps.separate_colour_plane) {
+        sps.bit_depth_chroma != 8) {
         throw std::runtime_error(
             "high-chroma decoding currently supports progressive 8-bit I_PCM slices");
     }
@@ -3442,8 +3442,8 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
     frame.chroma_u.resize(
         checked_plane_size(chroma_width, frame.height));
     frame.chroma_v.resize(frame.chroma_u.size());
-    std::vector<bool> written(
-        (sps.coded_width / 16) * (sps.coded_height / 16), false);
+    std::vector<std::array<bool, 3>> written(
+        (sps.coded_width / 16) * (sps.coded_height / 16));
     for (const auto& nal : slice_nals) {
         const auto header = parse_idr_i_slice_header(nal, sps, pps);
         if (header.slice_type % 5 != 2) {
@@ -3454,7 +3454,8 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
         reader.restore_bit_offset(header.slice_data_bit_offset);
         auto address = static_cast<std::size_t>(header.first_macroblock_in_slice);
         while (reader.more_rbsp_data()) {
-            if (address >= written.size() || written[address] ||
+            const auto plane_id = static_cast<std::size_t>(header.colour_plane_id);
+            if (address >= written.size() || written[address][plane_id] ||
                 reader.read_ue() != 25) {
                 throw std::runtime_error(
                     "high-chroma decoder supports only complete, non-overlapping I_PCM macroblocks");
@@ -3462,28 +3463,47 @@ Yuv420Frame decode_idr_i_pcm_full_chroma_frame(
             reader.align_to_byte();
             const auto mb_x = address % (sps.coded_width / 16);
             const auto mb_y = address / (sps.coded_width / 16);
-            for (std::size_t row = 0; row < 16; ++row) {
-                for (std::size_t column = 0; column < 16; ++column) {
-                    frame.luma[(mb_y * 16 + row) * frame.width +
-                               mb_x * 16 + column] =
-                        static_cast<std::uint8_t>(reader.read_bits(8));
-                }
-            }
-            for (auto* plane : {&frame.chroma_u, &frame.chroma_v}) {
+            if (sps.separate_colour_plane) {
+                auto* destination = plane_id == 0 ? &frame.luma
+                    : plane_id == 1 ? &frame.chroma_u : &frame.chroma_v;
                 for (std::size_t row = 0; row < 16; ++row) {
-                    for (std::size_t column = 0;
-                         column < chroma_macroblock_width; ++column) {
-                        (*plane)[(mb_y * 16 + row) * chroma_width +
-                                 mb_x * chroma_macroblock_width + column] =
+                    for (std::size_t column = 0; column < 16; ++column) {
+                        (*destination)[(mb_y * 16 + row) * frame.width +
+                                       mb_x * 16 + column] =
                             static_cast<std::uint8_t>(reader.read_bits(8));
                     }
                 }
+            } else {
+                for (std::size_t row = 0; row < 16; ++row) {
+                    for (std::size_t column = 0; column < 16; ++column) {
+                        frame.luma[(mb_y * 16 + row) * frame.width +
+                                   mb_x * 16 + column] =
+                            static_cast<std::uint8_t>(reader.read_bits(8));
+                    }
+                }
+                for (auto* plane : {&frame.chroma_u, &frame.chroma_v}) {
+                    for (std::size_t row = 0; row < 16; ++row) {
+                        for (std::size_t column = 0;
+                             column < chroma_macroblock_width; ++column) {
+                            (*plane)[(mb_y * 16 + row) * chroma_width +
+                                     mb_x * chroma_macroblock_width + column] =
+                                static_cast<std::uint8_t>(reader.read_bits(8));
+                        }
+                    }
+                }
             }
-            written[address] = true;
+            written[address][plane_id] = true;
             ++address;
         }
     }
-    if (std::find(written.begin(), written.end(), false) != written.end()) {
+    const auto required_plane_count = sps.separate_colour_plane ? 3U : 1U;
+    if (std::any_of(written.begin(), written.end(),
+                    [required_plane_count](const auto& planes) {
+                        for (std::size_t plane = 0; plane < required_plane_count; ++plane) {
+                            if (!planes[plane]) return true;
+                        }
+                        return false;
+                    })) {
         throw std::runtime_error("high-chroma I_PCM picture is incomplete");
     }
     return crop_decoded_frame(std::move(frame), sps);

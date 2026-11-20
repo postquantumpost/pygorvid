@@ -214,7 +214,13 @@ func (decoder *H264Decoder) decodeNativeDependencies(index uint64) (Yuv420Frame,
 		}
 		first := slices[0]
 		for _, slice := range slices {
-			if slice.header.PictureIdentity() != first.header.PictureIdentity() || slice.sps.ID != first.sps.ID {
+			firstIdentity := first.header.PictureIdentity()
+			identity := slice.header.PictureIdentity()
+			if first.header.SeparateColourPlane {
+				firstIdentity.ColourPlaneID = 0
+				identity.ColourPlaneID = 0
+			}
+			if identity != firstIdentity || slice.sps.ID != first.sps.ID {
 				return Yuv420Frame{}, ErrDecoderUnsupportedFeature
 			}
 		}

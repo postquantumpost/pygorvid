@@ -185,7 +185,7 @@ func TestParseSPSRejectsUnsupportedFeatureSet(t *testing.T) {
 		{name: "unsupported chroma format", nal: makeCompleteSPS(100, 0, 42, "1"+"00100"+"1"+"011"+"010", 0, 0, true, [4]uint32{})},
 		{name: "unsupported bit depth", nal: makeCompleteSPS(100, 0, 42, "1"+"010"+"011"+"011", 0, 0, true, [4]uint32{})},
 		{name: "unsupported progressiveness", nal: makeCompleteSPS(100, 0, 42, "1"+"010"+"1"+"1", 0, 0, false, [4]uint32{})},
-		{name: "unsupported separate colour plane", nal: makeCompleteSPS(100, 0, 42, "1"+"00100"+"1"+"1"+"1", 0, 0, true, [4]uint32{})},
+		{name: "unsupported separate colour plane", nal: makeCompleteSPS(100, 0, 42, "1"+"011"+"1"+"1"+"1", 0, 0, true, [4]uint32{})},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -485,7 +485,8 @@ fn decode_i_pcm_full_chroma_picture(
     let mut y = vec![0; width * height];
     let mut u = vec![0; chroma_width * height];
     let mut v = vec![0; u.len()];
-    let mut written = vec![false; width_in_mbs * (height / 16)];
+    let plane_count = if sps.separate_colour_plane { 3 } else { 1 };
+    let mut written = vec![[false; 3]; width_in_mbs * (height / 16)];
     for slice in picture {
         let rbsp = crate::ebsp_to_rbsp(
             slice
@@ -499,8 +500,9 @@ fn decode_i_pcm_full_chroma_picture(
             reader.read_bits((offset - chunk).min(32) as u8)?;
         }
         let mut address = slice.header.first_macroblock_in_slice as usize;
+        let plane_id = slice.header.colour_plane_id as usize;
         while reader.more_rbsp_data() {
-            if address >= written.len() || written[address] || reader.read_ue()? != 25 {
+            if address >= written.len() || written[address][plane_id] || reader.read_ue()? != 25 {
                 return Err(invalid(
                     "high-chroma decoder requires complete, non-overlapping I_PCM macroblocks",
                 ));
@@ -508,24 +510,43 @@ fn decode_i_pcm_full_chroma_picture(
             reader.align_to_byte();
             let mb_x = address % width_in_mbs;
             let mb_y = address / width_in_mbs;
-            for row in 0..16 {
-                for column in 0..16 {
-                    y[(mb_y * 16 + row) * width + mb_x * 16 + column] = reader.read_bits(8)? as u8;
-                }
-            }
-            for plane in [&mut u, &mut v] {
+            if sps.separate_colour_plane {
+                let destination = match plane_id {
+                    0 => &mut y,
+                    1 => &mut u,
+                    _ => &mut v,
+                };
                 for row in 0..16 {
-                    for column in 0..chroma_mb_width {
-                        plane[(mb_y * 16 + row) * chroma_width + mb_x * chroma_mb_width + column] =
+                    for column in 0..16 {
+                        destination[(mb_y * 16 + row) * width + mb_x * 16 + column] =
                             reader.read_bits(8)? as u8;
                     }
                 }
+            } else {
+                for row in 0..16 {
+                    for column in 0..16 {
+                        y[(mb_y * 16 + row) * width + mb_x * 16 + column] =
+                            reader.read_bits(8)? as u8;
+                    }
+                }
+                for plane in [&mut u, &mut v] {
+                    for row in 0..16 {
+                        for column in 0..chroma_mb_width {
+                            plane[(mb_y * 16 + row) * chroma_width
+                                + mb_x * chroma_mb_width
+                                + column] = reader.read_bits(8)? as u8;
+                        }
+                    }
+                }
             }
-            written[address] = true;
+            written[address][plane_id] = true;
             address += 1;
         }
     }
-    if written.iter().any(|complete| !complete) {
+    if written
+        .iter()
+        .any(|planes| planes[..plane_count].iter().any(|complete| !complete))
+    {
         return Err(invalid("high-chroma I_PCM picture is incomplete"));
     }
     let out_width = sps.width as usize;
@@ -1266,7 +1287,8 @@ impl H264Decoder {
                 };
                 if pictures.last().is_none_or(|picture| {
                     picture[0].sample_index != slice.sample_index
-                        || !crate::same_primary_picture(&picture[0].header, &slice.header)
+                        || (!slice.header.separate_colour_plane
+                            && !crate::same_primary_picture(&picture[0].header, &slice.header))
                 }) {
                     pictures.push(vec![slice]);
                 } else if let Some(picture) = pictures.last_mut() {

@@ -160,8 +160,8 @@ void validate_supported_sps(const SpsInfo& info) {
                 std::to_string(info.chroma_format_idc) +
                 ": only 4:2:0, 4:2:2, and 4:4:4 are supported");
     }
-    if (info.separate_colour_plane) {
-        invalid("unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported");
+    if (info.separate_colour_plane && info.chroma_format_idc != 3) {
+        invalid("separate_colour_plane_flag requires 4:4:4 chroma");
     }
     if (info.bit_depth_luma != 8 || info.bit_depth_chroma != 8) {
         invalid("unsupported SPS bit depth " + std::to_string(info.bit_depth_luma) + "/" +
@@ -479,6 +479,17 @@ IdrSliceHeader parse_idr_i_slice_header(const std::vector<std::uint8_t>& nal,
         invalid("slice references PPS " +
                 std::to_string(result.picture_parameter_set_id) +
                 ", supplied PPS is " + std::to_string(pps.picture_parameter_set_id));
+    }
+    if (sps.separate_colour_plane) {
+        try {
+            result.colour_plane_id = static_cast<std::uint8_t>(
+                reader.read_bits(2));
+        } catch (const std::exception& error) {
+            throw context("slice", "colour_plane_id", error);
+        }
+        if (result.colour_plane_id > 2) {
+            invalid("colour_plane_id is reserved");
+        }
     }
     const auto frame_num_bits = sps.log2_max_frame_num_minus4 + 4;
     try {

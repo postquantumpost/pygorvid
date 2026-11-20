@@ -49,10 +49,8 @@ fn validate_supported_sps(info: &SpsInfo) -> io::Result<()> {
             info.chroma_format_idc
         )));
     }
-    if info.separate_colour_plane {
-        return Err(invalid(
-            "unsupported SPS separate_colour_plane_flag: only interleaved 4:2:0 is supported",
-        ));
+    if info.separate_colour_plane && info.chroma_format_idc != 3 {
+        return Err(invalid("separate_colour_plane_flag requires 4:4:4 chroma"));
     }
     if info.bit_depth_luma != 8 || info.bit_depth_chroma != 8 {
         return Err(invalid(format!(
