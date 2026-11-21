@@ -1,7 +1,6 @@
-"""Codec-neutral decoder selection, error codes, and execution defaults."""
+"""Codec-neutral decoder selection and error codes."""
 
 from enum import Enum
-import os
 
 
 class VideoCodec(str, Enum):
@@ -23,10 +22,6 @@ class CodecError(DecoderError):
     def __init__(self, code: CodecErrorCode, message: str):
         super().__init__(message)
         self.code = code
-
-
-def default_decoder_threads() -> int:
-    return max(1, (os.cpu_count() or 1) // 2)
 
 
 def read_codec_configuration(entry, timescale):

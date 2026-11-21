@@ -487,11 +487,12 @@ SPS, PPS and failing 1,092-byte final NAL from that sample (one hex record per
 line). `weighted-eos-32x32.mp4` is derived from `weighted-32x32.mp4` by appending
 the same five-byte marker to its final slice and adjusting the NAL length,
 sample size and `mdat` size. It must decode to the original reference YUV in
-all four languages with one and four threads.
+all four language implementations. The C, Go, and Rust decoders are also checked
+with one and four threads.
 
-`--threads N` sets the number of decoder threads (default: half the available
-processors). Output is identical for every thread count. The Python decoder uses
-forked worker processes for this, since CPython threads share one interpreter lock.
+`--threads N` sets the number of decoder threads for the C, Go, and Rust
+implementations. The Python CLI accepts and validates the option for future use,
+but currently always decodes synchronously.
 `--verbose` enables decoder progress and diagnostic output; without it, the tool
 prints only its normal per-file result.
 

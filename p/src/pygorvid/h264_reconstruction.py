@@ -4,10 +4,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
-import mmap
-import multiprocessing
-import os
-import time
 from typing import Optional, Sequence
 
 
@@ -921,10 +917,8 @@ def deblock_yuv420_picture(
     macroblocks: Sequence[PictureDeblockingMacroblock],
     *,
     timeout_check: Callable[[], None] | None = None,
-    threads: int = 1,
 ) -> "Yuv420Frame":
-    """Deblock a picture; with threads > 1, macroblock rows run as a wavefront in forked
-    worker processes and produce the same result as raster order."""
+    """Deblock a picture in raster order."""
     if timeout_check is not None and not callable(timeout_check):
         raise DeblockingError("picture deblocking timeout check must be callable")
     if frame.width % 16 or frame.height % 16 or frame.width <= 0 or frame.height <= 0:
@@ -959,133 +953,16 @@ def deblock_yuv420_picture(
             raise DeblockingError("picture deblocking plane layout is invalid")
         planes.append(bytearray(b"".join(plane[row * stride:row * stride + width] for row in range(height))))
 
-    rows = frame.height // 16
-    if (
-        threads > 1
-        and rows > 1
-        and len(macroblocks) >= 4096
-        and "fork" in multiprocessing.get_all_start_methods()
-    ):
+    for address in range(len(macroblocks)):
         if timeout_check is not None:
             timeout_check()
-        if not _deblock_wavefront(planes, frame.width, macroblocks, qpc, width_in_mbs, min(threads, rows)):
-            # Re-run serially so the failure surfaces with its original exception.
-            return deblock_yuv420_picture(frame, macroblocks, timeout_check=timeout_check)
-    else:
-        for address in range(len(macroblocks)):
-            if timeout_check is not None:
-                timeout_check()
-            _deblock_picture_macroblock(
-                planes, frame.width, frame.height, 0, 0, macroblocks, qpc, width_in_mbs, address
-            )
+        _deblock_picture_macroblock(
+            planes, frame.width, frame.height, 0, 0, macroblocks, qpc, width_in_mbs, address
+        )
     return Yuv420Frame(
         frame.width, frame.height, frame.width, frame.width // 2, frame.width // 2,
         bytes(planes[0]), bytes(planes[1]), bytes(planes[2]),
     )
-
-
-def _deblock_wavefront(planes, width, macroblocks, qpc, width_in_mbs, workers) -> bool:
-    """Deblock planes in place using forked workers; return False if any worker failed.
-
-    A macroblock reads and writes at most four luma samples into its left and top
-    neighbors, so it may start once the row above has finished the macroblock to its upper
-    right. Each macroblock filters a private copy of that window, so concurrently active
-    windows never overlap.
-    """
-    context = multiprocessing.get_context("fork")
-    shared = []
-    for plane in planes:
-        buffer = mmap.mmap(-1, len(plane))
-        buffer[:] = plane
-        shared.append(buffer)
-    rows = len(macroblocks) // width_in_mbs
-    progress = context.Array("q", rows)
-    failed = context.Value("b", 0)
-
-    def run(worker: int) -> None:
-        buffers = [bytearray(), bytearray(), bytearray()]
-        for row in range(worker, rows, workers):
-            for column in range(width_in_mbs):
-                if row:
-                    required = min(column + 2, width_in_mbs)
-                    while True:
-                        with progress.get_lock():
-                            if progress[row - 1] >= required:
-                                break
-                        if failed.value:
-                            return
-                        time.sleep(0.0002)
-                origin_x = max(column * 16 - 4, 0)
-                origin_y = max(row * 16 - 4, 0)
-                view_width = column * 16 + 16 - origin_x
-                view_height = row * 16 + 16 - origin_y
-                windows = (
-                    (origin_x, origin_y, view_width, view_height, width),
-                    (origin_x // 2, origin_y // 2, view_width // 2, view_height // 2, width // 2),
-                    (origin_x // 2, origin_y // 2, view_width // 2, view_height // 2, width // 2),
-                )
-                for buffer, source, (x0, y0, w, h, stride) in zip(buffers, shared, windows):
-                    buffer[:] = b"".join(
-                        source[y * stride + x0:y * stride + x0 + w] for y in range(y0, y0 + h)
-                    )
-                try:
-                    _deblock_picture_macroblock(
-                        buffers, view_width, view_height, origin_x, origin_y,
-                        macroblocks, qpc, width_in_mbs, row * width_in_mbs + column,
-                    )
-                except Exception:
-                    failed.value = 1
-                    return
-                for buffer, target, (x0, y0, w, h, stride) in zip(buffers, shared, windows):
-                    for index, y in enumerate(range(y0, y0 + h)):
-                        target[y * stride + x0:y * stride + x0 + w] = buffer[index * w:(index + 1) * w]
-                with progress.get_lock():
-                    progress[row] = column + 1
-
-    def child(worker: int) -> None:
-        status = 1
-        try:
-            run(worker)
-            status = 1 if failed.value else 0
-        except BaseException:
-            failed.value = 1
-        finally:
-            os._exit(status)
-
-    processes = [context.Process(target=child, args=(worker,)) for worker in range(workers)]
-    for process in processes:
-        process.start()
-    while any(process.is_alive() for process in processes):
-        for process in processes:
-            process.join(0.05)
-        failed_process = next(
-            (
-                process
-                for process in processes
-                if process.exitcode is not None and process.exitcode != 0
-            ),
-            None,
-        )
-        if failed_process is not None:
-            failed.value = 1
-            for process in processes:
-                if process.is_alive():
-                    process.terminate()
-                    process.join()
-            break
-    for process in processes:
-        if process.is_alive():
-            process.terminate()
-            process.join()
-    ok = not failed.value and all(process.exitcode == 0 for process in processes)
-    if ok:
-        for plane, buffer in zip(planes, shared):
-            plane[:] = buffer[:]
-    for buffer in shared:
-        buffer.close()
-    return ok
-
-
 def _deblock_picture_macroblock(
     planes, view_width, view_height, view_x, view_y, macroblocks, qpc, width_in_mbs, address
 ) -> None:

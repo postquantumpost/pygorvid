@@ -39,7 +39,7 @@ def test_generate_native_video_with_gray_padding(tmp_path, monkeypatch):
         assert reader.sample_count == 60
         assert [(reader.sample_at(index).dts_ticks, reader.sample_at(index).pts_ticks)
                 for index in (18, 19, 20, 21)] == [(18, 18), (19, 20), (20, 19), (21, 21)]
-        decoder = H264Decoder(reader, threads=1)
+        decoder = H264Decoder(reader)
         for index in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 59):
             sample = reader.sample_at(index)
             assert (sample.dts_ticks, sample.pts_ticks, sample.duration_ticks) == (index, index, 1)

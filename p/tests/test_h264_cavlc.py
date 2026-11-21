@@ -5,20 +5,19 @@ from pygorvid.bitreader import BitReader
 from pygorvid.h264_cavlc import CAVLCError, decode_cavlc_residual_block
 
 
-@pytest.mark.parametrize("threads", [1, 2])
-def test_cavlc_ipb_frames_match_reference(monkeypatch, threads):
+def test_cavlc_ipb_frames_match_reference(monkeypatch):
     from pygorvid import H264Decoder, VideoSampleReader
     monkeypatch.setenv("PATH", "")
     root = Path(__file__).resolve().parents[2] / "testdata" / "h264"
     expected = (root / "cavlc-32x32-reference.yuv").read_bytes()
     with VideoSampleReader(root / "cavlc-32x32.mp4") as reader:
-        decoder = H264Decoder(reader, threads=threads)
+        decoder = H264Decoder(reader)
         assert reader.sample_count == 8
         for index in range(reader.sample_count):
             frame = decoder.decode_frame(index)
             actual = bytes(frame.y) + bytes(frame.u) + bytes(frame.v)
             start = index * 32 * 32 * 3 // 2
-            assert actual == expected[start:start + len(actual)], f"CAVLC frame {index}, threads {threads}"
+            assert actual == expected[start:start + len(actual)], f"CAVLC frame {index}"
 
 
 def bits(value):

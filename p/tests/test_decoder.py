@@ -41,22 +41,26 @@ def test_b_decoder_smoke_64x64():
         (0xDD69FBA2006D59E0, 0x93ECF9BED15545A5, 0x71CE324E67D3ACF2),
     )
 
+
+def test_h264_decoder_accepts_reserved_threads_argument():
+    H264Decoder(threads=2)
+
+
 @pytest.mark.parametrize("name", ("weighted-32x32.mp4", "weighted-eos-32x32.mp4"))
 def test_weighted_ipb_frames_match_reference(name):
     expected = (ROOT / "testdata" / "h264" / "weighted-32x32-reference.yuv").read_bytes()
     frame_size = 32 * 32 * 3 // 2
-    for threads in (1, 4):
-        reader = VideoSampleReader(ROOT / "testdata" / "h264" / name)
-        try:
-            decoder = H264Decoder(reader, threads=threads)
-            for index in range(len(expected) // frame_size):
-                frame = decoder.decode_frame(index)
-                actual = bytes(frame.y) + bytes(frame.u) + bytes(frame.v)
-                assert actual == expected[index * frame_size:(index + 1) * frame_size], (
-                    f"{name}: frame {index}, threads {threads} differs"
-                )
-        finally:
-            reader.close()
+    reader = VideoSampleReader(ROOT / "testdata" / "h264" / name)
+    try:
+        decoder = H264Decoder(reader)
+        for index in range(len(expected) // frame_size):
+            frame = decoder.decode_frame(index)
+            actual = bytes(frame.y) + bytes(frame.u) + bytes(frame.v)
+            assert actual == expected[index * frame_size:(index + 1) * frame_size], (
+                f"{name}: frame {index} differs"
+            )
+    finally:
+        reader.close()
 
 
 def test_decoder_frame_cache_retains_most_recent_decoded_frames():

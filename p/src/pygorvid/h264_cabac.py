@@ -9,13 +9,8 @@ from .h264_cabac_init import CONTEXT_INIT_TABLE
 from .h264_cavlc_syntax import CAVLCSyntax
 from .h264_weighted_prediction import InterWeighting
 from .h264_deferred import (
-    PLACEHOLDER_SAMPLES as _PLACEHOLDER_SAMPLES,
     InterResidual as _InterResidual,
-    IntraNeighborsPending as _IntraNeighborsPending,
-    SliceReconstructionDriver as _SliceReconstructionDriver,
-    parallel_reconstruction_available as _parallel_reconstruction_available,
-    reconstruct_or_defer as _reconstruct_or_defer,
-    require_intra_neighbors as _require_intra_neighbors,
+    run_job as _run_reconstruction_job,
 )
 
 
@@ -1681,16 +1676,15 @@ class CABACArithmeticDecoder:
         frame = input.reference_frame
         if frame is None:
             raise CABACError("P_Skip reference picture is required")
-        samples = _reconstruct_or_defer(
+        samples = _run_reconstruction_job(
             "pskip",
             (frame,),
             (input.macroblock_x, input.macroblock_y, motion,
              input.weighting.select((0, -1), (None, None))),
             getattr(trial, "_timeout_check", None),
         )
-        if samples is not None:
-            builder.place_macroblock(address, *samples)
-        luma, cb, cr = samples or _PLACEHOLDER_SAMPLES
+        builder.place_macroblock(address, *samples)
+        luma, cb, cr = samples
         self._commit_slice_trial(trial, contexts, trial_contexts)
         return CABACPSkipMacroblockResult(True, 0, motion, tuple(luma), tuple(cb), tuple(cr))
 
@@ -1907,7 +1901,7 @@ class CABACArithmeticDecoder:
         if not any(prediction_flags):
             raise CABACError("B_Direct has no active prediction list")
 
-        samples = _reconstruct_or_defer(
+        samples = _run_reconstruction_job(
             "bdirect",
             tuple(selected),
             (motion_vectors, input.macroblock_x, input.macroblock_y,
@@ -1917,9 +1911,8 @@ class CABACArithmeticDecoder:
              ))),
             getattr(self, "_timeout_check", None),
         )
-        if samples is not None:
-            builder.place_macroblock(address, *samples)
-        luma, cb, cr = samples or _PLACEHOLDER_SAMPLES
+        builder.place_macroblock(address, *samples)
+        luma, cb, cr = samples
         return CABACBDirectMacroblockResult(
             skipped,
             reference_indices,
@@ -3061,14 +3054,8 @@ class CABACArithmeticDecoder:
             CABACIIntraMacroblockInput | CABACPBMacroblockLayerInput,
         ],
         progress_callback: Callable[[int], None] | None = None,
-        threads: int = 1,
-        reference_frames: Sequence[object] = (),
     ) -> tuple[CABACSliceMacroblockResult, ...]:
-        """Run CABAC slice_data over progressive raster macroblocks through end_of_slice_flag.
-
-        With threads > 1, P/B inter reconstruction runs in worker processes that share
-        reference_frames; results are identical to the single-threaded decode.
-        """
+        """Run CABAC slice_data over progressive raster macroblocks."""
         _validate_slice_contexts(contexts)
         if (
             not isinstance(slice_type, int)
@@ -3087,22 +3074,10 @@ class CABACArithmeticDecoder:
         ):
             raise CABACError("CABAC slice_data inputs are invalid or unsupported")
 
-        if (
-            slice_type % 5 in (2, 4)
-            or picture_macroblock_count < 4096
-            or not _parallel_reconstruction_available(threads)
-        ):
-            return self._decode_slice_macroblocks(
-                slice_type, first_macroblock_address, picture_macroblock_count,
-                contexts, builder, input_provider, progress_callback, None,
-            )
-        with _SliceReconstructionDriver(
-            threads, builder.picture_width_in_mbs, first_macroblock_address, reference_frames
-        ) as driver:
-            return self._decode_slice_macroblocks(
-                slice_type, first_macroblock_address, picture_macroblock_count,
-                contexts, builder, input_provider, progress_callback, driver,
-            )
+        return self._decode_slice_macroblocks(
+            slice_type, first_macroblock_address, picture_macroblock_count,
+            contexts, builder, input_provider, progress_callback,
+        )
 
     def _decode_slice_macroblocks(
         self,
@@ -3113,29 +3088,21 @@ class CABACArithmeticDecoder:
         builder,
         input_provider,
         progress_callback,
-        driver,
     ) -> tuple[CABACSliceMacroblockResult, ...]:
         decoded = []
         coefficient_counts = []
         macroblock_address = first_macroblock_address
         while True:
-            if driver is not None:
-                driver.apply_ready(decoded, builder)
             if getattr(self, "_cavlc", None) is not None:
                 width = builder.picture_width_in_mbs
                 left = coefficient_counts[-1] if macroblock_address % width and coefficient_counts else None
                 top_index = macroblock_address - first_macroblock_address - width
                 top = coefficient_counts[top_index] if top_index >= 0 else None
                 self._cavlc.begin(left, top)
-            while True:
-                macroblock_input = input_provider(macroblock_address, decoded)
-                try:
-                    macroblock_result = self._decode_slice_macroblock(
-                        slice_type, macroblock_input, contexts, builder, macroblock_address
-                    )
-                    break
-                except _IntraNeighborsPending:
-                    driver.wait_for_intra_neighbors(macroblock_address, decoded, builder)
+            macroblock_input = input_provider(macroblock_address, decoded)
+            macroblock_result = self._decode_slice_macroblock(
+                slice_type, macroblock_input, contexts, builder, macroblock_address
+            )
             if (
                 isinstance(macroblock_result, CABACPBMacroblockLayerResult)
                 and isinstance(macroblock_result.macroblock, CABACIIntraMacroblockResult)
@@ -3146,15 +3113,9 @@ class CABACArithmeticDecoder:
             if getattr(self, "_cavlc", None) is not None:
                 coefficient_counts.append(tuple(self._cavlc.counts))
             decoded.append(CABACSliceMacroblockResult(macroblock_address, result))
-            if driver is not None:
-                job = driver.take_job()
-                if job is not None:
-                    driver.submit(macroblock_address, job, decoded, builder)
             if progress_callback is not None:
                 progress_callback(macroblock_address)
             if self.decode_terminate_bin():
-                if driver is not None:
-                    driver.finish(decoded, builder)
                 return tuple(decoded)
             if macroblock_address + 1 >= picture_macroblock_count:
                 raise CABACError("slice_data reached the picture end without end_of_slice_flag")
@@ -3243,7 +3204,6 @@ class CABACArithmeticDecoder:
         )
         intra_type_start = 23 if is_b_slice else 5
         if macroblock_type >= intra_type_start:
-            _require_intra_neighbors(address)
             if not isinstance(intra_input, CABACIIntraMacroblockInput):
                 raise CABACError("P/B intra macroblock references are unavailable")
             intra_result = trial._decode_i_intra_macroblock_with_type(
@@ -3642,7 +3602,7 @@ class CABACArithmeticDecoder:
                 trial_contexts,
                 residual,
             )
-        samples = _reconstruct_or_defer(
+        samples = _run_reconstruction_job(
             "inter",
             tuple(job_frames),
             (
@@ -3655,9 +3615,8 @@ class CABACArithmeticDecoder:
             ),
             getattr(self, "_timeout_check", None),
         )
-        if samples is not None:
-            builder.place_macroblock(address, *samples)
-        luma, cb, cr = samples or _PLACEHOLDER_SAMPLES
+        builder.place_macroblock(address, *samples)
+        luma, cb, cr = samples
         self._commit_slice_trial(trial, contexts, trial_contexts)
         return CABACInterMacroblockResult(
             macroblock_type=macroblock_type,

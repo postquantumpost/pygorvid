@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from .colorconv import PixelConverter
-from .codec import DecoderError, create_decoder, default_decoder_threads
+from .codec import DecoderError, create_decoder
 from .jpegencoder import JPEGEncoder
 from .h264encoder import H264Encoder
 from .mp4writer import Mp4Metadata, Mp4Writer
@@ -54,8 +54,8 @@ def _nonnegative_int(value: str) -> int:
 def _positive_int(value: str) -> int:
     try:
         count = int(value)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError("must be an integer") from e
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
     if count < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return count
@@ -63,7 +63,7 @@ def _positive_int(value: str) -> int:
 
 def _extract_frame(
     input_path: str, frame: int, output_path: str,
-    threads: "int | None" = None, verbose: bool = False,
+    threads: int = 1, verbose: bool = False,
 ) -> None:
     output = Path(output_path)
     extension = output.suffix.lower()
@@ -71,7 +71,9 @@ def _extract_frame(
         raise ValueError("--output must end in .png or .jpg")
     reader = VideoSampleReader(input_path)
     try:
-        decoded = create_decoder(reader, threads=threads, debug_progress=verbose).decode_frame(frame)
+        decoded = create_decoder(
+            reader, threads=threads, debug_progress=verbose
+        ).decode_frame(frame)
     finally:
         reader.close()
     rgb = PixelConverter(PixelColorRange.LIMITED).convert_yuv420_to_rgb(
@@ -86,7 +88,7 @@ def _extract_frame(
 
 
 def _read_all_frames(
-    input_path: str, threads: "int | None" = None, verbose: bool = False,
+    input_path: str, threads: int = 1, verbose: bool = False,
 ) -> int:
     reader = VideoSampleReader(input_path)
     try:
@@ -95,7 +97,9 @@ def _read_all_frames(
         for index in range(reader.sample_count):
             try:
                 if index > 0 and reader.sample_at(index).is_sync:
-                    decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
+                    decoder = create_decoder(
+                        reader, threads=threads, debug_progress=verbose
+                    )
                 decoder.decode_frame(index)
             except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
                 raise DecoderError(f"decode frame {index}: {error}") from error
@@ -104,14 +108,18 @@ def _read_all_frames(
         reader.close()
 
 
-def _slideshow(input_path: str, threads: "int | None" = None, verbose: bool = False) -> int:
+def _slideshow(
+    input_path: str, threads: int = 1, verbose: bool = False,
+) -> int:
     from .slideshow import SlideshowWindow
 
     window = SlideshowWindow(input_path)
     try:
         reader = VideoSampleReader(input_path)
         try:
-            decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
+            decoder = create_decoder(
+                reader, threads=threads, debug_progress=verbose
+            )
             if reader.configuration is None:
                 raise Mp4FormatError("video configuration is unavailable")
             timescale = reader.configuration.timescale
@@ -158,8 +166,8 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--threads",
         type=_positive_int,
-        default=default_decoder_threads(),
-        help="number of decoder threads (default: half the processors)",
+        default=1,
+        help="number of decoder threads (currently reserved for future parallel decoding)",
     )
     parser.add_argument("files", nargs="*")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -216,7 +224,9 @@ def main(argv=None) -> int:
         if args.prefix is not None:
             output = output.with_name(args.prefix + output.name)
         try:
-            _extract_frame(files[0], args.extractframe, str(output), args.threads, args.verbose)
+            _extract_frame(
+                files[0], args.extractframe, str(output), args.threads, args.verbose
+            )
         except (OSError, ValueError, DecoderError, Mp4FormatError) as e:
             print(f"{files[0]}: {e}", file=sys.stderr)
             return 1

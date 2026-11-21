@@ -41,7 +41,7 @@ from .h264_slice import (
 from .h264_sps import SPSInfo, SPSParseError, parse_sps
 from .h264_weighted_prediction import InterWeighting
 from .videosamplereader import VideoSampleReader
-from .codec import DecoderError, VideoCodec, default_decoder_threads
+from .codec import DecoderError, VideoCodec
 
 
 class DecoderReferenceMismatch(DecoderError):
@@ -326,10 +326,11 @@ class H264Decoder:
         frame_cache_size: int = 8,
     ):
         if threads is not None and (
-            isinstance(threads, bool) or not isinstance(threads, int) or threads < 1
+            isinstance(threads, bool)
+            or not isinstance(threads, int)
+            or threads < 1
         ):
             raise ValueError("decoder thread count must be a positive integer")
-        self.threads = default_decoder_threads() if threads is None else threads
         if time_limit_seconds is not None and (
             isinstance(time_limit_seconds, bool)
             or not isinstance(time_limit_seconds, (int, float))
@@ -703,10 +704,6 @@ class H264Decoder:
                 slice_qpy,
             )
             macroblock_count = (sequence_set.coded_width // 16) * (sequence_set.coded_height // 16)
-            reference_frames = tuple(
-                self.reference_picture_buffer.get(reference.identifier).frame
-                for reference in self.reference_picture_buffer.references()
-            )
             return cabac.decode_slice_data(
                 dependency_slice.header.slice_type,
                 dependency_slice.header.first_macroblock_in_slice,
@@ -715,8 +712,6 @@ class H264Decoder:
                 builder,
                 input_provider,
                 progress_callback,
-                threads=getattr(self, "threads", 1),
-                reference_frames=reference_frames,
             )
         except (CABACError, NALUnitError, PPSParseError, SPSParseError, ValueError) as error:
             raise DecoderError(f"sample {dependency_slice.sample_index}: {error}") from error
@@ -1593,7 +1588,6 @@ class H264Decoder:
                     builder.finish(),
                     deblocking,
                     timeout_check=check_frame_deadline if deadline is not None else None,
-                    threads=self.threads,
                 )
                 planes = []
                 for plane, divisor in ((coded_frame.y, 1), (coded_frame.u, 2), (coded_frame.v, 2)):
