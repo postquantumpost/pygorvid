@@ -295,10 +295,11 @@ std::size_t decode_video(
     if (frame_index && *frame_index >= sample_reader.sample_count()) {
         throw std::out_of_range("requested frame index exceeds the sample count");
     }
-    const auto target_sample_index = frame_index
-        ? std::optional<std::size_t>{
-              sample_reader.presentation_sample_index(*frame_index)}
-        : std::nullopt;
+    std::optional<std::size_t> target_sample_index;
+    if (frame_index) {
+        target_sample_index.emplace(
+            sample_reader.presentation_sample_index(*frame_index));
+    }
     const auto sample_count = target_sample_index
         ? *target_sample_index + 1
         : sample_reader.sample_count();
@@ -420,19 +421,15 @@ std::size_t decode_video(
             normalized_slice_type == 2 || normalized_slice_type == 4;
         const bool is_idr_slice =
             pygorvid::parse_nal_header(slices.front()).unit_type == 5;
-        const auto slice_header =
-            is_i_slice
-            ? std::optional<pygorvid::PSliceHeader>{}
-            : std::optional<pygorvid::PSliceHeader>{
-                  pygorvid::parse_p_slice_header(
-                      slices.front(), selected_sps_info,                       selected_pps_info)};
-        const auto idr_header =
-            slice_header
-                ? std::optional<pygorvid::IdrSliceHeader>{}
-                : std::optional<pygorvid::IdrSliceHeader>{
-                      pygorvid::parse_idr_i_slice_header(
-                          slices.front(), selected_sps_info,
-                          selected_pps_info)};
+        std::optional<pygorvid::PSliceHeader> slice_header;
+        std::optional<pygorvid::IdrSliceHeader> idr_header;
+        if (is_i_slice) {
+            idr_header.emplace(pygorvid::parse_idr_i_slice_header(
+                slices.front(), selected_sps_info, selected_pps_info));
+        } else {
+            slice_header.emplace(pygorvid::parse_p_slice_header(
+                slices.front(), selected_sps_info, selected_pps_info));
+        }
         const auto current_frame_num =
             slice_header
                 ? slice_header->frame_num
