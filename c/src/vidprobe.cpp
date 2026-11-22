@@ -133,7 +133,7 @@ std::size_t decode_video(
     const std::string& input_path,
     const std::optional<std::size_t>& frame_index = std::nullopt,
     const std::optional<std::string>& output_path = std::nullopt,
-    bool slideshow = false) {
+    bool slideshow = false, std::size_t threads = 0) {
 #ifndef PYGORVID_SLIDESHOW
     if (slideshow) throw std::runtime_error(
         "optional slideshow build feature was not included; rebuild with -DPYGORVID_SLIDESHOW=ON");
@@ -595,7 +595,7 @@ std::size_t decode_video(
         auto decoded = pygorvid::decode_h264_reference_frame(
             slices, selected_sps_info, selected_pps_info, reference_list_l0,
             reference_list_l1, display_indices[sample_index],
-            current_picture_order_count);
+            current_picture_order_count, threads);
         decoded.picture_order_count = current_picture_order_count;
 #ifdef PYGORVID_SLIDESHOW
         if (window) {
@@ -1041,7 +1041,7 @@ int run(const std::vector<std::string>& args) {
             *options.output_path, options.output_prefix);
         try {
             (void)decode_video(options.files[0], options.extract_frame,
-                               output_path);
+                               output_path, false, options.threads);
             std::cout << options.files[0] << ": wrote frame "
                       << *options.extract_frame << " to "
                       << output_path << '\n';
@@ -1055,7 +1055,8 @@ int run(const std::vector<std::string>& args) {
     for (const auto& path : options.files) {
         if (options.slideshow) {
             try {
-                const auto count = decode_video(path, std::nullopt, std::nullopt, true);
+                const auto count = decode_video(
+                    path, std::nullopt, std::nullopt, true, options.threads);
                 std::cout << path << ": displayed " << count << " frames\n";
             } catch (const std::exception& error) {
                 std::cerr << path << ": " << error.what() << '\n';
@@ -1065,7 +1066,8 @@ int run(const std::vector<std::string>& args) {
         }
         if (options.read_all) {
             try {
-                const auto decoded_count = decode_video(path);
+                const auto decoded_count = decode_video(
+                    path, std::nullopt, std::nullopt, false, options.threads);
                 std::cout << path << ": read " << decoded_count << " frames\n";
             } catch (const std::exception& error) {
                 std::cerr << path << ": " << error.what() << '\n';

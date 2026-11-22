@@ -215,7 +215,8 @@ Yuv420Frame decode_h264_reference_frame(
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
     const std::vector<const Yuv420Frame*>& reference_frames_l1,
     std::optional<std::size_t> presentation_frame = std::nullopt,
-    std::optional<std::int64_t> picture_order_count = std::nullopt);
+    std::optional<std::int64_t> picture_order_count = std::nullopt,
+    std::size_t threads = 0);
 
 } // namespace pygorvid
 

@@ -20,6 +20,8 @@ target_include_directories(pygorvid PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_compile_options(pygorvid PRIVATE -Wall -Wextra -Wpedantic)
+find_package(Threads REQUIRED)
+target_link_libraries(pygorvid PUBLIC Threads::Threads)
 
 add_executable(vidprobe src/vidprobe.cpp)
 target_link_libraries(vidprobe PRIVATE pygorvid)

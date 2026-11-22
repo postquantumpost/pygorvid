@@ -3,11 +3,16 @@
 #include "pygorvid/cavlc.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdlib>
+#include <exception>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace pygorvid {
 namespace {
@@ -22,6 +27,70 @@ std::size_t checked_plane_size(std::uint32_t width, std::uint32_t height) {
         throw std::runtime_error("decoded frame plane size overflows");
     }
     return static_cast<std::size_t>(width) * height;
+}
+
+template <typename MacroblockOperation>
+void run_macroblock_wavefront(
+    std::size_t macroblock_width, std::size_t macroblock_count,
+    std::size_t threads, MacroblockOperation operation) {
+    const auto rows = macroblock_count / macroblock_width;
+    threads = std::min(threads, rows);
+    if (threads <= 1) {
+        for (std::size_t address = 0; address < macroblock_count; ++address) {
+            operation(address);
+        }
+        return;
+    }
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::vector<std::size_t> progress(rows, 0);
+    std::exception_ptr failure;
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (std::size_t worker = 0; worker < threads; ++worker) {
+        workers.emplace_back([&, worker] {
+            try {
+                for (auto row = worker; row < rows; row += threads) {
+                    for (std::size_t column = 0; column < macroblock_width;
+                         ++column) {
+                        if (row > 0) {
+                            const auto required =
+                                std::min(column + 2, macroblock_width);
+                            std::unique_lock<std::mutex> lock(mutex);
+                            condition.wait(lock, [&] {
+                                return failure ||
+                                       progress[row - 1] >= required;
+                            });
+                            if (failure) {
+                                return;
+                            }
+                        }
+                        operation(row * macroblock_width + column);
+                        {
+                            std::lock_guard<std::mutex> lock(mutex);
+                            progress[row] = column + 1;
+                        }
+                        condition.notify_all();
+                    }
+                }
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (!failure) {
+                        failure = std::current_exception();
+                    }
+                }
+                condition.notify_all();
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
 }
 
 Yuv420Frame crop_decoded_frame(Yuv420Frame frame, const SpsInfo& sps) {
@@ -254,7 +323,8 @@ void deblock_p_inter_frame(
     const std::vector<std::int64_t>& alpha_offsets,
     const std::vector<std::int64_t>& beta_offsets, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
-    const std::vector<const Yuv420Frame*>& reference_frames_l1) {
+    const std::vector<const Yuv420Frame*>& reference_frames_l1,
+    std::size_t threads) {
     const auto macroblock_count =
         checked_plane_size(macroblock_width, macroblock_height);
     const auto luma_block_width =
@@ -345,10 +415,9 @@ void deblock_p_inter_frame(
         return !same_order && !swapped_order;
     };
     const auto chroma_width = frame.width / 2;
-    for (std::size_t macroblock_address = 0;
-         macroblock_address < macroblock_count; ++macroblock_address) {
+    const auto deblock_macroblock = [&](std::size_t macroblock_address) {
         if (disable_idc[macroblock_address] == 1) {
-            continue;
+            return;
         }
         const auto macroblock_x = static_cast<std::uint32_t>(
             macroblock_address % macroblock_width);
@@ -456,7 +525,11 @@ void deblock_p_inter_frame(
                 }
             }
         }
-    }
+    };
+    run_macroblock_wavefront(
+        macroblock_width, macroblock_count,
+        threads == 0 ? std::thread::hardware_concurrency() : threads,
+        deblock_macroblock);
 }
 
 void deblock_idr_intra_frame(
@@ -466,7 +539,7 @@ void deblock_idr_intra_frame(
     const std::vector<std::uint8_t>& disable_idc,
     const std::vector<std::int64_t>& alpha_offsets,
     const std::vector<std::int64_t>& beta_offsets,
-    const PpsInfo& pps) {
+    const PpsInfo& pps, std::size_t threads) {
     if (std::all_of(disable_idc.begin(), disable_idc.end(),
                     [](std::uint8_t idc) { return idc == 1; })) {
         return;
@@ -477,7 +550,7 @@ void deblock_idr_intra_frame(
             "deblocking currently requires uncropped macroblock dimensions");
     }
     const auto chroma_width = frame.width / 2;
-    for (std::size_t mb_address = 0; mb_address < qpy.size(); ++mb_address) {
+    const auto deblock_macroblock = [&](std::size_t mb_address) {
         const auto mb_x = static_cast<std::uint32_t>(mb_address % macroblock_width);
         const auto mb_y = static_cast<std::uint32_t>(mb_address / macroblock_width);
         const auto idc = disable_idc[mb_address];
@@ -601,7 +674,11 @@ void deblock_idr_intra_frame(
                 }
             }
         }
-    }
+    };
+    run_macroblock_wavefront(
+        macroblock_width, qpy.size(),
+        threads == 0 ? std::thread::hardware_concurrency() : threads,
+        deblock_macroblock);
 }
 
 void require_same_picture(const IdrSliceHeader& expected,
@@ -2530,7 +2607,8 @@ void decode_intra_nxn(
 
 Yuv420Frame decode_idr_i_frame_impl(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
-    const SpsInfo& sps, const PpsInfo& pps, bool pcm_only) {
+    const SpsInfo& sps, const PpsInfo& pps, bool pcm_only,
+    std::size_t threads = 0) {
     if (slice_nals.empty()) {
         throw std::invalid_argument("IDR picture contains no slice NAL units");
     }
@@ -3280,7 +3358,7 @@ Yuv420Frame decode_idr_i_frame_impl(
     deblock_idr_intra_frame(
         frame, macroblock_width, macroblock_height, macroblock_qpy,
         macroblock_slice_ids, macroblock_disable_idc,
-        macroblock_alpha_offsets, macroblock_beta_offsets, pps);
+        macroblock_alpha_offsets, macroblock_beta_offsets, pps, threads);
     return crop_decoded_frame(std::move(frame), sps);
 }
 
@@ -3647,7 +3725,8 @@ Yuv420Frame decode_p_frame_with_lists(
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& input_frames_l0,
     const std::vector<const Yuv420Frame*>& input_frames_l1,
-    std::optional<std::int64_t> picture_order_count = std::nullopt) {
+    std::optional<std::int64_t> picture_order_count = std::nullopt,
+    std::size_t threads = 0) {
     if (slice_nals.empty()) {
         throw std::invalid_argument("P picture contains no slice NAL units");
     }
@@ -6367,7 +6446,7 @@ Yuv420Frame decode_p_frame_with_lists(
         macroblock_intra16, luma_total_coefficients,
         macroblock_slice_ids, macroblock_disable_idc,
         macroblock_alpha_offsets, macroblock_beta_offsets, pps,
-        input_frames_l0, input_frames_l1);
+        input_frames_l0, input_frames_l1, threads);
     return crop_decoded_frame(std::move(frame), sps);
 }
 
@@ -6440,12 +6519,18 @@ Yuv420Frame decode_h264_reference_frame_impl(
     const SpsInfo& sps, const PpsInfo& pps,
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
     const std::vector<const Yuv420Frame*>& reference_frames_l1,
-    std::optional<std::int64_t> picture_order_count = std::nullopt) {
+    std::optional<std::int64_t> picture_order_count = std::nullopt,
+    std::size_t threads = 0) {
     if (slice_nals.empty()) {
         throw std::invalid_argument("H.264 picture contains no slice NAL units");
     }
     const auto unit_type = parse_nal_header(slice_nals.front()).unit_type;
     if (unit_type == 5) {
+        if (sps.frame_mbs_only && sps.chroma_format_idc == 1 &&
+            sps.bit_depth_luma == 8 && pps.num_slice_groups_minus1 == 0) {
+            return decode_idr_i_frame_impl(
+                slice_nals, sps, pps, false, threads);
+        }
         return decode_idr_i_frame(slice_nals, sps, pps);
     }
     if (unit_type == 1) {
@@ -6456,6 +6541,12 @@ Yuv420Frame decode_h264_reference_frame_impl(
         (void)slice_type_reader.read_ue();
         const auto slice_type = slice_type_reader.read_ue() % 5;
         if (slice_type == 2 || slice_type == 4) {
+            if (sps.frame_mbs_only && sps.chroma_format_idc == 1 &&
+                sps.bit_depth_luma == 8 &&
+                pps.num_slice_groups_minus1 == 0) {
+                return decode_idr_i_frame_impl(
+                    slice_nals, sps, pps, false, threads);
+            }
             return decode_idr_i_frame(slice_nals, sps, pps);
         }
         if (reference_frames_l0.empty() ||
@@ -6472,7 +6563,7 @@ Yuv420Frame decode_h264_reference_frame_impl(
         return decode_p_frame_with_lists(slice_nals, sps, pps,
                                          reference_frames_l0,
                                          reference_frames_l1,
-                                         picture_order_count);
+                                         picture_order_count, threads);
     }
     throw std::runtime_error(
         "H.264 frame decoding supports I and restricted P/B pictures only");
@@ -6484,11 +6575,12 @@ Yuv420Frame decode_h264_reference_frame(
     const std::vector<const Yuv420Frame*>& reference_frames_l0,
     const std::vector<const Yuv420Frame*>& reference_frames_l1,
     std::optional<std::size_t> presentation_frame,
-    std::optional<std::int64_t> picture_order_count) {
+    std::optional<std::int64_t> picture_order_count,
+    std::size_t threads) {
     try {
         return decode_h264_reference_frame_impl(
             slice_nals, sps, pps, reference_frames_l0, reference_frames_l1,
-            picture_order_count);
+            picture_order_count, threads);
     } catch (const std::exception& error) {
         if (!presentation_frame) {
             throw;
