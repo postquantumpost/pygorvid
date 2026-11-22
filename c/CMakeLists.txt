@@ -63,6 +63,12 @@ if(PYGORVID_BUILD_TESTS)
         -DFFMPEG=${PYGORVID_FFMPEG}
         -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_formats.cmake)
+    add_test(NAME vidprobe_partition_predictor_hash COMMAND ${CMAKE_COMMAND}
+        -DVIDPROBE=$<TARGET_FILE:vidprobe>
+        -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../samples/samp3.mp4
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_partition_predictor.cmake)
+    set_tests_properties(vidprobe_partition_predictor_hash PROPERTIES TIMEOUT 60)
     add_test(NAME vidprobe_slideshow COMMAND ${CMAKE_COMMAND}
         -DVIDPROBE=$<TARGET_FILE:vidprobe>
         -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../samples/decoder-smoke-16x16.mp4

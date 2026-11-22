@@ -5690,17 +5690,27 @@ Yuv420Frame decode_p_frame_with_lists(
             std::array<std::array<MotionVector, 2>, 16> motion_differences{};
             std::array<std::array<std::uint8_t, 16>, 2>
                 current_list_motion_valid{};
-            for (std::size_t block_index = 0; block_index < 16;
-                 ++block_index) {
-                if (!motion_vector_valid[macroblock_address][block_index]) {
+            for (std::size_t partition_index = 0;
+                 partition_index < partition_count; ++partition_index) {
+                if (!partition_direct[partition_index]) {
                     continue;
                 }
-                for (std::size_t list_index = 0; list_index < 2;
-                     ++list_index) {
-                    current_list_motion_valid[list_index][block_index] =
-                        static_cast<std::uint8_t>(
-                            (prediction_flags[block_index] &
-                             (1U << list_index)) != 0);
+                const auto& partition = partitions[partition_index];
+                for (std::int32_t block_y = partition.y;
+                     block_y < partition.y + partition.height; ++block_y) {
+                    for (std::int32_t block_x = partition.x;
+                         block_x < partition.x + partition.width; ++block_x) {
+                        const auto block_index =
+                            static_cast<std::size_t>(
+                                block_y * 4 + block_x);
+                        for (std::size_t list_index = 0; list_index < 2;
+                             ++list_index) {
+                            current_list_motion_valid[list_index][block_index] =
+                                static_cast<std::uint8_t>(
+                                    (prediction_flags[block_index] &
+                                     (1U << list_index)) != 0);
+                        }
+                    }
                 }
             }
             const auto magnitude = [](std::int64_t value) {
