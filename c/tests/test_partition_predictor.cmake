@@ -2,10 +2,10 @@ file(REMOVE_RECURSE "${TEST_ROOT}/partition-predictor")
 file(MAKE_DIRECTORY "${TEST_ROOT}/partition-predictor")
 execute_process(
     COMMAND "${VIDPROBE}"
-        --threads 1
+        --threads 2
         --hash
-        --extractframe 2
-        --output "${TEST_ROOT}/partition-predictor/frame.png"
+        --readall
+        --readahead
         --input "${FIXTURE}"
     RESULT_VARIABLE result
     OUTPUT_VARIABLE output

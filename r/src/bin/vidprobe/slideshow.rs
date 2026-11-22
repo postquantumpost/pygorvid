@@ -12,14 +12,15 @@ fn sdl_wait_timeout(remaining: Duration) -> u32 {
         .max(1) as u32
 }
 
-pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String> {
+pub fn show(
+    input: &str,
+    threads: usize,
+    verbose: bool,
+    readahead: bool,
+) -> Result<usize, String> {
     let mut reader = pygorvid::VideoSampleReader::open(input).map_err(|e| e.to_string())?;
     let presentation_order = reader.presentation_sample_indices();
     let timescale = reader.timescale();
-    let decoder_reader = pygorvid::VideoSampleReader::open(input).map_err(|e| e.to_string())?;
-    let mut decoder = pygorvid::VideoDecoder::new(decoder_reader).map_err(|e| e.to_string())?;
-    decoder.set_threads(threads);
-    decoder.set_verbose(verbose);
     let sdl = sdl2::init().map_err(|e| format!("initialize SDL2: {e}"))?;
     let video = sdl
         .video()
@@ -30,18 +31,16 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
     let mut canvas = None;
     let mut deadline = Instant::now();
     let mut displayed = 0;
-    for (index, &sample_index) in presentation_order.iter().enumerate() {
+    let mut consume = |index: usize, frame: pygorvid::Yuv420Frame| -> Result<(), String> {
+        let sample_index = presentation_order[index];
         if !wait(&mut events, Instant::now()) {
-            return Ok(displayed);
+            return Err("slideshow closed".to_string());
         }
         let sample = reader
             .sample_at(sample_index)
             .map_err(|e| format!("read frame {index}: {e}"))?;
-        let frame = decoder
-            .decode_frame(index as u64)
-            .map_err(|e| format!("decode frame {index}: {e}"))?;
         if !wait(&mut events, deadline) {
-            return Ok(displayed);
+            return Err("slideshow closed".to_string());
         }
         if canvas.is_none() {
             let scale = 1.0_f64
@@ -126,6 +125,20 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
         displayed += 1;
         deadline = Instant::now()
             + Duration::from_secs_f64(f64::from(sample.duration_ticks) / f64::from(timescale));
+        Ok(())
+    };
+    if readahead {
+        match super::decode_sequential_frames(input, threads, verbose, &mut consume) {
+            Ok(count) => displayed = count,
+            Err(error) if error == "slideshow closed" => return Ok(displayed),
+            Err(error) => return Err(error),
+        }
+    } else {
+        match super::read_all_frames_internal(input, threads, verbose, &mut consume) {
+            Ok(count) => displayed = count,
+            Err(error) if error == "slideshow closed" => return Ok(displayed),
+            Err(error) => return Err(error),
+        }
     }
     if displayed > 0 {
         wait(&mut events, deadline);

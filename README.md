@@ -433,8 +433,10 @@ all buffers it needs before its process starts; consumed buffers return to the
 pool and idle buffers are freed when memory becomes low. Python uses at most
 `--threads - 1` readahead processes and reduces the lookahead count when the
 estimated decoded-frame cache would not fit in half of the available memory.
-Files without multiple closed GOPs use normal sequential decoding. The option
-is accepted but not yet implemented by Go, Rust, and C++.
+Files without multiple closed GOPs use normal sequential decoding. Go and
+Rust transfer owned frame buffers through in-process channels, while C++
+transfers completed GOP frame values through futures; these native paths do not
+require shared memory because workers run inside the same process.
 This uses the same native MP4/H.264 decoder and supported codec subset as frame
 extraction; it does not just read compressed samples.
 
@@ -515,9 +517,11 @@ all four language implementations. The C, Go, and Rust decoders are also checked
 with one and four threads.
 
 `--threads N` sets the requested decoder worker count in all four implementations
-and defaults to the number of available processors. Python uses it as the
-foreground GOP plus readahead process budget only with `--readahead`; otherwise
-Python and C++ reserve it for future parallel decoding. Go and Rust use it for
+and defaults to the number of available processors. With `--readahead`, up to
+`N - 1` closed GOPs run ahead while the current GOP retains foreground
+processing. The lookahead count is reduced when a whole-GOP frame cache cannot
+fit in half of the available memory. Without `--readahead`, Python and C++
+reserve the thread count for parallel decoder work. Go and Rust also use it for
 macroblock reconstruction and deblocking.
 `--verbose` enables decoder progress and diagnostic output; without it, the tool
 prints only its normal per-file result.

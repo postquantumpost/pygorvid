@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"errors"
 	"flag"
@@ -8,7 +9,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"pygorvid/vid"
 )
@@ -41,13 +45,12 @@ func run(args []string) int {
 	hashFrames := flags.Bool("hash", false, "print SHA-256 hashes for frames decoded by --readall or --extractframe")
 	slideshow := flags.Bool("slideshow", false, "display decoded frames in a window")
 	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
-	readahead := flags.Bool("readahead", false, "decode upcoming closed GOPs ahead in order (not implemented)")
+	readahead := flags.Bool("readahead", false, "decode upcoming closed GOPs ahead in order")
 	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
 	if err := flags.Parse(flagsFirst(args)); err != nil {
 		return 2
 	}
-	_ = readahead
 	if *threads < 1 {
 		fmt.Fprintln(os.Stderr, "--threads must be a positive integer")
 		return 2
@@ -153,7 +156,7 @@ func run(args []string) int {
 	status := 0
 	for _, p := range paths {
 		if *slideshow {
-			count, err := showSlideshow(p, *threads, *verbose)
+			count, err := showSlideshow(p, *threads, *verbose, *readahead)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -163,7 +166,7 @@ func run(args []string) int {
 			continue
 		}
 		if *readAll {
-			count, err := readAllFrames(p, *threads, *verbose, *hashFrames)
+			count, err := readAllFrames(p, *threads, *verbose, *hashFrames, *readahead)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -246,7 +249,225 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--readahead] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
-func readAllFrames(input string, threads int, verbose, hashFrames bool) (int, error) {
+type frameResult struct {
+	index int
+	frame vid.Yuv420Frame
+	err   error
+}
+
+type closedGOP struct {
+	frames []int
+}
+
+func availableMemoryBytes() uint64 {
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && fields[0] == "MemAvailable:" {
+			kilobytes, err := strconv.ParseUint(fields[1], 10, 64)
+			if err == nil && kilobytes <= ^uint64(0)/1024 {
+				return kilobytes * 1024
+			}
+		}
+	}
+	if scanner.Err() != nil {
+		return 0
+	}
+	return 0
+}
+
+func memoryWorkerLimit(reader *vid.VideoSampleReader, groups []closedGOP, requested int) int {
+	available := availableMemoryBytes()
+	config := reader.Configuration()
+	if available == 0 || len(config.SequenceSets) == 0 {
+		return requested
+	}
+	sps, err := vid.ParseSPS(config.SequenceSets[0])
+	if err != nil {
+		return requested
+	}
+	frameBytes := uint64(sps.Width) * uint64(sps.Height) * 3 / 2
+	maxFrames := 0
+	for _, group := range groups {
+		maxFrames = max(maxFrames, len(group.frames))
+	}
+	if frameBytes == 0 || maxFrames == 0 {
+		return requested
+	}
+	return min(requested, int((available/2)/(frameBytes*uint64(maxFrames))))
+}
+
+func closedGOPs(reader *vid.VideoSampleReader) ([]closedGOP, error) {
+	count := reader.SampleCount()
+	order := make([]int, count)
+	positions := make([]int, count)
+	pts := make([]int64, count)
+	closed := make([]bool, count)
+	nalLengthSize := reader.Configuration().NALLengthSize
+	for index := 0; index < count; index++ {
+		sample, err := reader.SampleAt(uint64(index))
+		if err != nil {
+			return nil, err
+		}
+		order[index] = index
+		pts[index] = sample.PTSTicks
+		if sample.IsSync {
+			nals, err := vid.SplitH264SampleNALs(sample.Data, nalLengthSize)
+			if err != nil {
+				return nil, err
+			}
+			for _, nal := range nals {
+				header, err := vid.ParseNALHeader(nal)
+				if err != nil {
+					return nil, err
+				}
+				if header.UnitType == 5 {
+					closed[index] = true
+					break
+				}
+			}
+		}
+	}
+	sort.SliceStable(order, func(left, right int) bool {
+		if pts[order[left]] != pts[order[right]] {
+			return pts[order[left]] < pts[order[right]]
+		}
+		return order[left] < order[right]
+	})
+	for presentation, sampleIndex := range order {
+		positions[sampleIndex] = presentation
+	}
+	starts := make([]int, 0)
+	for index := 0; index < count; index++ {
+		if closed[index] {
+			starts = append(starts, index)
+		}
+	}
+	if len(starts) < 2 {
+		return nil, nil
+	}
+	if starts[0] != 0 {
+		starts = append([]int{0}, starts...)
+	}
+	groups := make([]closedGOP, len(starts))
+	for groupIndex, start := range starts {
+		end := count
+		if groupIndex+1 < len(starts) {
+			end = starts[groupIndex+1]
+		}
+		frames := make([]int, 0, end-start)
+		for sampleIndex := start; sampleIndex < end; sampleIndex++ {
+			frames = append(frames, positions[sampleIndex])
+		}
+		sort.Ints(frames)
+		groups[groupIndex] = closedGOP{frames: frames}
+	}
+	return groups, nil
+}
+
+func decodeSequentialFrames(input string, threads int, verbose bool, consume func(frameResult) error) (int, error) {
+	reader, err := vid.OpenVideoSampleReader(input)
+	if err != nil {
+		return 0, err
+	}
+	defer reader.Close()
+	groups, err := closedGOPs(reader)
+	if err != nil {
+		return 0, err
+	}
+	if len(groups) < 2 || threads < 2 {
+		return decodeSequentialNoReadahead(input, threads, verbose, consume)
+	}
+	workerLimit := memoryWorkerLimit(
+		reader, groups, min(threads-1, len(groups)-1),
+	)
+	if workerLimit == 0 {
+		return decodeSequentialNoReadahead(input, threads, verbose, consume)
+	}
+	pending := make(map[int]chan []frameResult)
+	var pendingMu sync.Mutex
+	nextJob := 1
+	startJob := func(group int) {
+		result := make(chan []frameResult, 1)
+		pendingMu.Lock()
+		pending[group] = result
+		pendingMu.Unlock()
+		go func() {
+			workerReader, openErr := vid.OpenVideoSampleReader(input)
+			if openErr != nil {
+				result <- []frameResult{{err: openErr}}
+				return
+			}
+			defer workerReader.Close()
+			decoder, createErr := vid.NewVideoDecoder(workerReader)
+			if createErr != nil {
+				result <- []frameResult{{err: createErr}}
+				return
+			}
+			decoder.SetThreads(threads)
+			decoder.SetVerbose(verbose)
+			frames := make([]frameResult, 0, len(groups[group].frames))
+			for _, index := range groups[group].frames {
+				frame, decodeErr := decoder.DecodeFrame(uint64(index))
+				frames = append(frames, frameResult{index: index, frame: frame, err: decodeErr})
+				if decodeErr != nil {
+					break
+				}
+			}
+			result <- frames
+		}()
+	}
+	for nextJob <= workerLimit {
+		startJob(nextJob)
+		nextJob++
+	}
+	decoder, err := vid.NewVideoDecoder(reader)
+	if err != nil {
+		return 0, err
+	}
+	decoder.SetThreads(threads)
+	decoder.SetVerbose(verbose)
+	consumed := 0
+	for groupIndex, group := range groups {
+		results := make([]frameResult, 0, len(group.frames))
+		if groupIndex == 0 {
+			for _, index := range group.frames {
+				frame, decodeErr := decoder.DecodeFrame(uint64(index))
+				results = append(results, frameResult{index: index, frame: frame, err: decodeErr})
+				if decodeErr != nil {
+					break
+				}
+			}
+		} else {
+			pendingMu.Lock()
+			result := pending[groupIndex]
+			delete(pending, groupIndex)
+			pendingMu.Unlock()
+			results = <-result
+		}
+		for _, result := range results {
+			if result.err != nil {
+				return consumed, fmt.Errorf("decode frame %d: %w", result.index, result.err)
+			}
+			if err := consume(result); err != nil {
+				return consumed, err
+			}
+			consumed++
+		}
+		if nextJob < len(groups) {
+			startJob(nextJob)
+			nextJob++
+		}
+	}
+	return consumed, nil
+}
+
+func decodeSequentialNoReadahead(input string, threads int, verbose bool, consume func(frameResult) error) (int, error) {
 	reader, err := vid.OpenVideoSampleReader(input)
 	if err != nil {
 		return 0, err
@@ -278,15 +499,29 @@ func readAllFrames(input string, threads int, verbose, hashFrames bool) (int, er
 		if err != nil {
 			return index, fmt.Errorf("decode frame %d: %w", index, err)
 		}
-		if hashFrames {
-			digest, err := frameHash(frame)
-			if err != nil {
-				return index, fmt.Errorf("decode frame %d: %w", index, err)
-			}
-			fmt.Printf("%s: frame %d sha256=%x\n", input, index, digest)
+		if err := consume(frameResult{index: index, frame: frame}); err != nil {
+			return index, err
 		}
 	}
 	return count, nil
+}
+
+func readAllFrames(input string, threads int, verbose, hashFrames bool, readaheadOption ...bool) (int, error) {
+	consume := func(result frameResult) error {
+		if !hashFrames {
+			return nil
+		}
+		digest, err := frameHash(result.frame)
+		if err != nil {
+			return fmt.Errorf("decode frame %d: %w", result.index, err)
+		}
+		fmt.Printf("%s: frame %d sha256=%x\n", input, result.index, digest)
+		return nil
+	}
+	if len(readaheadOption) != 0 && readaheadOption[0] {
+		return decodeSequentialFrames(input, threads, verbose, consume)
+	}
+	return decodeSequentialNoReadahead(input, threads, verbose, consume)
 }
 
 func prefixedOutput(output, prefix string) string {

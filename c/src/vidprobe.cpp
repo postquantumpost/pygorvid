@@ -14,6 +14,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -24,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #ifdef PYGORVID_SLIDESHOW
@@ -236,7 +239,12 @@ std::size_t decode_video(
     const std::optional<std::size_t>& frame_index = std::nullopt,
     const std::optional<std::string>& output_path = std::nullopt,
     bool slideshow = false, std::size_t threads = 0,
-    bool hash_frames = false) {
+    bool hash_frames = false,
+    std::size_t sample_start = 0,
+    std::optional<std::size_t> sample_end = std::nullopt,
+    const std::function<void(std::size_t,
+                             const pygorvid::Yuv420Frame&)>* frame_consumer =
+        nullptr) {
 #ifndef PYGORVID_SLIDESHOW
     if (slideshow) throw std::runtime_error(
         "optional slideshow build feature was not included; rebuild with -DPYGORVID_SLIDESHOW=ON");
@@ -303,7 +311,8 @@ std::size_t decode_video(
     }
     const auto sample_count = target_sample_index
         ? *target_sample_index + 1
-        : sample_reader.sample_count();
+        : std::min(sample_end.value_or(sample_reader.sample_count()),
+                   sample_reader.sample_count());
     const auto& configuration = sample_reader.configuration();
     std::vector<pygorvid::SpsInfo> sequence_parameter_sets;
     std::vector<pygorvid::PpsInfo> picture_parameter_sets;
@@ -333,7 +342,8 @@ std::size_t decode_video(
     if (hash_frames && !frame_index) {
         frame_hashes.resize(sample_reader.sample_count());
     }
-    for (std::size_t sample_index = 0; sample_index < sample_count;
+    for (std::size_t sample_index = sample_start;
+         sample_index < sample_count;
          ++sample_index) {
         const auto sample = sample_reader.sample_at(sample_index);
         auto nals = pygorvid::split_h264_sample_nals(
@@ -717,7 +727,9 @@ std::size_t decode_video(
             }
         }
 #endif
-        decoded_frame = decoded;
+        if (frame_consumer == nullptr) {
+            decoded_frame = decoded;
+        }
         if (hash_frames) {
             const auto digest = sha256_frame(decoded);
             if (frame_index) {
@@ -738,6 +750,10 @@ std::size_t decode_video(
             }
         }
         ++decoded_count;
+        if (frame_consumer != nullptr) {
+            (*frame_consumer)(
+                display_indices[sample_index], decoded);
+        }
         if (current_picture_is_reference) {
             auto stored_frame_num = current_frame_num;
             std::optional<std::uint32_t> current_long_term_frame_idx =
@@ -932,7 +948,7 @@ std::size_t decode_video(
             reference_picture_order.push_back(sample.pts_ticks);
         }
     }
-    if (!decoded_frame) {
+    if (!decoded_frame && frame_consumer == nullptr) {
         throw std::runtime_error("no supported H.264 picture was decoded");
     }
     if (output_path) {
@@ -945,6 +961,195 @@ std::size_t decode_video(
     }
 #endif
     return decoded_count;
+}
+
+using DecodedFrame = std::pair<std::size_t, pygorvid::Yuv420Frame>;
+
+std::vector<std::pair<std::size_t, std::size_t>> closed_gop_ranges(
+    const std::string& input_path) {
+    pygorvid::VideoSampleReader reader;
+    if (!reader.open(input_path)) {
+        throw std::runtime_error(reader.error_info());
+    }
+    std::vector<std::size_t> starts;
+    for (std::size_t sample_index = 0;
+         sample_index < reader.sample_count(); ++sample_index) {
+        const auto sample = reader.sample_at(sample_index);
+        if (!sample.is_sync) {
+            continue;
+        }
+        const auto nals = pygorvid::split_h264_sample_nals(
+            sample.data, reader.configuration().nal_length_size);
+        const bool closed = std::any_of(
+            nals.begin(), nals.end(), [](const auto& nal) {
+                return pygorvid::parse_nal_header(nal).unit_type == 5;
+            });
+        if (closed) {
+            starts.push_back(sample_index);
+        }
+    }
+    if (starts.size() < 2) {
+        return {};
+    }
+    if (starts.front() != 0) {
+        starts.insert(starts.begin(), 0);
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> ranges;
+    ranges.reserve(starts.size());
+    for (std::size_t index = 0; index < starts.size(); ++index) {
+        ranges.emplace_back(
+            starts[index],
+            index + 1 < starts.size()
+                ? starts[index + 1]
+                : reader.sample_count());
+    }
+    return ranges;
+}
+
+std::vector<DecodedFrame> decode_gop_range(
+    const std::string& input_path, std::size_t threads,
+    std::size_t start, std::size_t end) {
+    std::vector<DecodedFrame> frames;
+    const std::function<void(std::size_t,
+                             const pygorvid::Yuv420Frame&)> consumer =
+        [&frames](std::size_t index, const pygorvid::Yuv420Frame& frame) {
+            frames.emplace_back(index, frame);
+        };
+    (void)decode_video(
+        input_path, std::nullopt, std::nullopt, false, threads, false,
+        start, end, &consumer);
+    std::sort(frames.begin(), frames.end(),
+              [](const auto& left, const auto& right) {
+                  return left.first < right.first;
+              });
+    return frames;
+}
+
+std::size_t decode_video_readahead(
+    const std::string& input_path, std::size_t threads,
+    bool hash_frames, bool slideshow) {
+    auto ranges = closed_gop_ranges(input_path);
+    if (ranges.size() < 2 || threads < 2) {
+        return decode_video(
+            input_path, std::nullopt, std::nullopt, slideshow, threads,
+            hash_frames);
+    }
+    pygorvid::VideoSampleReader reader;
+    if (!reader.open(input_path)) {
+        throw std::runtime_error(reader.error_info());
+    }
+    const auto presentation_order = reader.presentation_sample_indices();
+#ifdef PYGORVID_SLIDESHOW
+    std::unique_ptr<Slideshow> window;
+    std::size_t displayed_count = 0;
+    auto deadline = std::chrono::steady_clock::now();
+    if (slideshow) {
+        window = std::make_unique<Slideshow>(input_path);
+    }
+#else
+    if (slideshow) {
+        throw std::runtime_error(
+            "optional slideshow build feature was not included; rebuild with -DPYGORVID_SLIDESHOW=ON");
+    }
+#endif
+    auto worker_limit =
+        std::min<std::size_t>(threads - 1, ranges.size() - 1);
+    std::size_t maximum_gop_frames = 0;
+    for (const auto& range : ranges) {
+        maximum_gop_frames =
+            std::max(maximum_gop_frames, range.second - range.first);
+    }
+    if (!reader.configuration().sequence_parameter_sets.empty()) {
+        const auto sps = pygorvid::parse_sps(
+            reader.configuration().sequence_parameter_sets.front());
+        const auto page_size = sysconf(_SC_PAGESIZE);
+        const auto available_pages = sysconf(_SC_AVPHYS_PAGES);
+        if (page_size > 0 && available_pages > 0 &&
+            sps.width != 0 && sps.height != 0 &&
+            maximum_gop_frames != 0) {
+            const auto available_bytes =
+                static_cast<std::uint64_t>(page_size) *
+                static_cast<std::uint64_t>(available_pages);
+            const auto frame_bytes =
+                static_cast<std::uint64_t>(sps.width) *
+                static_cast<std::uint64_t>(sps.height) * 3 / 2;
+            worker_limit = std::min(
+                worker_limit,
+                static_cast<std::size_t>(
+                    (available_bytes / 2) /
+                    (frame_bytes * maximum_gop_frames)));
+        }
+    }
+    if (worker_limit == 0) {
+        return decode_video(
+            input_path, std::nullopt, std::nullopt, slideshow, threads,
+            hash_frames);
+    }
+    std::map<std::size_t,
+             std::future<std::vector<DecodedFrame>>> jobs;
+    std::size_t next_group = 1;
+    const auto start_job = [&](std::size_t group) {
+        jobs.emplace(
+            group,
+            std::async(
+                std::launch::async,
+                [&, group] {
+                    return decode_gop_range(
+                        input_path, threads,
+                        ranges[group].first, ranges[group].second);
+                }));
+    };
+    for (; next_group <= worker_limit; ++next_group) {
+        start_job(next_group);
+    }
+    std::size_t consumed = 0;
+    for (std::size_t group = 0; group < ranges.size(); ++group) {
+        std::vector<DecodedFrame> frames;
+        if (group == 0) {
+            frames = decode_gop_range(
+                input_path, threads,
+                ranges[group].first, ranges[group].second);
+        } else {
+            frames = std::move(jobs.at(group).get());
+            jobs.erase(group);
+        }
+        for (auto& [index, frame] : frames) {
+            if (hash_frames) {
+                std::cout << input_path << ": frame " << index
+                          << " sha256=" << sha256_frame(frame) << '\n';
+            }
+#ifdef PYGORVID_SLIDESHOW
+            if (window) {
+                if (!window->wait(deadline)) {
+                    return displayed_count;
+                }
+                window->show(frame);
+                const auto sample = reader.sample_at(
+                    presentation_order[index]);
+                const auto duration_seconds =
+                    std::chrono::duration<double>(
+                        static_cast<double>(sample.duration_ticks) /
+                        reader.timescale());
+                deadline = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<
+                        std::chrono::steady_clock::duration>(
+                        duration_seconds);
+                ++displayed_count;
+            }
+#endif
+            ++consumed;
+        }
+        if (next_group < ranges.size()) {
+            start_job(next_group++);
+        }
+    }
+#ifdef PYGORVID_SLIDESHOW
+    if (window && displayed_count != 0) {
+        window->wait(deadline);
+        return displayed_count;
+    }
+#endif
+    return consumed;
 }
 
 Options parse_options(const std::vector<std::string>& args) {
@@ -1190,8 +1395,12 @@ int run(const std::vector<std::string>& args) {
     for (const auto& path : options.files) {
         if (options.slideshow) {
             try {
-                const auto count = decode_video(
-                    path, std::nullopt, std::nullopt, true, options.threads);
+                const auto count = options.readahead
+                    ? decode_video_readahead(
+                          path, options.threads, false, true)
+                    : decode_video(
+                          path, std::nullopt, std::nullopt, true,
+                          options.threads);
                 std::cout << path << ": displayed " << count << " frames\n";
             } catch (const std::exception& error) {
                 std::cerr << path << ": " << error.what() << '\n';
@@ -1201,9 +1410,12 @@ int run(const std::vector<std::string>& args) {
         }
         if (options.read_all) {
             try {
-                const auto decoded_count = decode_video(
-                    path, std::nullopt, std::nullopt, false, options.threads,
-                    options.hash_frames);
+                const auto decoded_count = options.readahead
+                    ? decode_video_readahead(
+                          path, options.threads, options.hash_frames, false)
+                    : decode_video(
+                          path, std::nullopt, std::nullopt, false,
+                          options.threads, options.hash_frames);
                 std::cout << path << ": read " << decoded_count << " frames\n";
             } catch (const std::exception& error) {
                 std::cerr << path << ": " << error.what() << '\n';

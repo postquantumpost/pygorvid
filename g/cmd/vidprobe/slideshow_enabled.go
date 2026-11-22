@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -14,6 +15,8 @@ import (
 )
 
 const maxSDLWaitMilliseconds = 2_147_483_647
+
+var errSlideshowClosed = fmt.Errorf("slideshow closed")
 
 func sdlWaitTimeout(remaining time.Duration) int {
 	maximum := time.Duration(maxSDLWaitMilliseconds) * time.Millisecond
@@ -27,7 +30,7 @@ func sdlWaitTimeout(remaining time.Duration) int {
 	return max(timeout, 1)
 }
 
-func showSlideshow(input string, threads int, verbose bool) (int, error) {
+func showSlideshow(input string, threads int, verbose bool, readaheadOption ...bool) (int, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	reader, err := vid.OpenVideoSampleReader(input)
@@ -35,12 +38,6 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 		return 0, err
 	}
 	defer reader.Close()
-	decoder, err := vid.NewVideoDecoder(reader)
-	if err != nil {
-		return 0, err
-	}
-	decoder.SetThreads(threads)
-	decoder.SetVerbose(verbose)
 	timescale := reader.Configuration().Timescale
 	if config := reader.HEVCConfiguration(); config != nil {
 		timescale = config.Timescale
@@ -99,20 +96,19 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 	}
 	deadline := time.Now()
 	count, width, height := 0, 0, 0
-	for index, sample := range samples {
+	consume := func(result frameResult) error {
+		index := result.index
+		sample := samples[index]
 		if closed {
-			return count, nil
-		}
-		frame, err := decoder.DecodeFrame(uint64(index))
-		if err != nil {
-			return count, fmt.Errorf("decode frame %d: %w", index, err)
+			return errSlideshowClosed
 		}
 		if !wait(deadline) {
-			return count, nil
+			return errSlideshowClosed
 		}
+		frame := result.frame
 		rgb, err := frame.ConvertToRGB(vid.ColorRangeLimited)
 		if err != nil {
-			return count, fmt.Errorf("convert frame %d: %w", index, err)
+			return fmt.Errorf("convert frame %d: %w", index, err)
 		}
 		if window == nil {
 			scale := min(1, 1024/float64(rgb.Width), 768/float64(rgb.Height))
@@ -121,11 +117,11 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 			window, err = sdl.CreateWindow(input, sdl.WINDOWPOS_CENTERED, sdl.WINDOWPOS_CENTERED,
 				windowWidth, windowHeight, sdl.WINDOW_SHOWN|sdl.WINDOW_RESIZABLE)
 			if err != nil {
-				return count, fmt.Errorf("create slideshow window: %w", err)
+				return fmt.Errorf("create slideshow window: %w", err)
 			}
 			renderer, err = sdl.CreateRenderer(window, -1, 0)
 			if err != nil {
-				return count, fmt.Errorf("create slideshow renderer: %w", err)
+				return fmt.Errorf("create slideshow renderer: %w", err)
 			}
 		}
 		if width != rgb.Width || height != rgb.Height {
@@ -135,23 +131,35 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 			}
 			texture, err = renderer.CreateTexture(sdl.PIXELFORMAT_RGB24, sdl.TEXTUREACCESS_STREAMING, int32(rgb.Width), int32(rgb.Height))
 			if err != nil {
-				return count, fmt.Errorf("create slideshow texture: %w", err)
+				return fmt.Errorf("create slideshow texture: %w", err)
 			}
 			width, height = rgb.Width, rgb.Height
 		}
 		if err = texture.Update(nil, unsafe.Pointer(&rgb.Data[0]), rgb.Stride); err != nil {
-			return count, fmt.Errorf("update slideshow texture: %w", err)
+			return fmt.Errorf("update slideshow texture: %w", err)
 		}
 		if err = renderer.Clear(); err != nil {
-			return count, fmt.Errorf("clear slideshow window: %w", err)
+			return fmt.Errorf("clear slideshow window: %w", err)
 		}
 		if err = renderer.Copy(texture, nil, nil); err != nil {
-			return count, fmt.Errorf("render slideshow frame: %w", err)
+			return fmt.Errorf("render slideshow frame: %w", err)
 		}
 		renderer.Present()
 		count++
 		duration := time.Duration(float64(sample.DurationTicks) / float64(timescale) * float64(time.Second))
 		deadline = time.Now().Add(duration)
+		return nil
+	}
+	if len(readaheadOption) != 0 && readaheadOption[0] {
+		count, err = decodeSequentialFrames(input, threads, verbose, consume)
+	} else {
+		count, err = decodeSequentialNoReadahead(input, threads, verbose, consume)
+	}
+	if err != nil {
+		if errors.Is(err, errSlideshowClosed) {
+			return count, nil
+		}
+		return count, err
 	}
 	if count > 0 {
 		wait(deadline)

@@ -184,6 +184,23 @@ func TestRunAcceptsReadaheadOption(t *testing.T) {
 	}
 }
 
+func TestReadAllReadaheadMatchesSequential(t *testing.T) {
+	directory := t.TempDir()
+	input := filepath.Join(directory, "readahead.mp4")
+	payload := vid.NewMp4Writer().Encode(vid.NewH264Encoder())
+	if err := os.WriteFile(input, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sequential, err := readAllFrames(input, 2, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readahead, err := readAllFrames(input, 2, false, false, true)
+	if err != nil || readahead != sequential {
+		t.Fatalf("readahead read = %d, %v; sequential = %d", readahead, err, sequential)
+	}
+}
+
 func TestReadAllFrames(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
 	for _, threads := range []int{1, 2} {
