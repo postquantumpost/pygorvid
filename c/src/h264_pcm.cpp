@@ -1018,15 +1018,14 @@ void add_intra16x16_luma_residual(
 }
 
 void predict_intra16x16(Yuv420Frame& frame, std::uint32_t macroblock_x,
-                        std::uint32_t macroblock_y, std::uint8_t mode) {
+                        std::uint32_t macroblock_y, std::uint8_t mode,
+                        bool top_available, bool left_available) {
     if (frame.width % 16 != 0 || frame.height % 16 != 0) {
         throw std::runtime_error(
             "I16x16 prediction currently requires uncropped macroblock dimensions");
     }
     const auto x = macroblock_x * 16U;
     const auto y = macroblock_y * 16U;
-    const bool top_available = macroblock_y != 0;
-    const bool left_available = macroblock_x != 0;
     std::array<std::uint8_t, 16> top{};
     std::array<std::uint8_t, 16> left{};
     if (top_available) {
@@ -1650,11 +1649,10 @@ std::array<std::uint8_t, 64> predict_intra8x8(
 void predict_chroma8x8(std::vector<std::uint8_t>& plane,
                        std::uint32_t plane_width,
                        std::uint32_t macroblock_x,
-                       std::uint32_t macroblock_y, std::uint8_t mode) {
+                       std::uint32_t macroblock_y, std::uint8_t mode,
+                       bool top_available, bool left_available) {
     const auto x = macroblock_x * 8U;
     const auto y = macroblock_y * 8U;
-    const bool top_available = macroblock_y != 0;
-    const bool left_available = macroblock_x != 0;
     std::array<std::uint8_t, 8> top{};
     std::array<std::uint8_t, 8> left{};
     if (top_available) {
@@ -1813,6 +1811,12 @@ void decode_intra_nxn(
     const bool top_available = macroblock_y != 0;
     const auto left_address = left_available ? macroblock_address - 1 : macroblock_address;
     const auto top_address = top_available ? macroblock_address - macroblock_width : macroblock_address;
+    const bool prediction_left_available =
+        left_available && decoded_macroblocks[left_address] &&
+        macroblock_slice_ids[left_address] == slice_id;
+    const bool prediction_top_available =
+        top_available && decoded_macroblocks[top_address] &&
+        macroblock_slice_ids[top_address] == slice_id;
     bool transform_8x8 = false;
     if (pps.transform_8x8_mode) {
         const bool left_transform =
@@ -2608,10 +2612,12 @@ void decode_intra_nxn(
     }
     predict_chroma8x8(frame.chroma_u, frame.width / 2,
                       macroblock_x, macroblock_y,
-                      static_cast<std::uint8_t>(chroma_mode));
+                      static_cast<std::uint8_t>(chroma_mode),
+                      prediction_top_available, prediction_left_available);
     predict_chroma8x8(frame.chroma_v, frame.width / 2,
                       macroblock_x, macroblock_y,
-                      static_cast<std::uint8_t>(chroma_mode));
+                      static_cast<std::uint8_t>(chroma_mode),
+                      prediction_top_available, prediction_left_available);
     add_intra16x16_chroma_residual(
         frame.chroma_u, frame.width / 2, macroblock_x, macroblock_y,
         chroma_residual_blocks[0]);
@@ -3316,16 +3322,27 @@ Yuv420Frame decode_idr_i_frame_impl(
                     luma_residual_blocks[block_index] =
                         inverse_transform_luma4x4(coefficients);
                 }
-                predict_intra16x16(frame, macroblock_x, macroblock_y,
-                                   luma_mode);
+                const bool prediction_left_available =
+                    left_available && decoded_macroblocks[left_address] &&
+                    macroblock_slice_ids[left_address] == slice_id;
+                const bool prediction_top_available =
+                    top_available && decoded_macroblocks[top_address] &&
+                    macroblock_slice_ids[top_address] == slice_id;
+                predict_intra16x16(
+                    frame, macroblock_x, macroblock_y, luma_mode,
+                    prediction_top_available, prediction_left_available);
                 add_intra16x16_luma_residual(
                     frame, macroblock_x, macroblock_y, luma_residual_blocks);
                 predict_chroma8x8(frame.chroma_u, frame.width / 2,
                                   macroblock_x, macroblock_y,
-                                  static_cast<std::uint8_t>(chroma_mode));
+                                  static_cast<std::uint8_t>(chroma_mode),
+                                  prediction_top_available,
+                                  prediction_left_available);
                 predict_chroma8x8(frame.chroma_v, frame.width / 2,
                                   macroblock_x, macroblock_y,
-                                  static_cast<std::uint8_t>(chroma_mode));
+                                  static_cast<std::uint8_t>(chroma_mode),
+                                  prediction_top_available,
+                                  prediction_left_available);
                 for (std::size_t plane_index = 0; plane_index < 2;
                      ++plane_index) {
                     std::array<std::array<std::int64_t, 16>, 4>
@@ -3939,7 +3956,8 @@ Yuv420Frame decode_p_frame_with_lists(
         }
         if (!decoded_macroblocks[address] ||
             macroblock_slice_ids[address] != current_slice_id ||
-            macroblock_skipped[address]) {
+            macroblock_skipped[address] ||
+            macroblock_b_direct[address]) {
             return false;
         }
         return (macroblock_prediction_flags[address][block_index] &
@@ -5364,16 +5382,25 @@ Yuv420Frame decode_p_frame_with_lists(
                     luma_residual_blocks[block_index] =
                         inverse_transform_luma4x4(coefficients);
                 }
-                predict_intra16x16(frame, macroblock_x, macroblock_y,
-                                   luma_mode);
+                const bool prediction_left_available =
+                    left_available && decoded_macroblocks[left_address] &&
+                    macroblock_slice_ids[left_address] == slice_id;
+                const bool prediction_top_available =
+                    top_available && decoded_macroblocks[top_address] &&
+                    macroblock_slice_ids[top_address] == slice_id;
+                predict_intra16x16(
+                    frame, macroblock_x, macroblock_y, luma_mode,
+                    prediction_top_available, prediction_left_available);
                 add_intra16x16_luma_residual(
                     frame, macroblock_x, macroblock_y, luma_residual_blocks);
                 predict_chroma8x8(
                     frame.chroma_u, frame.width / 2, macroblock_x,
-                    macroblock_y, static_cast<std::uint8_t>(chroma_mode));
+                    macroblock_y, static_cast<std::uint8_t>(chroma_mode),
+                    prediction_top_available, prediction_left_available);
                 predict_chroma8x8(
                     frame.chroma_v, frame.width / 2, macroblock_x,
-                    macroblock_y, static_cast<std::uint8_t>(chroma_mode));
+                    macroblock_y, static_cast<std::uint8_t>(chroma_mode),
+                    prediction_top_available, prediction_left_available);
                 for (std::size_t plane = 0; plane < 2; ++plane) {
                     std::array<std::array<std::int64_t, 16>, 4> residuals{};
                     for (std::size_t index = 0; index < 4; ++index) {

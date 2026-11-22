@@ -52,6 +52,12 @@ if(PYGORVID_BUILD_TESTS)
         PYGORVID_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME pygorvid_decoder_test COMMAND pygorvid_decoder_test)
     set_tests_properties(pygorvid_decoder_test PROPERTIES TIMEOUT 60)
+    add_test(NAME vidprobe_multislice_b_direct COMMAND ${CMAKE_COMMAND}
+        -DVIDPROBE=$<TARGET_FILE:vidprobe>
+        -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../samples/drone2_320x240.mp4
+        -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_multislice_b_direct.cmake)
+    set_tests_properties(vidprobe_multislice_b_direct PROPERTIES TIMEOUT 60)
     find_program(PYGORVID_FFMPEG ffmpeg)
     if(PYGORVID_FFMPEG)
         add_test(NAME vidprobe_companion_ffmpeg COMMAND ${CMAKE_COMMAND}

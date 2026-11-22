@@ -35,9 +35,15 @@ set -x
 # Rust 0m45.875s
 # Go 0m48.736s
 # python 176m56.307s
-#./pygorvid --readall --readahead --hash --input samples/samp3.mp4
 #./pygorvid --readall --hash --input samples/ew1.mp4
-./pygorvid --readall --readahead --hash --input samples/ew1.mp4
+#./pygorvid --readall --readahead --hash --input samples/samp3.mp4
+#diff e0c samp3_good_hashes
+#diff e0r samp3_good_hashes
+#diff e0g samp3_good_hashes
+#./pygorvid --readall --readahead --hash --input samples/ew1.mp4
+#diff e0c ew1_good_hashes
+#diff e0r ew1_good_hashes
+#diff e0g ew1_good_hashes
 
 #./pygorvid --slideshow --input samples/samp3.mp4
 #./pygorvid --slideshow --input samples/ew1.mp4
@@ -46,3 +52,6 @@ set -x
 
 #./pygorvid --slideshow --threads 4 --readahead --input samples/drone1_320x240.mp4
 #./pygorvid --slideshow --readahead --input samples/drone1_320x240.mp4
+#./pygorvid --slideshow --readahead --input samples/drone2_320x240.mp4
+#./pygorvid --slideshow --input samples/drone2_320x240.mp4
+./pygorvid --readall --input samples/drone2_320x240.mp4
