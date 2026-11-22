@@ -27,3 +27,7 @@ class HEVCDecoder:
 
     def decode_frame(self, index: int) -> Yuv420Frame:
         raise self._availability_error()
+
+    def decode_sequential_frames(self, frame_indices):
+        for index in frame_indices:
+            yield index, self.decode_frame(index)

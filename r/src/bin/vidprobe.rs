@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "slideshow")]
@@ -153,13 +151,7 @@ fn run(args: Vec<String>) -> i32 {
             continue;
         }
         if read_all {
-            match read_all_frames_with_readahead(
-                p,
-                threads,
-                verbose,
-                hash_frames,
-                readahead,
-            ) {
+            match read_all_frames_with_readahead(p, threads, verbose, hash_frames, readahead) {
                 Ok(count) => println!("{p}: read {count} frames"),
                 Err(error) => {
                     eprintln!("{p}: {error}");
@@ -424,228 +416,6 @@ fn show_slideshow(
     slideshow::show(input, threads, verbose, readahead)
 }
 
-fn closed_gops(input: &str) -> Result<Option<Vec<Vec<usize>>>, String> {
-    let mut reader =
-        pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
-    let order = reader.presentation_sample_indices();
-    let mut positions = vec![0; order.len()];
-    for (presentation, sample) in order.into_iter().enumerate() {
-        positions[sample] = presentation;
-    }
-    let configuration = reader.configuration();
-    let length_size = configuration.nal_length_size;
-    let count = reader.sample_count();
-    let mut starts = Vec::new();
-    for sample_index in 0..count {
-        let sample = reader
-            .sample_at(sample_index)
-            .map_err(|error| error.to_string())?;
-        if !sample.is_sync {
-            continue;
-        }
-        let closed = pygorvid::split_h264_sample_nals(
-            &sample.data,
-            usize::from(length_size),
-        )
-            .map_err(|error| error.to_string())?
-            .iter()
-            .any(|nal| {
-                pygorvid::parse_nal_header(nal)
-                    .is_ok_and(|header| header.unit_type == 5)
-            });
-        if closed {
-            starts.push(sample_index);
-        }
-    }
-    if starts.len() < 2 {
-        return Ok(None);
-    }
-    if starts[0] != 0 {
-        starts.insert(0, 0);
-    }
-    let mut groups = Vec::with_capacity(starts.len());
-    for (group_index, start) in starts.iter().copied().enumerate() {
-        let end = starts.get(group_index + 1).copied().unwrap_or(count);
-        let mut frames: Vec<usize> = (start..end).map(|sample| positions[sample]).collect();
-        frames.sort_unstable();
-        groups.push(frames);
-    }
-    Ok(Some(groups))
-}
-
-type DecodedFrames = Result<Vec<(usize, pygorvid::Yuv420Frame)>, String>;
-
-fn available_memory_bytes() -> Option<usize> {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()?
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            if fields.next()? != "MemAvailable:" {
-                return None;
-            }
-            fields.next()?.parse::<usize>().ok()?.checked_mul(1024)
-        })
-}
-
-fn memory_worker_limit(
-    input: &str,
-    groups: &[Vec<usize>],
-    requested: usize,
-) -> Result<usize, String> {
-    let Some(available) = available_memory_bytes() else {
-        return Ok(requested);
-    };
-    let reader =
-        pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
-    let Some(sequence_set) = reader.configuration().sequence_parameter_sets.first() else {
-        return Ok(requested);
-    };
-    let sps = pygorvid::parse_sps(sequence_set).map_err(|error| error.to_string())?;
-    let frame_bytes = (sps.width as usize)
-        .checked_mul(sps.height as usize)
-        .and_then(|pixels| pixels.checked_mul(3))
-        .and_then(|bytes| bytes.checked_div(2))
-        .unwrap_or(0);
-    let maximum_frames = groups.iter().map(Vec::len).max().unwrap_or(0);
-    if frame_bytes == 0 || maximum_frames == 0 {
-        return Ok(requested);
-    }
-    Ok(requested.min((available / 2) / (frame_bytes * maximum_frames)))
-}
-
-fn spawn_gop(
-    input: &str,
-    frames: &[usize],
-    threads: usize,
-    verbose: bool,
-) -> Receiver<DecodedFrames> {
-    let input = input.to_string();
-    let frames = frames.to_vec();
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let decoded = (|| {
-            let reader =
-                pygorvid::VideoSampleReader::open(&input).map_err(|error| error.to_string())?;
-            let mut decoder =
-                pygorvid::VideoDecoder::new(reader).map_err(|error| error.to_string())?;
-            decoder.set_threads(threads);
-            decoder.set_verbose(verbose);
-            frames
-                .into_iter()
-                .map(|index| {
-                    decoder
-                        .decode_frame(index as u64)
-                        .map(|frame| (index, frame))
-                        .map_err(|error| format!("decode frame {index}: {error}"))
-                })
-                .collect()
-        })();
-        let _ = sender.send(decoded);
-    });
-    receiver
-}
-
-fn decode_sequential_frames(
-    input: &str,
-    threads: usize,
-    verbose: bool,
-    consume: &mut dyn FnMut(usize, pygorvid::Yuv420Frame) -> Result<(), String>,
-) -> Result<usize, String> {
-    let Some(groups) = closed_gops(input)? else {
-        return read_all_frames_internal(input, threads, verbose, consume);
-    };
-    if threads < 2 {
-        return read_all_frames_internal(input, threads, verbose, consume);
-    }
-    let worker_limit = memory_worker_limit(
-        input,
-        &groups,
-        (threads - 1).min(groups.len() - 1),
-    )?;
-    if worker_limit == 0 {
-        return read_all_frames_internal(input, threads, verbose, consume);
-    }
-    let mut jobs = std::collections::HashMap::new();
-    for group_index in 1..=worker_limit {
-        jobs.insert(
-            group_index,
-            spawn_gop(input, &groups[group_index], threads, verbose),
-        );
-    }
-    let mut next_group = worker_limit + 1;
-    let reader = pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
-    let mut decoder =
-        pygorvid::VideoDecoder::new(reader).map_err(|error| error.to_string())?;
-    decoder.set_threads(threads);
-    decoder.set_verbose(verbose);
-    let mut consumed = 0;
-    for (group_index, frames) in groups.iter().enumerate() {
-        if group_index == 0 {
-            for &index in frames {
-                let frame = decoder
-                    .decode_frame(index as u64)
-                    .map_err(|error| format!("decode frame {index}: {error}"))?;
-                consume(index, frame)?;
-                consumed += 1;
-            }
-        } else {
-            let decoded = jobs.remove(&group_index)
-                .ok_or_else(|| "readahead worker is unavailable".to_string())?
-                .recv()
-                .map_err(|_| "readahead worker ended unexpectedly".to_string())??;
-            for (index, frame) in decoded {
-                consume(index, frame)?;
-                consumed += 1;
-            }
-        }
-        if next_group < groups.len() {
-            jobs.insert(
-                next_group,
-                spawn_gop(input, &groups[next_group], threads, verbose),
-            );
-            next_group += 1;
-        }
-    }
-    Ok(consumed)
-}
-
-fn read_all_frames_internal(
-    input: &str,
-    threads: usize,
-    verbose: bool,
-    consume: &mut dyn FnMut(usize, pygorvid::Yuv420Frame) -> Result<(), String>,
-) -> Result<usize, String> {
-    let mut reader = pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
-    let count = reader.sample_count();
-    let mut decoder = pygorvid::VideoDecoder::new(
-        pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    decoder.set_threads(threads);
-    decoder.set_verbose(verbose);
-    for index in 0..count {
-        if index > 0
-            && reader
-                .sample_at(index)
-                .map_err(|error| format!("decode frame {index}: read sample: {error}"))?
-                .is_sync
-        {
-            decoder = pygorvid::VideoDecoder::new(
-                pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-            decoder.set_threads(threads);
-            decoder.set_verbose(verbose);
-        }
-        let frame = decoder
-            .decode_frame(index as u64)
-            .map_err(|error| format!("decode frame {index}: {error}"))?;
-        consume(index, frame)?;
-    }
-    Ok(count)
-}
-
 fn read_all_frames_with_readahead(
     input: &str,
     threads: usize,
@@ -653,20 +423,30 @@ fn read_all_frames_with_readahead(
     hash_frames: bool,
     readahead: bool,
 ) -> Result<usize, String> {
-    let mut consume = |index: usize, frame: pygorvid::Yuv420Frame| {
+    let mut decoder = pygorvid::VideoDecoder::open(input).map_err(|error| error.to_string())?;
+    decoder.set_threads(threads);
+    decoder.set_verbose(verbose);
+    let mut consume = |decoded: pygorvid::DecodedVideoFrame| {
         if hash_frames {
-            let y = frame.luma_plane().map_err(|error| format!("decode frame {index}: {error}"))?;
-            let u = frame.u_plane().map_err(|error| format!("decode frame {index}: {error}"))?;
-            let v = frame.v_plane().map_err(|error| format!("decode frame {index}: {error}"))?;
-            println!("{input}: frame {index} sha256={}", sha256_planes(&[&y, &u, &v]));
+            let index = decoded.presentation_index;
+            let frame = decoded.frame;
+            let y = frame
+                .luma_plane()
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            let u = frame
+                .u_plane()
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            let v = frame
+                .v_plane()
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            println!(
+                "{input}: frame {index} sha256={}",
+                sha256_planes(&[&y, &u, &v])
+            );
         }
         Ok(())
     };
-    if readahead {
-        decode_sequential_frames(input, threads, verbose, &mut consume)
-    } else {
-        read_all_frames_internal(input, threads, verbose, &mut consume)
-    }
+    decoder.stream_frames(readahead, &mut consume)
 }
 
 #[cfg(test)]
@@ -898,7 +678,7 @@ mod tests {
     #[cfg(not(feature = "slideshow"))]
     #[test]
     fn slideshow_disabled_reports_missing_feature() {
-        assert!(show_slideshow("unused", 1, false)
+        assert!(show_slideshow("unused", 1, false, false)
             .unwrap_err()
             .contains("optional slideshow build feature was not included"));
     }
@@ -1125,27 +905,27 @@ mod tests {
 
     #[test]
     fn readahead_matches_sequential_frame_count() {
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../tmp/readahead-rust-{}",
-            std::process::id()
-        ));
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../tmp/readahead-rust-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let cleanup = TemporaryOutputDirectory(directory.clone());
         let input = directory.join("video.mp4");
-        let payload = pygorvid::Mp4Writer::new()
-            .encode(&pygorvid::H264Encoder::new());
+        let payload = pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new());
         fs::write(&input, payload).unwrap();
-        let sequential =
-            read_all_frames(input.to_str().unwrap(), 2, false, false).unwrap();
-        let readahead = read_all_frames_with_readahead(
-            input.to_str().unwrap(),
-            2,
-            false,
-            false,
-            true,
-        )
-        .unwrap();
+        let sequential = read_all_frames(input.to_str().unwrap(), 2, false, false).unwrap();
+        let readahead =
+            read_all_frames_with_readahead(input.to_str().unwrap(), 2, false, false, true).unwrap();
         assert_eq!(readahead, sequential);
+        assert_eq!(
+            run(vec![
+                "--readall".into(),
+                "--readahead".into(),
+                "--threads".into(),
+                "4".into(),
+                input.display().to_string(),
+            ]),
+            0
+        );
         drop(cleanup);
     }
 

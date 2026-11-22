@@ -127,6 +127,15 @@ def test_read_all_reports_failing_frame(monkeypatch, capsys):
             if index == 1:
                 raise DecoderError("invalid frame data")
 
+        def decode_sequential_frames(self, indices):
+            for index in indices:
+                try:
+                    yield index, self.decode_frame(index)
+                except DecoderError as error:
+                    raise DecoderError(
+                        f"decode frame {index}: {error}"
+                    ) from error
+
     monkeypatch.setattr(cli, "create_decoder", FailingDecoder)
     assert main(["--readall", str(FIXTURE)]) == 1
     assert "decode frame 1: invalid frame data" in capsys.readouterr().err
@@ -225,6 +234,10 @@ def test_slideshow_presents_frames_in_order_and_stops_on_close(monkeypatch):
 
         def decode_frame(self, index):
             return index
+
+        def decode_sequential_frames(self, indices):
+            for index in indices:
+                yield index, self.decode_frame(index)
 
     class FakeWindow:
         def __init__(self, title):
@@ -334,6 +347,11 @@ def test_verbose_flag_enables_decoder_progress(monkeypatch, capsys):
 
         def decode_frame(self, index):
             print(f"Frame {index}: 0%", file=__import__("sys").stderr)
+
+        def decode_sequential_frames(self, indices):
+            for index in indices:
+                self.decode_frame(index)
+                yield index, object()
 
     monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
     monkeypatch.setattr(cli, "create_decoder", FakeDecoder)

@@ -19,6 +19,14 @@ pub struct CompressedSample {
     pub is_sync: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VideoSampleTiming {
+    pub sample_index: usize,
+    pub pts_ticks: i64,
+    pub duration_ticks: u32,
+    pub timescale: u32,
+}
+
 #[derive(Clone, Debug)]
 struct SampleLocation {
     offset: u64,
@@ -224,6 +232,20 @@ impl VideoSampleReader {
             return Err(invalid("presentation frame index is out of range"));
         }
         Ok(self.presentation_sample_indices()[presentation_index])
+    }
+
+    pub(crate) fn presentation_sample_timing(
+        &self,
+        presentation_index: usize,
+    ) -> io::Result<VideoSampleTiming> {
+        let sample_index = self.presentation_sample_index(presentation_index)?;
+        let sample = &self.samples[sample_index];
+        Ok(VideoSampleTiming {
+            sample_index,
+            pts_ticks: sample.pts_ticks,
+            duration_ticks: sample.duration_ticks,
+            timescale: self.timescale,
+        })
     }
 
     pub fn presentation_sample_indices(&self) -> Vec<usize> {

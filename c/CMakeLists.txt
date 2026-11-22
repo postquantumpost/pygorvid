@@ -45,6 +45,13 @@ if(PYGORVID_BUILD_TESTS)
     target_compile_definitions(pygorvid_test PRIVATE
         PYGORVID_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME pygorvid_test COMMAND pygorvid_test)
+    set_tests_properties(pygorvid_test PROPERTIES TIMEOUT 60)
+    add_executable(pygorvid_decoder_test tests/test_decoder.cpp)
+    target_link_libraries(pygorvid_decoder_test PRIVATE pygorvid)
+    target_compile_definitions(pygorvid_decoder_test PRIVATE
+        PYGORVID_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME pygorvid_decoder_test COMMAND pygorvid_decoder_test)
+    set_tests_properties(pygorvid_decoder_test PROPERTIES TIMEOUT 60)
     find_program(PYGORVID_FFMPEG ffmpeg)
     if(PYGORVID_FFMPEG)
         add_test(NAME vidprobe_companion_ffmpeg COMMAND ${CMAKE_COMMAND}

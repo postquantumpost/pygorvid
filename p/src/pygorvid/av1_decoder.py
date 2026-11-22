@@ -16,3 +16,7 @@ class AV1Decoder:
 
     def decode_frame(self, index: int) -> Yuv420Frame:
         self.check_available()
+
+    def decode_sequential_frames(self, frame_indices):
+        for index in frame_indices:
+            yield index, self.decode_frame(index)

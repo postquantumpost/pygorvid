@@ -191,13 +191,33 @@ func TestReadAllReadaheadMatchesSequential(t *testing.T) {
 	if err := os.WriteFile(input, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sequential, err := readAllFrames(input, 2, false, false)
+	read := func(readahead bool) (int, string, error) {
+		readEnd, writeEnd, err := os.Pipe()
+		if err != nil {
+			return 0, "", err
+		}
+		previous := os.Stdout
+		os.Stdout = writeEnd
+		count, decodeErr := readAllFrames(input, 2, false, true, readahead)
+		_ = writeEnd.Close()
+		os.Stdout = previous
+		output, readErr := io.ReadAll(readEnd)
+		_ = readEnd.Close()
+		if readErr != nil {
+			return count, "", readErr
+		}
+		return count, string(output), decodeErr
+	}
+	sequential, sequentialOutput, err := read(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	readahead, err := readAllFrames(input, 2, false, false, true)
+	readahead, readaheadOutput, err := read(true)
 	if err != nil || readahead != sequential {
 		t.Fatalf("readahead read = %d, %v; sequential = %d", readahead, err, sequential)
+	}
+	if readaheadOutput != sequentialOutput {
+		t.Fatal("readahead changed hash output or presentation order")
 	}
 }
 

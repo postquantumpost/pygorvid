@@ -150,6 +150,93 @@ fn decoded_frame_cache_is_bounded_and_configurable() {
 }
 
 #[test]
+fn streaming_decoder_emits_owned_frames_in_presentation_order() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/h264/weighted-32x32.mp4");
+    let mut reference = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    reference.set_threads(1);
+    let expected: Vec<_> = (0..reference.sample_count())
+        .map(|index| reference.decode_frame(index as u64).unwrap())
+        .collect();
+
+    for (readahead, threads) in [(false, 1), (false, 4), (true, 1), (true, 4)] {
+        let mut decoder = pygorvid::VideoDecoder::open(&fixture).unwrap();
+        decoder.set_threads(threads);
+        let mut actual = Vec::new();
+        let count = decoder
+            .stream_frames(readahead, &mut |decoded| {
+                actual.push(decoded);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count, expected.len());
+        assert_eq!(
+            actual
+                .iter()
+                .map(|decoded| decoded.presentation_index)
+                .collect::<Vec<_>>(),
+            (0..expected.len()).collect::<Vec<_>>()
+        );
+        assert!(actual
+            .iter()
+            .zip(&actual[1..])
+            .all(|(left, right)| left.pts_ticks <= right.pts_ticks));
+        assert!(actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| actual.frame == *expected));
+    }
+}
+
+#[test]
+fn streaming_decoder_batches_future_closed_gops_without_reordering() {
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../tmp/decoder-streaming-rust-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let fixture = directory.join("future-gops.mp4");
+    fs::write(
+        &fixture,
+        pygorvid::Mp4Writer::new().encode(&pygorvid::H264Encoder::new()),
+    )
+    .unwrap();
+
+    let mut discovery = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    let groups = discovery
+        .closed_gop_presentation_indices()
+        .unwrap()
+        .unwrap();
+    assert!(groups.len() > 1);
+    assert_eq!(
+        groups.concat(),
+        (0..discovery.sample_count()).collect::<Vec<_>>()
+    );
+
+    let mut sequential = Vec::new();
+    discovery.set_threads(4);
+    discovery
+        .stream_frames(false, &mut |decoded| {
+            sequential.push((decoded.presentation_index, decoded.frame));
+            Ok(())
+        })
+        .unwrap();
+    let mut readahead = Vec::new();
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(&fixture).unwrap());
+    decoder.set_threads(4);
+    decoder
+        .stream_frames(true, &mut |decoded| {
+            readahead.push((decoded.presentation_index, decoded.frame));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(readahead, sequential);
+
+    fs::remove_file(fixture).unwrap();
+    fs::remove_dir(directory).unwrap();
+}
+
+#[test]
 fn h264_decoder_checkpoint_auto_saves_and_restores_cached_frames() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples");
     let checkpoint_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(

@@ -798,6 +798,8 @@ class H264Decoder:
     ):
         indices = tuple(frame_indices)
         expected = tuple(range(self.sample_count))
+        if indices == expected:
+            self.frame_cache_size = 1 if self.readahead else self.sample_count
         if (
             not self.readahead
             or indices != expected

@@ -1,3 +1,4 @@
+#include "pygorvid/decoder.hpp"
 #include "pygorvid/pygorvid.hpp"
 #include "pygorvid/h264.hpp"
 #include "pygorvid/video_samples.hpp"
@@ -9,6 +10,11 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <future>
+#include <functional>
+#include <map>
+#include <thread>
+#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 
@@ -1242,6 +1248,903 @@ bool VideoSampleReader::read_next(CompressedVideoSample& sample) {
     sample = sample_at(next_index_);
     ++next_index_;
     return true;
+}
+
+} // namespace pygorvid
+
+namespace pygorvid {
+namespace {
+
+std::uint32_t slice_pps_id(const std::vector<std::uint8_t>& nal) {
+    if (nal.size() < 2) {
+        throw std::runtime_error("H.264 slice NAL is truncated");
+    }
+    const std::vector<std::uint8_t> ebsp(nal.begin() + 1, nal.end());
+    const auto rbsp = pygorvid::ebsp_to_rbsp(ebsp);
+    pygorvid::BitReader reader(rbsp);
+    (void)reader.read_ue();
+    (void)reader.read_ue();
+    return reader.read_ue();
+}
+
+std::uint32_t slice_type(const std::vector<std::uint8_t>& nal) {
+    if (nal.size() < 2) {
+        throw std::runtime_error("H.264 slice NAL is truncated");
+    }
+    const std::vector<std::uint8_t> ebsp(nal.begin() + 1, nal.end());
+    const auto rbsp = pygorvid::ebsp_to_rbsp(ebsp);
+    pygorvid::BitReader reader(rbsp);
+    (void)reader.read_ue();
+    return reader.read_ue();
+}
+
+std::size_t decode_video(
+    const std::string& input_path,
+    const std::optional<std::size_t>& frame_index,
+    std::size_t threads,
+    std::size_t sample_start,
+    std::optional<std::size_t> sample_end,
+    const std::function<void(std::size_t, pygorvid::Yuv420Frame&&)>&
+        frame_consumer) {
+    std::vector<std::size_t> display_indices;
+
+    pygorvid::VideoSampleReader sample_reader;
+    if (!sample_reader.open(input_path)) {
+        throw std::runtime_error(sample_reader.error_info());
+    }
+    if (sample_reader.codec() == pygorvid::VideoCodec::AV1) {
+        pygorvid::AV1Decoder decoder;
+        decoder.check_available();
+    }
+    display_indices.resize(sample_reader.sample_count());
+    const auto presentation_order = sample_reader.presentation_sample_indices();
+    for (std::size_t index = 0; index < presentation_order.size(); ++index) {
+        display_indices[presentation_order[index]] = index;
+    }
+    if (frame_index && *frame_index >= sample_reader.sample_count()) {
+        throw std::out_of_range("requested frame index exceeds the sample count");
+    }
+    std::optional<std::size_t> target_sample_index;
+    if (frame_index) {
+        target_sample_index.emplace(
+            sample_reader.presentation_sample_index(*frame_index));
+    }
+    const auto sample_count = target_sample_index
+        ? *target_sample_index + 1
+        : std::min(sample_end.value_or(sample_reader.sample_count()),
+                   sample_reader.sample_count());
+    const auto& configuration = sample_reader.configuration();
+    std::vector<pygorvid::SpsInfo> sequence_parameter_sets;
+    std::vector<pygorvid::PpsInfo> picture_parameter_sets;
+    sequence_parameter_sets.reserve(configuration.sequence_parameter_sets.size());
+    picture_parameter_sets.reserve(configuration.picture_parameter_sets.size());
+    for (const auto& nal : configuration.sequence_parameter_sets) {
+        sequence_parameter_sets.push_back(pygorvid::parse_sps(nal));
+    }
+    for (const auto& nal : configuration.picture_parameter_sets) {
+        picture_parameter_sets.push_back(pygorvid::parse_pps(nal));
+    }
+
+    std::vector<pygorvid::Yuv420Frame> reference_frames;
+    std::vector<std::uint32_t> reference_frame_nums;
+    std::vector<std::optional<std::uint32_t>>
+        reference_long_term_frame_idxs;
+    std::vector<std::int64_t> reference_picture_order;
+    std::int64_t previous_poc_msb = 0;
+    std::int64_t previous_poc_lsb = 0;
+    std::uint32_t previous_poc_frame_num = 0;
+    std::int64_t previous_poc_frame_num_offset = 0;
+    std::optional<std::uint32_t> maximum_long_term_frame_idx;
+    std::size_t decoded_count = 0;
+    for (std::size_t sample_index = sample_start;
+         sample_index < sample_count;
+         ++sample_index) {
+        const auto sample = sample_reader.sample_at(sample_index);
+        auto nals = pygorvid::split_h264_sample_nals(
+            sample.data, configuration.nal_length_size);
+        for (const auto& nal : nals) {
+            if (pygorvid::parse_nal_header(nal).unit_type != 2) {
+                continue;
+            }
+            const auto pps_id = slice_pps_id(nal);
+            const auto pps = std::find_if(
+                picture_parameter_sets.begin(), picture_parameter_sets.end(),
+                [pps_id](const auto& entry) {
+                    return entry.picture_parameter_set_id == pps_id;
+                });
+            if (pps == picture_parameter_sets.end()) {
+                throw std::runtime_error(
+                    "partitioned slice references a PPS missing from avcC");
+            }
+            const auto sps = std::find_if(
+                sequence_parameter_sets.begin(), sequence_parameter_sets.end(),
+                [&pps](const auto& entry) {
+                    return entry.sps_id == pps->sequence_parameter_set_id;
+                });
+            if (sps == sequence_parameter_sets.end()) {
+                throw std::runtime_error(
+                    "partitioned slice PPS references an SPS missing from avcC");
+            }
+            nals = pygorvid::coalesce_data_partition_slices(
+                nals, *sps, *pps);
+            break;
+        }
+        std::vector<std::vector<std::uint8_t>> slices;
+        const pygorvid::SpsInfo* selected_sps = nullptr;
+        const pygorvid::PpsInfo* selected_pps = nullptr;
+        for (const auto& nal : nals) {
+            const auto header = pygorvid::parse_nal_header(nal);
+            if (header.unit_type != 1 && header.unit_type != 5) {
+                continue;
+            }
+            const auto pps_id = slice_pps_id(nal);
+            const auto pps = std::find_if(
+                picture_parameter_sets.begin(), picture_parameter_sets.end(),
+                [pps_id](const auto& entry) {
+                    return entry.picture_parameter_set_id == pps_id;
+                });
+            if (pps == picture_parameter_sets.end()) {
+                throw std::runtime_error(
+                    "slice references a PPS missing from avcC");
+            }
+            const auto sps = std::find_if(
+                sequence_parameter_sets.begin(),
+                sequence_parameter_sets.end(),
+                [&pps](const auto& entry) {
+                    return entry.sps_id == pps->sequence_parameter_set_id;
+                });
+            if (sps == sequence_parameter_sets.end()) {
+                throw std::runtime_error(
+                    "slice PPS references an SPS missing from avcC");
+            }
+            if (selected_pps != nullptr &&
+                (selected_pps->picture_parameter_set_id !=
+                     pps->picture_parameter_set_id ||
+                 selected_sps->sps_id != sps->sps_id)) {
+                throw std::runtime_error(
+                    "one MP4 sample contains slices using different parameter sets");
+            }
+            selected_sps = &*sps;
+            selected_pps = &*pps;
+            slices.push_back(nal);
+        }
+        if (slices.empty()) {
+            if (target_sample_index && sample_index == *target_sample_index) {
+                throw std::runtime_error(
+                    "requested MP4 sample contains no H.264 picture");
+            }
+            continue;
+        }
+        const bool current_picture_is_reference = std::any_of(
+            slices.begin(), slices.end(), [](const auto& nal) {
+                return pygorvid::parse_nal_header(nal).reference_idc != 0;
+            });
+        const auto& selected_sps_info = *selected_sps;
+        const auto& selected_pps_info = *selected_pps;
+        const auto normalized_slice_type = slice_type(slices.front()) % 5;
+        const bool is_i_slice =
+            normalized_slice_type == 2 || normalized_slice_type == 4;
+        const bool is_idr_slice =
+            pygorvid::parse_nal_header(slices.front()).unit_type == 5;
+        std::optional<pygorvid::PSliceHeader> slice_header;
+        std::optional<pygorvid::IdrSliceHeader> idr_header;
+        if (is_i_slice) {
+            idr_header.emplace(pygorvid::parse_idr_i_slice_header(
+                slices.front(), selected_sps_info, selected_pps_info));
+        } else {
+            slice_header.emplace(pygorvid::parse_p_slice_header(
+                slices.front(), selected_sps_info, selected_pps_info));
+        }
+        const auto current_frame_num =
+            slice_header
+                ? slice_header->frame_num
+                : idr_header->frame_num;
+        const auto current_nal_ref_idc =
+            pygorvid::parse_nal_header(slices.front()).reference_idc;
+        const auto maximum_frame_num =
+            std::uint32_t{1}
+            << (selected_sps_info.log2_max_frame_num_minus4 + 4);
+        std::int64_t current_picture_order_count = 0;
+        if (selected_sps_info.pic_order_cnt_type == 0) {
+            const auto maximum_poc_lsb = std::int64_t{1} <<
+                (*selected_sps_info.log2_max_pic_order_cnt_lsb_minus4 + 4);
+            const auto prior_msb = is_idr_slice ? 0 : previous_poc_msb;
+            const auto prior_lsb = is_idr_slice ? 0 : previous_poc_lsb;
+            const auto poc_lsb = slice_header
+                ? slice_header->pic_order_cnt_lsb
+                : idr_header->pic_order_cnt_lsb;
+            auto current_msb = prior_msb;
+            if (poc_lsb < prior_lsb &&
+                prior_lsb - poc_lsb >= maximum_poc_lsb / 2) {
+                current_msb += maximum_poc_lsb;
+            } else if (poc_lsb > prior_lsb &&
+                       poc_lsb - prior_lsb > maximum_poc_lsb / 2) {
+                current_msb -= maximum_poc_lsb;
+            }
+            current_picture_order_count = current_msb + poc_lsb;
+            if (current_nal_ref_idc != 0) {
+                previous_poc_msb = current_msb;
+                previous_poc_lsb = poc_lsb;
+            }
+        } else {
+            if (is_idr_slice) {
+                previous_poc_frame_num = 0;
+                previous_poc_frame_num_offset = 0;
+            }
+            auto frame_num_offset = previous_poc_frame_num_offset;
+            if (previous_poc_frame_num > current_frame_num) {
+                frame_num_offset += maximum_frame_num;
+            }
+            if (selected_sps_info.pic_order_cnt_type == 2 && !is_idr_slice) {
+                current_picture_order_count =
+                    2 * (frame_num_offset + current_frame_num);
+                if (current_nal_ref_idc == 0) {
+                    --current_picture_order_count;
+                }
+            }
+            if (current_nal_ref_idc != 0) {
+                previous_poc_frame_num = current_frame_num;
+                previous_poc_frame_num_offset = frame_num_offset;
+            }
+        }
+        if (is_idr_slice) {
+            reference_frames.clear();
+            reference_frame_nums.clear();
+            reference_long_term_frame_idxs.clear();
+            reference_picture_order.clear();
+            maximum_long_term_frame_idx =
+                idr_header->long_term_reference
+                    ? std::optional<std::uint32_t>{0}
+                    : std::nullopt;
+        }
+        const auto picture_number = [&](std::uint32_t reference_frame_num) {
+            return reference_frame_num > current_frame_num
+                       ? static_cast<std::int64_t>(reference_frame_num) -
+                             maximum_frame_num
+                       : static_cast<std::int64_t>(reference_frame_num);
+        };
+        std::vector<std::size_t> reference_indices;
+        reference_indices.reserve(reference_frames.size());
+        for (std::size_t index = 0; index < reference_frames.size(); ++index) {
+            reference_indices.push_back(index);
+        }
+        std::sort(reference_indices.begin(), reference_indices.end(),
+                  [&](std::size_t left, std::size_t right) {
+                      const auto left_long_term =
+                          reference_long_term_frame_idxs[left];
+                      const auto right_long_term =
+                          reference_long_term_frame_idxs[right];
+                      if (left_long_term.has_value() !=
+                          right_long_term.has_value()) {
+                          return !left_long_term.has_value();
+                      }
+                      if (left_long_term && right_long_term) {
+                          return *left_long_term < *right_long_term;
+                      }
+                      return picture_number(reference_frame_nums[left]) >
+                             picture_number(reference_frame_nums[right]);
+                  });
+        auto reference_indices_l0 = reference_indices;
+        std::vector<std::size_t> reference_indices_l1;
+        if (slice_header && slice_header->slice_type == 1) {
+            std::vector<std::size_t> before;
+            std::vector<std::size_t> equal;
+            std::vector<std::size_t> after;
+            std::vector<std::size_t> long_term;
+            for (std::size_t index = 0; index < reference_frames.size();
+                 ++index) {
+                if (reference_long_term_frame_idxs[index]) {
+                    long_term.push_back(index);
+                } else if (reference_picture_order[index] < sample.pts_ticks) {
+                    before.push_back(index);
+                } else if (reference_picture_order[index] == sample.pts_ticks) {
+                    equal.push_back(index);
+                } else {
+                    after.push_back(index);
+                }
+            }
+            std::sort(before.begin(), before.end(),
+                      [&](std::size_t left, std::size_t right) {
+                          return reference_picture_order[left] >
+                                 reference_picture_order[right];
+                      });
+            std::sort(after.begin(), after.end(),
+                      [&](std::size_t left, std::size_t right) {
+                          return reference_picture_order[left] <
+                                 reference_picture_order[right];
+                      });
+            std::sort(long_term.begin(), long_term.end(),
+                      [&](std::size_t left, std::size_t right) {
+                          return *reference_long_term_frame_idxs[left] <
+                                 *reference_long_term_frame_idxs[right];
+                      });
+            reference_indices_l0 = before;
+            reference_indices_l0.insert(reference_indices_l0.end(),
+                                        equal.begin(), equal.end());
+            reference_indices_l0.insert(reference_indices_l0.end(),
+                                        after.begin(), after.end());
+            reference_indices_l0.insert(reference_indices_l0.end(),
+                                        long_term.begin(), long_term.end());
+            reference_indices_l1 = after;
+            reference_indices_l1.insert(reference_indices_l1.end(),
+                                        equal.begin(), equal.end());
+            reference_indices_l1.insert(reference_indices_l1.end(),
+                                        before.begin(), before.end());
+            reference_indices_l1.insert(reference_indices_l1.end(),
+                                        long_term.begin(), long_term.end());
+            if (reference_indices_l0 == reference_indices_l1 &&
+                reference_indices_l1.size() > 1) {
+                std::swap(reference_indices_l1[0], reference_indices_l1[1]);
+            }
+        }
+        std::vector<const pygorvid::Yuv420Frame*> reference_list_l0;
+        std::vector<const pygorvid::Yuv420Frame*> reference_list_l1;
+        reference_list_l0.reserve(reference_indices_l0.size());
+        reference_list_l1.reserve(reference_indices_l1.size());
+        for (const auto index : reference_indices_l0) {
+            reference_list_l0.push_back(&reference_frames[index]);
+        }
+        for (const auto index : reference_indices_l1) {
+            reference_list_l1.push_back(&reference_frames[index]);
+        }
+        const auto apply_modifications =
+            [&](const std::vector<pygorvid::ReferenceListModification>&
+                    modifications,
+                std::vector<const pygorvid::Yuv420Frame*>& list,
+                std::uint32_t active_count) {
+                auto predicted_picture_number =
+                    static_cast<std::uint64_t>(current_frame_num);
+                const auto picture_number_modulus =
+                    static_cast<std::uint64_t>(maximum_frame_num);
+                std::size_t insertion_index = 0;
+                for (const auto& modification : modifications) {
+                    if (modification.modification_of_pic_nums_idc == 2) {
+                        const auto selected_index = std::find(
+                            reference_long_term_frame_idxs.begin(),
+                            reference_long_term_frame_idxs.end(),
+                            std::optional<std::uint32_t>{
+                                modification.long_term_pic_num});
+                        if (selected_index ==
+                            reference_long_term_frame_idxs.end()) {
+                            throw std::runtime_error(
+                                "reference-list modification selects an unavailable long-term picture");
+                        }
+                        const auto index = static_cast<std::size_t>(
+                            std::distance(reference_long_term_frame_idxs.begin(),
+                                          selected_index));
+                        const auto* selected_frame = &reference_frames[index];
+                        list.erase(std::remove(list.begin(), list.end(),
+                                               selected_frame),
+                                   list.end());
+                        list.insert(list.begin() +
+                                        static_cast<std::ptrdiff_t>(
+                                            insertion_index),
+                                    selected_frame);
+                        ++insertion_index;
+                        continue;
+                    }
+                    const auto difference =
+                        static_cast<std::uint64_t>(
+                            modification.abs_diff_pic_num_minus1) +
+                        1;
+                    if (modification.modification_of_pic_nums_idc == 0) {
+                        if (difference > picture_number_modulus) {
+                            throw std::runtime_error(
+                                "reference-list modification difference exceeds MaxPicNum");
+                        }
+                        predicted_picture_number =
+                            (predicted_picture_number +
+                             picture_number_modulus - difference) %
+                            picture_number_modulus;
+                    } else {
+                        if (difference > picture_number_modulus) {
+                            throw std::runtime_error(
+                                "reference-list modification difference exceeds MaxPicNum");
+                        }
+                        predicted_picture_number =
+                            (predicted_picture_number + difference) %
+                            picture_number_modulus;
+                    }
+                    const auto target_picture_number =
+                        predicted_picture_number > current_frame_num
+                            ? static_cast<std::int64_t>(
+                                  predicted_picture_number) -
+                                  maximum_frame_num
+                            : static_cast<std::int64_t>(
+                                  predicted_picture_number);
+                    std::optional<std::size_t> selected_index;
+                    for (std::size_t index = 0;
+                         index < reference_frame_nums.size(); ++index) {
+                        if (reference_long_term_frame_idxs[index]) {
+                            continue;
+                        }
+                        if (picture_number(reference_frame_nums[index]) ==
+                            target_picture_number) {
+                            selected_index = index;
+                            break;
+                        }
+                    }
+                    if (!selected_index) {
+                        throw std::runtime_error(
+                            "reference-list modification selects an unavailable picture");
+                    }
+                    const auto* selected_frame =
+                        &reference_frames[*selected_index];
+                    list.erase(std::remove(list.begin(), list.end(),
+                                           selected_frame),
+                               list.end());
+                    list.insert(list.begin() +
+                                    static_cast<std::ptrdiff_t>(
+                                        insertion_index),
+                                selected_frame);
+                    ++insertion_index;
+                }
+                if (list.size() > active_count) {
+                    list.resize(active_count);
+                }
+            };
+        if (slice_header && slice_header->slice_type == 1) {
+            const auto active_l0 =
+                slice_header->num_ref_idx_l0_active_minus1 + 1;
+            const auto active_l1 =
+                slice_header->num_ref_idx_l1_active_minus1 + 1;
+            apply_modifications(
+                slice_header->ref_pic_list_modifications_l0, reference_list_l0,
+                active_l0);
+            apply_modifications(
+                slice_header->ref_pic_list_modifications_l1, reference_list_l1,
+                active_l1);
+        } else if (slice_header) {
+            const auto active_l0 =
+                slice_header->num_ref_idx_l0_active_minus1 + 1;
+            apply_modifications(
+                slice_header->ref_pic_list_modifications_l0, reference_list_l0,
+                active_l0);
+        }
+        auto decoded = pygorvid::decode_h264_reference_frame(
+            slices, selected_sps_info, selected_pps_info, reference_list_l0,
+            reference_list_l1, display_indices[sample_index],
+            current_picture_order_count, threads);
+        decoded.picture_order_count = current_picture_order_count;
+        ++decoded_count;
+        if (current_picture_is_reference) {
+            frame_consumer(display_indices[sample_index],
+                           pygorvid::Yuv420Frame(decoded));
+        } else {
+            frame_consumer(display_indices[sample_index],
+                           std::move(decoded));
+        }
+        if (current_picture_is_reference) {
+            auto stored_frame_num = current_frame_num;
+            std::optional<std::uint32_t> current_long_term_frame_idx =
+                idr_header && idr_header->long_term_reference
+                    ? std::optional<std::uint32_t>{0}
+                    : std::nullopt;
+            if (slice_header &&
+                slice_header->adaptive_ref_pic_marking_mode) {
+                const auto erase_reference = [&](std::size_t index) {
+                    reference_frames.erase(reference_frames.begin() +
+                                           static_cast<std::ptrdiff_t>(index));
+                    reference_frame_nums.erase(reference_frame_nums.begin() +
+                                               static_cast<std::ptrdiff_t>(index));
+                    reference_long_term_frame_idxs.erase(
+                        reference_long_term_frame_idxs.begin() +
+                        static_cast<std::ptrdiff_t>(index));
+                    reference_picture_order.erase(
+                        reference_picture_order.begin() +
+                        static_cast<std::ptrdiff_t>(index));
+                };
+                const auto short_term_index =
+                    [&](std::uint32_t difference_minus1)
+                    -> std::optional<std::size_t> {
+                    const auto picture_number =
+                        static_cast<std::int64_t>(current_frame_num) -
+                        (static_cast<std::int64_t>(difference_minus1) + 1);
+                    for (std::size_t index = 0;
+                         index < reference_frames.size(); ++index) {
+                        if (reference_long_term_frame_idxs[index]) {
+                            continue;
+                        }
+                        const auto frame_num_wrap =
+                            reference_frame_nums[index] > current_frame_num
+                                ? static_cast<std::int64_t>(
+                                      reference_frame_nums[index]) -
+                                      maximum_frame_num
+                                : static_cast<std::int64_t>(
+                                      reference_frame_nums[index]);
+                        if (frame_num_wrap == picture_number) {
+                            return index;
+                        }
+                    }
+                    return std::nullopt;
+                };
+                for (const auto& operation :
+                     slice_header->memory_management_operations) {
+                    switch (operation.operation) {
+                    case 1:
+                    case 3: {
+                        const auto target_index =
+                            short_term_index(operation.operands[0]);
+                        if (!target_index) {
+                            throw std::runtime_error(
+                                "adaptive reference marking selects an unavailable short-term picture");
+                        }
+                        if (operation.operation == 1) {
+                            erase_reference(*target_index);
+                        } else {
+                            const auto long_term_index =
+                                operation.operands[1];
+                            for (std::size_t index =
+                                     reference_long_term_frame_idxs.size();
+                                 index > 0; --index) {
+                                if (index - 1 != *target_index &&
+                                    reference_long_term_frame_idxs[index - 1] ==
+                                        long_term_index) {
+                                    erase_reference(index - 1);
+                                }
+                            }
+                            const auto updated_target_index =
+                                short_term_index(operation.operands[0]);
+                            if (!updated_target_index) {
+                                throw std::runtime_error(
+                                    "adaptive reference marking target disappeared");
+                            }
+                            reference_long_term_frame_idxs[
+                                *updated_target_index] = long_term_index;
+                        }
+                        break;
+                    }
+                    case 2: {
+                        const auto target = std::find(
+                            reference_long_term_frame_idxs.begin(),
+                            reference_long_term_frame_idxs.end(),
+                            std::optional<std::uint32_t>{
+                                operation.operands[0]});
+                        if (target == reference_long_term_frame_idxs.end()) {
+                            throw std::runtime_error(
+                                "adaptive reference marking selects an unavailable long-term picture");
+                        }
+                        erase_reference(static_cast<std::size_t>(
+                            std::distance(reference_long_term_frame_idxs.begin(),
+                                          target)));
+                        break;
+                    }
+                    case 4: {
+                        const auto maximum_plus_one = operation.operands[0];
+                        maximum_long_term_frame_idx =
+                            maximum_plus_one == 0
+                                ? std::nullopt
+                                : std::optional<std::uint32_t>{
+                                      maximum_plus_one - 1};
+                        for (std::size_t index =
+                                 reference_long_term_frame_idxs.size();
+                             index > 0; --index) {
+                            const auto long_term_index =
+                                reference_long_term_frame_idxs[index - 1];
+                            if (long_term_index &&
+                                (!maximum_long_term_frame_idx ||
+                                 *long_term_index >
+                                     *maximum_long_term_frame_idx)) {
+                                erase_reference(index - 1);
+                            }
+                        }
+                        break;
+                    }
+                    case 5:
+                        reference_frames.clear();
+                        reference_frame_nums.clear();
+                        reference_long_term_frame_idxs.clear();
+                        reference_picture_order.clear();
+                        maximum_long_term_frame_idx.reset();
+                        stored_frame_num = 0;
+                        current_long_term_frame_idx.reset();
+                        break;
+                    case 6: {
+                        const auto long_term_index = operation.operands[0];
+                        if (!maximum_long_term_frame_idx ||
+                            long_term_index > *maximum_long_term_frame_idx) {
+                            throw std::runtime_error(
+                                "adaptive reference marking exceeds MaxLongTermFrameIdx");
+                        }
+                        for (std::size_t index =
+                                 reference_long_term_frame_idxs.size();
+                             index > 0; --index) {
+                            if (reference_long_term_frame_idxs[index - 1] ==
+                                long_term_index) {
+                                erase_reference(index - 1);
+                            }
+                        }
+                        current_long_term_frame_idx = long_term_index;
+                        break;
+                    }
+                    default:
+                        throw std::runtime_error(
+                            "adaptive reference marking operation is invalid");
+                    }
+                }
+            } else if (!idr_header) {
+                const auto maximum_references = std::max<std::size_t>(
+                    1, selected_sps_info.max_num_ref_frames);
+                if (reference_frames.size() >= maximum_references) {
+                    std::optional<std::size_t> oldest_index;
+                    auto oldest_picture_number =
+                        std::numeric_limits<std::int64_t>::max();
+                    for (std::size_t index = 0;
+                         index < reference_frames.size(); ++index) {
+                        if (reference_long_term_frame_idxs[index]) {
+                            continue;
+                        }
+                        const auto wrapped_picture_number =
+                            picture_number(reference_frame_nums[index]);
+                        if (wrapped_picture_number < oldest_picture_number) {
+                            oldest_picture_number = wrapped_picture_number;
+                            oldest_index = index;
+                        }
+                    }
+                    if (!oldest_index) {
+                        throw std::runtime_error(
+                            "sliding-window marking found no short-term reference to evict");
+                    }
+                    reference_frames.erase(reference_frames.begin() +
+                                           static_cast<std::ptrdiff_t>(
+                                               *oldest_index));
+                    reference_frame_nums.erase(reference_frame_nums.begin() +
+                                               static_cast<std::ptrdiff_t>(
+                                                   *oldest_index));
+                    reference_long_term_frame_idxs.erase(
+                        reference_long_term_frame_idxs.begin() +
+                        static_cast<std::ptrdiff_t>(*oldest_index));
+                    reference_picture_order.erase(
+                        reference_picture_order.begin() +
+                        static_cast<std::ptrdiff_t>(*oldest_index));
+                }
+            }
+            decoded.long_term_reference =
+                current_long_term_frame_idx.has_value();
+            reference_frames.push_back(std::move(decoded));
+            reference_frame_nums.push_back(stored_frame_num);
+            reference_long_term_frame_idxs.push_back(
+                current_long_term_frame_idx);
+            reference_picture_order.push_back(sample.pts_ticks);
+        }
+    }
+    if (decoded_count == 0) {
+        throw std::runtime_error("no supported H.264 picture was decoded");
+    }
+    return decoded_count;
+}
+using DecodedFrame = std::pair<std::size_t, pygorvid::Yuv420Frame>;
+
+std::vector<std::pair<std::size_t, std::size_t>> closed_gop_ranges(
+    const std::string& input_path) {
+    pygorvid::VideoSampleReader reader;
+    if (!reader.open(input_path)) {
+        throw std::runtime_error(reader.error_info());
+    }
+    std::vector<std::size_t> starts;
+    for (std::size_t sample_index = 0;
+         sample_index < reader.sample_count(); ++sample_index) {
+        const auto sample = reader.sample_at(sample_index);
+        if (!sample.is_sync) {
+            continue;
+        }
+        const auto nals = pygorvid::split_h264_sample_nals(
+            sample.data, reader.configuration().nal_length_size);
+        const bool closed = std::any_of(
+            nals.begin(), nals.end(), [](const auto& nal) {
+                return pygorvid::parse_nal_header(nal).unit_type == 5;
+            });
+        if (closed) {
+            starts.push_back(sample_index);
+        }
+    }
+    if (starts.size() < 2) {
+        return {};
+    }
+    if (starts.front() != 0) {
+        starts.insert(starts.begin(), 0);
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> ranges;
+    ranges.reserve(starts.size());
+    for (std::size_t index = 0; index < starts.size(); ++index) {
+        ranges.emplace_back(
+            starts[index],
+            index + 1 < starts.size()
+                ? starts[index + 1]
+                : reader.sample_count());
+    }
+    return ranges;
+}
+
+std::vector<DecodedFrame> decode_gop_range(
+    const std::string& input_path, std::size_t threads,
+    std::size_t start, std::size_t end) {
+    std::vector<DecodedFrame> frames;
+    const std::function<void(std::size_t,
+                             pygorvid::Yuv420Frame&&)> consumer =
+        [&frames](std::size_t index, pygorvid::Yuv420Frame&& frame) {
+            frames.emplace_back(index, std::move(frame));
+        };
+    (void)decode_video(
+        input_path, std::nullopt, threads, start, end, consumer);
+    std::sort(frames.begin(), frames.end(),
+              [](const auto& left, const auto& right) {
+                  return left.first < right.first;
+              });
+    return frames;
+}
+
+using DecoderConsumer = std::function<void(std::size_t, Yuv420Frame&&)>;
+
+struct DecodeStopped {};
+
+std::size_t decode_sequential(
+    const std::string& input_path, std::size_t threads,
+    const std::optional<std::size_t>& presentation_frame,
+    const DecoderConsumer& consumer) {
+    VideoSampleReader reader;
+    if (!reader.open(input_path)) throw std::runtime_error(reader.error_info());
+    std::size_t decoded = 0;
+    std::size_t next = 0;
+    std::map<std::size_t, Yuv420Frame> pending;
+    const std::function<void(std::size_t, Yuv420Frame&&)> receive =
+        [&](std::size_t index, Yuv420Frame&& frame) {
+            if (presentation_frame) {
+                if (index != *presentation_frame) return;
+                consumer(index, std::move(frame));
+                ++decoded;
+                return;
+            }
+            pending.emplace(index, std::move(frame));
+            while (pending.find(next) != pending.end()) {
+                auto selected = std::move(pending.at(next));
+                pending.erase(next);
+                consumer(next, std::move(selected));
+                ++next;
+                ++decoded;
+            }
+        };
+    (void)decode_video(input_path, presentation_frame, threads, 0,
+                       std::nullopt, receive);
+    return decoded;
+}
+
+std::size_t decode_readahead(
+    const std::string& input_path, std::size_t threads,
+    const DecoderConsumer& consumer) {
+    auto ranges = closed_gop_ranges(input_path);
+    if (ranges.size() < 2 || threads < 2) {
+        return decode_sequential(input_path, threads, std::nullopt, consumer);
+    }
+    VideoSampleReader reader;
+    if (!reader.open(input_path)) throw std::runtime_error(reader.error_info());
+    auto worker_limit = std::min<std::size_t>(threads - 1, ranges.size() - 1);
+    std::size_t maximum_gop_frames = 0;
+    for (const auto& range : ranges) {
+        maximum_gop_frames = std::max(maximum_gop_frames,
+                                      range.second - range.first);
+    }
+    if (!reader.configuration().sequence_parameter_sets.empty()) {
+        const auto sps = parse_sps(
+            reader.configuration().sequence_parameter_sets.front());
+        const auto page_size = sysconf(_SC_PAGESIZE);
+        const auto available_pages = sysconf(_SC_AVPHYS_PAGES);
+        if (page_size > 0 && available_pages > 0 && sps.width != 0 &&
+            sps.height != 0 && maximum_gop_frames != 0) {
+            const auto available_bytes =
+                static_cast<std::uint64_t>(page_size) *
+                static_cast<std::uint64_t>(available_pages);
+            const auto frame_bytes = static_cast<std::uint64_t>(sps.width) *
+                static_cast<std::uint64_t>(sps.height) * 3 / 2;
+            const auto batch_bytes = frame_bytes * maximum_gop_frames;
+            if (batch_bytes != 0) {
+                worker_limit = std::min(worker_limit,
+                    static_cast<std::size_t>((available_bytes / 2) /
+                                             batch_bytes));
+            }
+        }
+    }
+    if (worker_limit == 0) {
+        return decode_sequential(input_path, threads, std::nullopt, consumer);
+    }
+
+    std::map<std::size_t, std::future<std::vector<DecodedFrame>>> jobs;
+    std::size_t next_group = 1;
+    const auto start_job = [&](std::size_t group) {
+        jobs.emplace(group, std::async(std::launch::async, [&, group] {
+            return decode_gop_range(input_path, threads,
+                                    ranges[group].first,
+                                    ranges[group].second);
+        }));
+    };
+    for (; next_group <= worker_limit; ++next_group) start_job(next_group);
+
+    std::map<std::size_t, Yuv420Frame> foreground;
+    std::size_t next_presentation = 0;
+    std::size_t consumed = 0;
+    const auto receive = [&](std::size_t index, Yuv420Frame frame) {
+        foreground.emplace(index, std::move(frame));
+        while (foreground.find(next_presentation) != foreground.end()) {
+            auto selected = std::move(foreground.at(next_presentation));
+            foreground.erase(next_presentation);
+            consumer(next_presentation, std::move(selected));
+            ++next_presentation;
+            ++consumed;
+        }
+    };
+    for (std::size_t group = 0; group < ranges.size(); ++group) {
+        if (group == 0) {
+            const std::function<void(std::size_t, Yuv420Frame&&)> forward =
+                [&](std::size_t index, Yuv420Frame&& frame) {
+                    receive(index, std::move(frame));
+                };
+            (void)decode_video(input_path, std::nullopt, threads,
+                               ranges[group].first, ranges[group].second,
+                               forward);
+        } else {
+            auto frames = jobs.at(group).get();
+            jobs.erase(group);
+            for (auto& [index, frame] : frames) {
+                receive(index, std::move(frame));
+            }
+        }
+        if (next_group < ranges.size()) start_job(next_group++);
+    }
+    return consumed;
+}
+
+} // namespace
+
+VideoDecoder::VideoDecoder(std::string path) : path_(std::move(path)) {}
+
+std::size_t VideoDecoder::decode(
+    const VideoDecodeOptions& options, const FrameConsumer& consumer) const {
+    if (!consumer) throw std::invalid_argument("frame consumer is required");
+    VideoSampleReader reader;
+    if (!reader.open(path_)) throw std::runtime_error(reader.error_info());
+    if (options.presentation_frame &&
+        *options.presentation_frame >= reader.sample_count()) {
+        throw std::out_of_range("requested frame index exceeds the sample count");
+    }
+    const auto presentation = reader.presentation_sample_indices();
+    const auto timescale = reader.timescale();
+    bool stopped = false;
+    std::size_t emitted = 0;
+    const DecoderConsumer emit = [&](std::size_t index, Yuv420Frame&& frame) {
+        if (stopped || index >= presentation.size()) return;
+        const auto sample = reader.sample_at(presentation[index]);
+        DecodedVideoFrame decoded{index,
+            timescale == 0 ? 0.0 : static_cast<double>(sample.duration_ticks) /
+                                      static_cast<double>(timescale),
+            std::move(frame)};
+        stopped = !consumer(std::move(decoded));
+        ++emitted;
+        if (stopped) throw DecodeStopped{};
+    };
+    try {
+        if (options.presentation_frame) {
+            (void)decode_sequential(path_, options.threads,
+                                    options.presentation_frame, emit);
+        } else if (options.readahead) {
+            (void)decode_readahead(path_, options.threads, emit);
+        } else {
+            (void)decode_sequential(path_, options.threads, std::nullopt, emit);
+        }
+    } catch (const DecodeStopped&) {
+    }
+    return emitted;
+}
+
+DecodedVideoFrame VideoDecoder::decode_frame(
+    std::size_t presentation_index, std::size_t threads) const {
+    std::optional<DecodedVideoFrame> result;
+    decode(VideoDecodeOptions{threads, false, presentation_index},
+           [&](DecodedVideoFrame&& frame) {
+               result.emplace(std::move(frame));
+               return false;
+           });
+    if (!result) throw std::runtime_error("no supported H.264 picture was decoded");
+    return std::move(*result);
 }
 
 } // namespace pygorvid

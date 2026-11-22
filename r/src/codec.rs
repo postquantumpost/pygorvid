@@ -4,6 +4,7 @@ use crate::{
     Av1Configuration, Av1Decoder, AvcConfiguration, H264Decoder, HevcConfiguration, HevcDecoder,
     VideoSampleReader, Yuv420Frame,
 };
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -93,6 +94,12 @@ pub enum VideoDecoder {
 }
 
 impl VideoDecoder {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, crate::DecodeError> {
+        let reader = VideoSampleReader::open(path)
+            .map_err(|error| crate::DecodeError::DecodeFailure(error.to_string()))?;
+        Self::new(reader)
+    }
+
     pub fn new(reader: VideoSampleReader) -> Result<Self, crate::DecodeError> {
         match reader.codec() {
             VideoCodec::H264 => Ok(Self::H264(H264Decoder::new(reader))),
@@ -146,6 +153,19 @@ impl VideoDecoder {
             Self::Av1(decoder) => decoder
                 .decode_frame(index)
                 .map_err(crate::DecodeError::Codec),
+        }
+    }
+
+    pub fn stream_frames(
+        &mut self,
+        readahead: bool,
+        consume: &mut dyn FnMut(crate::DecodedVideoFrame) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        match self {
+            Self::H264(decoder) => decoder.stream_frames(readahead, consume),
+            Self::Hevc(_) | Self::Av1(_) => {
+                Err("streaming decode is not implemented for this codec".into())
+            }
         }
     }
 }

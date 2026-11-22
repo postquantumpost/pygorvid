@@ -4,11 +4,29 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::reconstruction::Yuv420Frame;
 use bincode::Options;
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::H264Decoder;
+
+    #[test]
+    fn memory_worker_limit_reserves_half_of_available_memory() {
+        assert_eq!(H264Decoder::memory_worker_limit_for(4_000, 4, 100, 10), 2);
+        assert_eq!(H264Decoder::memory_worker_limit_for(500, 4, 100, 10), 0);
+        assert_eq!(H264Decoder::memory_worker_limit_for(500, 4, 0, 10), 4);
+        assert_eq!(
+            H264Decoder::memory_worker_limit_for(usize::MAX, 4, usize::MAX, 2),
+            0
+        );
+    }
+}
 
 const CHECKPOINT_MAGIC: &[u8; 16] = b"PYGORVID-RS-CKPT";
 const CHECKPOINT_VERSION: u32 = 1;
@@ -885,9 +903,252 @@ impl Default for H264Decoder {
 pub use crate::codec::default_decoder_threads;
 
 impl H264Decoder {
+    pub fn closed_gop_presentation_indices(
+        &mut self,
+    ) -> Result<Option<Vec<Vec<usize>>>, DecodeError> {
+        let reader = self
+            .sample_reader
+            .as_mut()
+            .ok_or(DecodeError::MissingSampleReader)?;
+        let order = reader.presentation_sample_indices();
+        let mut presentation_positions = vec![0; order.len()];
+        for (presentation, sample) in order.into_iter().enumerate() {
+            presentation_positions[sample] = presentation;
+        }
+        let length_size = usize::from(reader.configuration().nal_length_size);
+        let sample_count = reader.sample_count();
+        let mut starts = Vec::new();
+        for sample_index in 0..sample_count {
+            let sample = reader
+                .sample_at(sample_index)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
+            if !sample.is_sync {
+                continue;
+            }
+            let closed = crate::split_h264_sample_nals(&sample.data, length_size)
+                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?
+                .iter()
+                .any(|nal| crate::parse_nal_header(nal).is_ok_and(|header| header.unit_type == 5));
+            if closed {
+                starts.push(sample_index);
+            }
+        }
+        if starts.len() < 2 {
+            return Ok(None);
+        }
+        if starts[0] != 0 {
+            starts.insert(0, 0);
+        }
+        let mut groups = Vec::with_capacity(starts.len());
+        for (group_index, start) in starts.iter().copied().enumerate() {
+            let end = starts.get(group_index + 1).copied().unwrap_or(sample_count);
+            let mut frames: Vec<usize> = (start..end)
+                .map(|sample| presentation_positions[sample])
+                .collect();
+            frames.sort_unstable();
+            groups.push(frames);
+        }
+        if groups.iter().flatten().copied().ne(0..sample_count) {
+            return Ok(None);
+        }
+        Ok(Some(groups))
+    }
+
+    pub fn stream_frames(
+        &mut self,
+        readahead: bool,
+        consume: &mut dyn FnMut(crate::DecodedVideoFrame) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        if !readahead {
+            return self.stream_frames_sequentially(consume);
+        }
+        let Some(groups) = self
+            .closed_gop_presentation_indices()
+            .map_err(|error| error.to_string())?
+        else {
+            return self.stream_frames_sequentially(consume);
+        };
+        let path = match self
+            .sample_reader
+            .as_ref()
+            .and_then(|reader| reader.path().map(Path::to_path_buf))
+        {
+            Some(path) => path,
+            None => return self.stream_frames_sequentially(consume),
+        };
+        let requested_workers = self.threads().saturating_sub(1).min(groups.len() - 1);
+        let worker_limit = self.memory_worker_limit(&groups, requested_workers);
+        if worker_limit == 0 {
+            return self.stream_frames_sequentially(consume);
+        }
+
+        let mut jobs = HashMap::new();
+        for group_index in 1..=worker_limit {
+            jobs.insert(
+                group_index,
+                Self::spawn_h264_gop(
+                    path.clone(),
+                    &groups[group_index],
+                    self.threads(),
+                    self.verbose,
+                ),
+            );
+        }
+        let mut next_group = worker_limit + 1;
+        let mut consumed = 0;
+        for (group_index, frames) in groups.iter().enumerate() {
+            if group_index == 0 {
+                for &index in frames {
+                    let frame = self
+                        .decode_frame(index as u64)
+                        .map_err(|error| format!("decode frame {index}: {error}"))?;
+                    consume(self.decoded_video_frame(index, frame)?)?;
+                    consumed += 1;
+                }
+            } else {
+                let decoded = jobs
+                    .remove(&group_index)
+                    .ok_or_else(|| "readahead worker is unavailable".to_string())?
+                    .recv()
+                    .map_err(|_| "readahead worker ended unexpectedly".to_string())??;
+                for (index, frame) in decoded {
+                    consume(self.decoded_video_frame(index, frame)?)?;
+                    consumed += 1;
+                }
+            }
+            if group_index > 0 && next_group < groups.len() {
+                jobs.insert(
+                    next_group,
+                    Self::spawn_h264_gop(
+                        path.clone(),
+                        &groups[next_group],
+                        self.threads(),
+                        self.verbose,
+                    ),
+                );
+                next_group += 1;
+            }
+        }
+        Ok(consumed)
+    }
+
+    fn stream_frames_sequentially(
+        &mut self,
+        consume: &mut dyn FnMut(crate::DecodedVideoFrame) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        let count = self.sample_count();
+        for index in 0..count {
+            let frame = self
+                .decode_frame(index as u64)
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            consume(self.decoded_video_frame(index, frame)?)?;
+        }
+        Ok(count)
+    }
+
+    fn decoded_video_frame(
+        &self,
+        presentation_index: usize,
+        frame: crate::Yuv420Frame,
+    ) -> Result<crate::DecodedVideoFrame, String> {
+        let timing = self
+            .sample_reader
+            .as_ref()
+            .ok_or_else(|| "H.264 decoder requires a sample reader".to_string())?
+            .presentation_sample_timing(presentation_index)
+            .map_err(|error| error.to_string())?;
+        Ok(crate::DecodedVideoFrame {
+            presentation_index,
+            sample_index: timing.sample_index,
+            pts_ticks: timing.pts_ticks,
+            duration_ticks: timing.duration_ticks,
+            timescale: timing.timescale,
+            frame,
+        })
+    }
+
+    fn memory_worker_limit(&self, groups: &[Vec<usize>], requested: usize) -> usize {
+        let Some(available) = Self::available_memory_bytes() else {
+            return requested;
+        };
+        let frame_bytes = self
+            .sequence_parameter_sets
+            .iter()
+            .filter_map(|sps| {
+                usize::try_from(sps.width)
+                    .ok()?
+                    .checked_mul(usize::try_from(sps.height).ok()?)
+                    .and_then(|pixels| pixels.checked_mul(3))
+                    .map(|bytes| bytes / 2)
+            })
+            .max()
+            .unwrap_or(0);
+        let maximum_frames = groups.iter().map(Vec::len).max().unwrap_or(0);
+        Self::memory_worker_limit_for(available, requested, frame_bytes, maximum_frames)
+    }
+
     /// Sets the number of decoder threads; zero selects `default_decoder_threads()`.
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads;
+    }
+
+    fn spawn_h264_gop(
+        path: PathBuf,
+        frames: &[usize],
+        threads: usize,
+        verbose: bool,
+    ) -> Receiver<Result<Vec<(usize, crate::Yuv420Frame)>, String>> {
+        let frames = frames.to_vec();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let decoded = (|| {
+                let reader =
+                    crate::VideoSampleReader::open(path).map_err(|error| error.to_string())?;
+                let mut decoder = H264Decoder::new(reader);
+                decoder.set_threads(threads);
+                decoder.set_verbose(verbose);
+                frames
+                    .into_iter()
+                    .map(|index| {
+                        decoder
+                            .decode_frame(index as u64)
+                            .map(|frame| (index, frame))
+                            .map_err(|error| format!("decode frame {index}: {error}"))
+                    })
+                    .collect()
+            })();
+            let _ = sender.send(decoded);
+        });
+        receiver
+    }
+
+    fn available_memory_bytes() -> Option<usize> {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                if fields.next()? != "MemAvailable:" {
+                    return None;
+                }
+                fields.next()?.parse::<usize>().ok()?.checked_mul(1024)
+            })
+    }
+
+    fn memory_worker_limit_for(
+        available: usize,
+        requested: usize,
+        frame_bytes: usize,
+        maximum_frames: usize,
+    ) -> usize {
+        let Some(gop_bytes) = frame_bytes.checked_mul(maximum_frames) else {
+            return 0;
+        };
+        if gop_bytes == 0 {
+            requested
+        } else {
+            requested.min((available / 2) / gop_bytes)
+        }
     }
 
     pub fn set_verbose(&mut self, verbose: bool) {

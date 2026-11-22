@@ -71,7 +71,7 @@ pub use codec::{
     default_decoder_threads, CodecConfiguration, CodecError, CodecErrorCode, VideoCodec,
     VideoDecoder,
 };
-pub use codec_frame::Yuv420Frame;
+pub use codec_frame::{DecodedVideoFrame, Yuv420Frame};
 pub use decoder::{DecodeError, DependencySlice, H264Decoder};
 pub use h264_annexb::{generate_h264_companion_corpus, H264Companion, H264_COMPANION_SUFFIXES};
 pub use h264_cavlc::{decode_cavlc_residual_block, CavlcResidualBlock};

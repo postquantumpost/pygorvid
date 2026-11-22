@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"sort"
 	"time"
 	"unsafe"
 
@@ -33,27 +32,6 @@ func sdlWaitTimeout(remaining time.Duration) int {
 func showSlideshow(input string, threads int, verbose bool, readaheadOption ...bool) (int, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	reader, err := vid.OpenVideoSampleReader(input)
-	if err != nil {
-		return 0, err
-	}
-	defer reader.Close()
-	timescale := reader.Configuration().Timescale
-	if config := reader.HEVCConfiguration(); config != nil {
-		timescale = config.Timescale
-	}
-	if timescale == 0 {
-		return 0, fmt.Errorf("video timescale is zero")
-	}
-	samples := make([]vid.CompressedSample, reader.SampleCount())
-	for index := range samples {
-		samples[index], err = reader.SampleAt(uint64(index))
-		if err != nil {
-			return 0, fmt.Errorf("read sample %d: %w", index, err)
-		}
-		samples[index].Data = nil
-	}
-	sort.SliceStable(samples, func(i, j int) bool { return samples[i].PTSTicks < samples[j].PTSTicks })
 	if err := sdl.InitSubSystem(sdl.INIT_VIDEO); err != nil {
 		return 0, fmt.Errorf("initialize SDL2 video: %w", err)
 	}
@@ -96,16 +74,18 @@ func showSlideshow(input string, threads int, verbose bool, readaheadOption ...b
 	}
 	deadline := time.Now()
 	count, width, height := 0, 0, 0
-	consume := func(result frameResult) error {
-		index := result.index
-		sample := samples[index]
+	consume := func(result vid.StreamFrame) error {
+		index := result.Index
+		if result.Timescale == 0 {
+			return fmt.Errorf("video timescale is zero")
+		}
 		if closed {
 			return errSlideshowClosed
 		}
 		if !wait(deadline) {
 			return errSlideshowClosed
 		}
-		frame := result.frame
+		frame := result.Frame
 		rgb, err := frame.ConvertToRGB(vid.ColorRangeLimited)
 		if err != nil {
 			return fmt.Errorf("convert frame %d: %w", index, err)
@@ -146,15 +126,17 @@ func showSlideshow(input string, threads int, verbose bool, readaheadOption ...b
 		}
 		renderer.Present()
 		count++
-		duration := time.Duration(float64(sample.DurationTicks) / float64(timescale) * float64(time.Second))
+		duration := time.Duration(
+			float64(result.DurationTicks) / float64(result.Timescale) * float64(time.Second),
+		)
 		deadline = time.Now().Add(duration)
 		return nil
 	}
-	if len(readaheadOption) != 0 && readaheadOption[0] {
-		count, err = decodeSequentialFrames(input, threads, verbose, consume)
-	} else {
-		count, err = decodeSequentialNoReadahead(input, threads, verbose, consume)
-	}
+	decoder := vid.NewVideoStreamDecoder(input)
+	decoder.SetThreads(threads)
+	decoder.SetVerbose(verbose)
+	decoder.SetReadahead(len(readaheadOption) != 0 && readaheadOption[0])
+	count, err := decoder.Decode(consume)
 	if err != nil {
 		if errors.Is(err, errSlideshowClosed) {
 			return count, nil

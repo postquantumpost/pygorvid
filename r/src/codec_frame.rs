@@ -16,6 +16,16 @@ pub struct Yuv420Frame {
     pub v: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedVideoFrame {
+    pub presentation_index: usize,
+    pub sample_index: usize,
+    pub pts_ticks: i64,
+    pub duration_ticks: u32,
+    pub timescale: u32,
+    pub frame: Yuv420Frame,
+}
+
 impl Yuv420Frame {
     fn chroma_height(&self, plane: &[u8], stride: usize) -> usize {
         if stride > 0 && plane.len() >= stride * self.height {

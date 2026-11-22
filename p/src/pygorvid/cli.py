@@ -111,30 +111,10 @@ def _read_all_frames(
         if readahead:
             decoder_options["readahead"] = True
         decoder = create_decoder(reader, **decoder_options)
-        decoder.frame_cache_size = (
-            1 if readahead else reader.sample_count
-        )
-        if readahead and hasattr(decoder, "decode_sequential_frames"):
-            for index, frame in decoder.decode_sequential_frames(
-                range(reader.sample_count)
-            ):
-                if hash_frames:
-                    digest = hashlib.sha256()
-                    digest.update(frame.luma_plane_bytes())
-                    digest.update(frame.u_plane_bytes())
-                    digest.update(frame.v_plane_bytes())
-                    print(
-                        f"{input_path}: frame {index} "
-                        f"sha256={digest.hexdigest()}"
-                    )
-            return reader.sample_count
-        for index in range(reader.sample_count):
+        for index, frame in decoder.decode_sequential_frames(
+            range(reader.sample_count)
+        ):
             try:
-                if index > 0 and reader.sample_at(index).is_sync:
-                    decoder = create_decoder(
-                        reader, threads=threads, debug_progress=verbose
-                    )
-                frame = decoder.decode_frame(index)
                 if hash_frames:
                     digest = hashlib.sha256()
                     digest.update(frame.luma_plane_bytes())
@@ -172,18 +152,12 @@ def _slideshow(
                 raise Mp4FormatError("video configuration is unavailable")
             timescale = reader.configuration.timescale
             presentation_order = reader.presentation_sample_indices()
-            decoder.frame_cache_size = (
-                1 if readahead else len(presentation_order)
-            )
             deadline_seconds = time.monotonic()
             count = 0
             index = 0
             frames = (
-                decoder.decode_sequential_frames(range(len(presentation_order)))
-                if readahead and hasattr(decoder, "decode_sequential_frames")
-                else (
-                    (index, decoder.decode_frame(index))
-                    for index in range(len(presentation_order))
+                decoder.decode_sequential_frames(
+                    range(len(presentation_order))
                 )
             )
             try:
