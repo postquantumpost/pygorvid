@@ -41,7 +41,7 @@ from .h264_slice import (
 from .h264_sps import SPSInfo, SPSParseError, parse_sps
 from .h264_weighted_prediction import InterWeighting
 from .videosamplereader import VideoSampleReader
-from .codec import DecoderError, VideoCodec
+from .codec import DecoderError, VideoCodec, default_decoder_threads
 
 
 class DecoderReferenceMismatch(DecoderError):
@@ -331,6 +331,7 @@ class H264Decoder:
             or threads < 1
         ):
             raise ValueError("decoder thread count must be a positive integer")
+        self.threads = default_decoder_threads() if threads is None else threads
         if time_limit_seconds is not None and (
             isinstance(time_limit_seconds, bool)
             or not isinstance(time_limit_seconds, (int, float))

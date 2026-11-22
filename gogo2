@@ -19,7 +19,11 @@ set -x
 #./pygorvid --slideshow --input samples/drone2_320x240.mp4
 #./pygorvid --slideshow --input jr_grey.mp4
 #for f in *.mp4
-for f in samples/*.mp4
-do
-./pygorvid --slideshow --input $f
-done
+#for f in samples/*.mp4
+#do
+#./pygorvid --slideshow --input $f
+#done
+# python 91m6.013s samples/samp3.mp4
+# python 176m56.307s samples/ew1.mp4
+./pygorvid --slideshow --input samples/samp3.mp4
+./pygorvid --slideshow --input samples/ew1.mp4

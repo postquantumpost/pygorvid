@@ -27,7 +27,7 @@ type CodecError struct {
 
 func (err *CodecError) Error() string { return err.Message }
 
-func DefaultDecoderThreads() int { return max(1, runtime.NumCPU()/2) }
+func DefaultDecoderThreads() int { return max(1, runtime.NumCPU()) }
 
 type CodecConfiguration struct {
 	Codec VideoCodec

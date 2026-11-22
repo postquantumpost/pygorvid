@@ -35,8 +35,11 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
             return Ok(displayed);
         }
         if canvas.is_none() {
-            let width = u32::try_from(frame.width).map_err(|_| "frame width is too large")?;
-            let height = u32::try_from(frame.height).map_err(|_| "frame height is too large")?;
+            let scale = 1.0_f64
+                .min(1024.0 / frame.width as f64)
+                .min(768.0 / frame.height as f64);
+            let width = (frame.width as f64 * scale).max(1.0) as u32;
+            let height = (frame.height as f64 * scale).max(1.0) as u32;
             let window = video
                 .window(input, width, height)
                 .position_centered()
@@ -123,7 +126,12 @@ pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String>
 
 fn wait(events: &mut sdl2::EventPump, deadline: Instant) -> bool {
     loop {
-        for event in events.poll_iter() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        let timeout = remaining.as_millis().min(u32::MAX as u128).max(1) as u32;
+        if let Some(event) = events.wait_event_timeout(timeout) {
             if matches!(
                 event,
                 Event::Quit { .. }
@@ -135,10 +143,5 @@ fn wait(events: &mut sdl2::EventPump, deadline: Instant) -> bool {
                 return false;
             }
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return true;
-        }
-        std::thread::sleep(remaining.min(Duration::from_millis(20)));
     }
 }

@@ -112,9 +112,9 @@ fn assert_decoder_smoke_fixture(name: &str, dimension: usize, expected_hashes: [
 }
 
 #[test]
-fn decoder_threads_default_to_half_the_processors() {
+fn decoder_threads_default_to_available_processors() {
     let mut decoder = H264Decoder::with_sample_count(1);
-    let expected = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
+    let expected = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     assert_eq!(decoder.threads(), expected);
     assert_eq!(pygorvid::default_decoder_threads(), expected);
     decoder.set_threads(3);

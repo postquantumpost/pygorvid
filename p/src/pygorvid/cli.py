@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from .colorconv import PixelConverter
-from .codec import DecoderError, create_decoder
+from .codec import DecoderError, create_decoder, default_decoder_threads
 from .jpegencoder import JPEGEncoder
 from .h264encoder import H264Encoder
 from .mp4writer import Mp4Metadata, Mp4Writer
@@ -166,7 +166,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--threads",
         type=_positive_int,
-        default=1,
+        default=default_decoder_threads(),
         help="number of decoder threads (currently reserved for future parallel decoding)",
     )
     parser.add_argument("files", nargs="*")

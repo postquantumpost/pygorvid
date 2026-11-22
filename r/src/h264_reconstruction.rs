@@ -768,31 +768,34 @@ fn deblock_wavefront(
     width_in_mbs: usize,
     threads: usize,
 ) -> io::Result<()> {
-    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::sync::{Condvar, Mutex};
     let rows = macroblocks.len() / width_in_mbs;
     // SAFETY: AtomicU8 has the same layout as u8, and the exclusive borrow of `planes` keeps
     // every other access out while these atomic views exist.
     let shared: [&[AtomicU8]; 3] = planes.each_mut().map(|plane| unsafe {
         std::slice::from_raw_parts(plane.as_mut_ptr() as *const AtomicU8, plane.len())
     });
-    let progress: Vec<AtomicUsize> = (0..rows).map(|_| AtomicUsize::new(0)).collect();
+    let progress = Mutex::new(vec![0; rows]);
+    let progress_changed = Condvar::new();
     let failed = AtomicBool::new(false);
     let first_error = std::sync::Mutex::new(None);
     std::thread::scope(|scope| {
         for worker in 0..threads {
-            let (shared, progress, failed, first_error) =
-                (&shared, &progress, &failed, &first_error);
+            let (shared, progress, progress_changed, failed, first_error) =
+                (&shared, &progress, &progress_changed, &failed, &first_error);
             scope.spawn(move || {
                 let mut buffers = [Vec::new(), Vec::new(), Vec::new()];
                 for row in (worker..rows).step_by(threads) {
                     for column in 0..width_in_mbs {
                         if row > 0 {
                             let required = (column + 2).min(width_in_mbs);
-                            while progress[row - 1].load(Ordering::Acquire) < required {
-                                if failed.load(Ordering::Relaxed) {
-                                    return;
-                                }
-                                std::thread::yield_now();
+                            let mut completed = progress.lock().unwrap();
+                            while completed[row - 1] < required && !failed.load(Ordering::Acquire) {
+                                completed = progress_changed.wait(completed).unwrap();
+                            }
+                            if failed.load(Ordering::Acquire) {
+                                return;
                             }
                         }
                         let origin_x = (column * 16).saturating_sub(4);
@@ -845,7 +848,11 @@ fn deblock_wavefront(
                             address,
                         ) {
                             first_error.lock().unwrap().get_or_insert(error);
-                            failed.store(true, Ordering::Relaxed);
+                            {
+                                let _completed = progress.lock().unwrap();
+                                failed.store(true, Ordering::Release);
+                            }
+                            progress_changed.notify_all();
                             return;
                         }
                         for (plane, (buffer, &(x0, y0, w, h, stride))) in
@@ -861,7 +868,8 @@ fn deblock_wavefront(
                                 }
                             }
                         }
-                        progress[row].store(column + 1, Ordering::Release);
+                        progress.lock().unwrap()[row] = column + 1;
+                        progress_changed.notify_all();
                     }
                 }
             });
@@ -2218,7 +2226,12 @@ pub fn apply_reference_list_modifications(
     modifications: &[RefPicListModification],
 ) -> io::Result<Vec<ReferencePicture>> {
     apply_reference_list_modifications_with_active_count(
-        initial, references, current_frame_num, maximum_frame_num, modifications, initial.len(),
+        initial,
+        references,
+        current_frame_num,
+        maximum_frame_num,
+        modifications,
+        initial.len(),
     )
 }
 

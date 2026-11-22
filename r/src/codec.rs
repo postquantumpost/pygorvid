@@ -54,7 +54,7 @@ pub(crate) fn sample_configuration(
 }
 
 pub fn default_decoder_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |count| (count.get() / 2).max(1))
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

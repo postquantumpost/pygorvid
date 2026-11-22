@@ -43,7 +43,13 @@ def test_b_decoder_smoke_64x64():
 
 
 def test_h264_decoder_accepts_reserved_threads_argument():
-    H264Decoder(threads=2)
+    decoder = H264Decoder(threads=2)
+    assert decoder.threads == 2
+
+
+def test_h264_decoder_defaults_threads_to_available_processors(monkeypatch):
+    monkeypatch.setattr("pygorvid.codec.os.cpu_count", lambda: 12)
+    assert H264Decoder().threads == 12
 
 
 @pytest.mark.parametrize("name", ("weighted-32x32.mp4", "weighted-eos-32x32.mp4"))

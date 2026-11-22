@@ -490,9 +490,10 @@ sample size and `mdat` size. It must decode to the original reference YUV in
 all four language implementations. The C, Go, and Rust decoders are also checked
 with one and four threads.
 
-`--threads N` sets the number of decoder threads for the C, Go, and Rust
-implementations. The Python CLI accepts and validates the option for future use,
-but currently always decodes synchronously.
+`--threads N` sets the requested decoder worker count in all four implementations
+and defaults to the number of available processors. C and Python currently
+reserve that value for future parallel decoding; Go and Rust use it for
+macroblock reconstruction and deblocking.
 `--verbose` enables decoder progress and diagnostic output; without it, the tool
 prints only its normal per-file result.
 

@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"sort"
 	"time"
@@ -50,6 +51,7 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 	var window *sdl.Window
 	var renderer *sdl.Renderer
 	var texture *sdl.Texture
+	closed := false
 	defer func() {
 		if texture != nil {
 			texture.Destroy()
@@ -61,33 +63,33 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 			window.Destroy()
 		}
 	}()
-	isOpen := func() bool {
-		for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
-			switch e := event.(type) {
-			case *sdl.QuitEvent:
-				return false
-			case *sdl.WindowEvent:
-				if e.Event == sdl.WINDOWEVENT_CLOSE {
-					return false
-				}
+	isClosed := func(event sdl.Event) bool {
+		switch e := event.(type) {
+		case *sdl.QuitEvent:
+			return true
+		case *sdl.WindowEvent:
+			if e.Event == sdl.WINDOWEVENT_CLOSE {
+				return true
 			}
 		}
-		return true
+		return false
 	}
 	wait := func(deadline time.Time) bool {
-		for isOpen() {
+		for !closed {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				return true
 			}
-			time.Sleep(min(remaining, 20*time.Millisecond))
+			timeout := int(min(remaining, time.Duration(math.MaxInt32)*time.Millisecond).Round(time.Millisecond))
+			timeout = max(timeout, 1)
+			closed = isClosed(sdl.WaitEventTimeout(timeout))
 		}
-		return false
+		return !closed
 	}
 	deadline := time.Now()
 	count, width, height := 0, 0, 0
 	for index, sample := range samples {
-		if !isOpen() {
+		if closed {
 			return count, nil
 		}
 		frame, err := decoder.DecodeFrame(uint64(index))
@@ -102,8 +104,11 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 			return count, fmt.Errorf("convert frame %d: %w", index, err)
 		}
 		if window == nil {
+			scale := min(1, 1024/float64(rgb.Width), 768/float64(rgb.Height))
+			windowWidth := max(1, int32(float64(rgb.Width)*scale))
+			windowHeight := max(1, int32(float64(rgb.Height)*scale))
 			window, err = sdl.CreateWindow(input, sdl.WINDOWPOS_CENTERED, sdl.WINDOWPOS_CENTERED,
-				int32(rgb.Width), int32(rgb.Height), sdl.WINDOW_SHOWN|sdl.WINDOW_RESIZABLE)
+				windowWidth, windowHeight, sdl.WINDOW_SHOWN|sdl.WINDOW_RESIZABLE)
 			if err != nil {
 				return count, fmt.Errorf("create slideshow window: %w", err)
 			}

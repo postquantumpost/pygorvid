@@ -30,6 +30,7 @@ class SlideshowWindow:
         self._renderer = None
         self._texture = None
         self._dimensions = None
+        self._closed = False
         self._initialized = False
         self._converter = PixelConverter(PixelColorRange.LIMITED)
         if self._sdl.SDL_InitSubSystem(0x20) != 0:
@@ -56,21 +57,23 @@ class SlideshowWindow:
             self._initialized = False
 
     def is_open(self) -> bool:
-        event = self._sdl.SDL_Event()
-        while self._sdl.SDL_PollEvent(ctypes.byref(event)):
-            if event.type == self._sdl.SDL_QUIT or (
-                event.type == self._sdl.SDL_WINDOWEVENT
-                and event.window.event == self._sdl.SDL_WINDOWEVENT_CLOSE
-            ):
-                return False
-        return True
+        return not self._closed
 
     def wait_until(self, deadline_seconds: float) -> bool:
-        while self.is_open():
+        while not self._closed:
             remaining_seconds = deadline_seconds - time.monotonic()
             if remaining_seconds <= 0:
                 return True
-            time.sleep(min(remaining_seconds, 0.02))
+            timeout = max(1, min(2_147_483_647, round(remaining_seconds * 1000)))
+            event = self._sdl.SDL_Event()
+            if self._sdl.SDL_WaitEventTimeout(ctypes.byref(event), timeout):
+                if event.type == self._sdl.SDL_QUIT or (
+                    event.type == self._sdl.SDL_WINDOWEVENT
+                    and event.window.event == self._sdl.SDL_WINDOWEVENT_CLOSE
+                ):
+                    self._closed = True
+            elif time.monotonic() >= deadline_seconds:
+                return True
         return False
 
     def show(self, frame) -> None:
@@ -80,8 +83,11 @@ class SlideshowWindow:
         )
         if not self._window:
             centered = self._sdl.SDL_WINDOWPOS_CENTERED
+            scale = min(1.0, 1024 / rgb.width, 768 / rgb.height)
+            window_width = max(1, int(rgb.width * scale))
+            window_height = max(1, int(rgb.height * scale))
             self._window = self._sdl.SDL_CreateWindow(
-                self._title, centered, centered, rgb.width, rgb.height,
+                self._title, centered, centered, window_width, window_height,
                 self._sdl.SDL_WINDOW_SHOWN | self._sdl.SDL_WINDOW_RESIZABLE,
             )
             if not self._window:

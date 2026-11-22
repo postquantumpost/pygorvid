@@ -2,7 +2,6 @@ package vid
 
 import (
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -211,10 +210,10 @@ func deblockNativePictureThreads(frame *Yuv420Frame, blocks []nativeMacroblock, 
 	if threads <= 1 {
 		return deblockNativePicture(frame, blocks)
 	}
-	progress := make([]atomic.Int64, rows)
-	var failed atomic.Bool
+	progress := make([]int64, rows)
 	var group sync.WaitGroup
 	var mutex sync.Mutex
+	condition := sync.NewCond(&mutex)
 	var firstErr error
 	group.Add(threads)
 	for worker := 0; worker < threads; worker++ {
@@ -224,11 +223,14 @@ func deblockNativePictureThreads(frame *Yuv420Frame, blocks []nativeMacroblock, 
 				for column := 0; column < width; column++ {
 					if row > 0 {
 						required := int64(min(column+2, width))
-						for progress[row-1].Load() < required {
-							if failed.Load() {
-								return
-							}
-							runtime.Gosched()
+						mutex.Lock()
+						for progress[row-1] < required && firstErr == nil {
+							condition.Wait()
+						}
+						failed := firstErr != nil
+						mutex.Unlock()
+						if failed {
+							return
 						}
 					}
 					if err := deblockNativeMacroblock(frame, blocks, row*width+column); err != nil {
@@ -237,10 +239,15 @@ func deblockNativePictureThreads(frame *Yuv420Frame, blocks []nativeMacroblock, 
 							firstErr = err
 						}
 						mutex.Unlock()
-						failed.Store(true)
+						mutex.Lock()
+						condition.Broadcast()
+						mutex.Unlock()
 						return
 					}
-					progress[row].Store(int64(column + 1))
+					mutex.Lock()
+					progress[row] = int64(column + 1)
+					condition.Broadcast()
+					mutex.Unlock()
 				}
 			}
 		}(worker)

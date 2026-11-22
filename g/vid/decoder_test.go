@@ -394,9 +394,9 @@ func assertDecoderSmokeFixture(t *testing.T, name string, dimension int, hashes 
 	}
 }
 
-func TestDecoderThreadsDefaultToHalfTheProcessors(t *testing.T) {
+func TestDecoderThreadsDefaultToAvailableProcessors(t *testing.T) {
 	decoder := NewH264Decoder(nil)
-	if got, want := decoder.Threads(), max(1, runtime.NumCPU()/2); got != want {
+	if got, want := decoder.Threads(), max(1, runtime.NumCPU()); got != want {
 		t.Fatalf("Threads() = %d; want %d", got, want)
 	}
 	decoder.SetThreads(3)

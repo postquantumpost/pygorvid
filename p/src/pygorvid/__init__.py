@@ -68,6 +68,7 @@ from .decoder import (
     DecoderTimeLimitExceeded,
     DependencySlice,
     H264Decoder,
+    default_decoder_threads,
 )
 from .mp4file import Mp4File
 from .mp4writer import Mp4Metadata, Mp4Writer
@@ -326,6 +327,7 @@ __all__ = [
     "DecoderReferenceMismatch",
     "DependencySlice",
     "H264Decoder",
+    "default_decoder_threads",
     "NALHeader",
     "NALUnitError",
     "ebsp_to_rbsp",
