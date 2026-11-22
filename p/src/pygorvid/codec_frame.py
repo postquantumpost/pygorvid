@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+BytePlane = bytes | bytearray | memoryview
+
 
 @dataclass(frozen=True)
 class Yuv420Frame:
@@ -10,11 +12,11 @@ class Yuv420Frame:
     y_stride: int
     u_stride: int
     v_stride: int
-    y: bytes
-    u: bytes
-    v: bytes
+    y: BytePlane
+    u: BytePlane
+    v: BytePlane
 
-    def _validate_plane(self, plane: bytes, width: int, height: int, stride: int) -> None:
+    def _validate_plane(self, plane: BytePlane, width: int, height: int, stride: int) -> None:
         if any(not isinstance(value, int) or isinstance(value, bool) for value in (width, height, stride)):
             raise ValueError("reference picture frame layout is invalid or truncated")
         if stride <= 0 or stride < width:
@@ -22,7 +24,7 @@ class Yuv420Frame:
         if len(plane) < stride * height:
             raise ValueError("reference picture frame layout is invalid or truncated")
 
-    def _plane_bytes(self, plane: bytes, width: int, height: int, stride: int) -> bytes:
+    def _plane_bytes(self, plane: BytePlane, width: int, height: int, stride: int) -> bytes:
         self._validate_plane(plane, width, height, stride)
         if stride == width and isinstance(plane, bytes) and len(plane) == width * height:
             return plane

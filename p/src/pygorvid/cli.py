@@ -100,12 +100,34 @@ def _extract_frame(
 
 def _read_all_frames(
     input_path: str, threads: int = 1, verbose: bool = False,
-    hash_frames: bool = False,
+    hash_frames: bool = False, readahead: bool = False,
 ) -> int:
     reader = VideoSampleReader(input_path)
     try:
-        decoder = create_decoder(reader, threads=threads, debug_progress=verbose)
-        decoder.frame_cache_size = reader.sample_count
+        decoder_options = {
+            "threads": threads,
+            "debug_progress": verbose,
+        }
+        if readahead:
+            decoder_options["readahead"] = True
+        decoder = create_decoder(reader, **decoder_options)
+        decoder.frame_cache_size = (
+            1 if readahead else reader.sample_count
+        )
+        if readahead and hasattr(decoder, "decode_sequential_frames"):
+            for index, frame in decoder.decode_sequential_frames(
+                range(reader.sample_count)
+            ):
+                if hash_frames:
+                    digest = hashlib.sha256()
+                    digest.update(frame.luma_plane_bytes())
+                    digest.update(frame.u_plane_bytes())
+                    digest.update(frame.v_plane_bytes())
+                    print(
+                        f"{input_path}: frame {index} "
+                        f"sha256={digest.hexdigest()}"
+                    )
+            return reader.sample_count
         for index in range(reader.sample_count):
             try:
                 if index > 0 and reader.sample_at(index).is_sync:
@@ -131,6 +153,7 @@ def _read_all_frames(
 
 def _slideshow(
     input_path: str, threads: int = 1, verbose: bool = False,
+    readahead: bool = False,
 ) -> int:
     from .slideshow import SlideshowWindow
 
@@ -138,29 +161,52 @@ def _slideshow(
     try:
         reader = VideoSampleReader(input_path)
         try:
-            decoder = create_decoder(
-                reader, threads=threads, debug_progress=verbose
-            )
+            decoder_options = {
+                "threads": threads,
+                "debug_progress": verbose,
+            }
+            if readahead:
+                decoder_options["readahead"] = True
+            decoder = create_decoder(reader, **decoder_options)
             if reader.configuration is None:
                 raise Mp4FormatError("video configuration is unavailable")
             timescale = reader.configuration.timescale
             presentation_order = reader.presentation_sample_indices()
-            decoder.frame_cache_size = len(presentation_order)
+            decoder.frame_cache_size = (
+                1 if readahead else len(presentation_order)
+            )
             deadline_seconds = time.monotonic()
             count = 0
-            for index, sample_index in enumerate(presentation_order):
-                if not window.is_open():
-                    break
-                try:
+            index = 0
+            frames = (
+                decoder.decode_sequential_frames(range(len(presentation_order)))
+                if readahead and hasattr(decoder, "decode_sequential_frames")
+                else (
+                    (index, decoder.decode_frame(index))
+                    for index in range(len(presentation_order))
+                )
+            )
+            try:
+                for index, frame in frames:
+                    if not window.is_open():
+                        break
+                    sample_index = presentation_order[index]
                     sample = reader.sample_at(sample_index)
-                    frame = decoder.decode_frame(index)
-                except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
-                    raise DecoderError(f"decode frame {index}: {error}") from error
-                if not window.wait_until(deadline_seconds):
-                    break
-                window.show(frame)
-                count += 1
-                deadline_seconds = time.monotonic() + sample.duration_ticks / timescale
+                    if not window.wait_until(deadline_seconds):
+                        break
+                    window.show(frame)
+                    count += 1
+                    deadline_seconds = (
+                        time.monotonic()
+                        + sample.duration_ticks / timescale
+                    )
+            except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
+                if isinstance(error, DecoderError) and (
+                    str(error).startswith("decode frame ")
+                    or str(error).startswith("presentation frame ")
+                ):
+                    raise
+                raise DecoderError(f"decode frame {index}: {error}") from error
             if count:
                 window.wait_until(deadline_seconds)
             return count
@@ -177,6 +223,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
     parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
+    parser.add_argument("--readahead", action="store_true", help="decode upcoming closed GOPs ahead in order (Python)")
     parser.add_argument("--hash", action="store_true", help="print SHA-256 hashes for frames decoded by --readall or --extractframe")
     parser.add_argument("--slideshow", action="store_true", help="display decoded frames in an SDL2 window")
     parser.add_argument("--verbose", action="store_true", help="print decoder progress and debug information")
@@ -262,7 +309,9 @@ def main(argv=None) -> int:
         if args.slideshow:
             from .slideshow import SlideshowError
             try:
-                count = _slideshow(path, args.threads, args.verbose)
+                count = _slideshow(
+                    path, args.threads, args.verbose, args.readahead
+                )
             except (OSError, ValueError, DecoderError, Mp4FormatError, SlideshowError) as error:
                 print(f"{path}: {error}", file=sys.stderr)
                 status = 1
@@ -272,7 +321,7 @@ def main(argv=None) -> int:
         if args.readall:
             try:
                 count = _read_all_frames(
-                    path, args.threads, args.verbose, args.hash
+                    path, args.threads, args.verbose, args.hash, args.readahead
                 )
             except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
                 print(f"{path}: {error}", file=sys.stderr)

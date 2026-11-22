@@ -4,11 +4,13 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 import math
+import multiprocessing
 import os
 from pathlib import Path
 import pickle
 import sys
 import time
+from multiprocessing import shared_memory
 from typing import Optional, Sequence
 
 from .h264_cabac import (
@@ -60,6 +62,284 @@ class DependencySlice:
     is_sync: bool
     nal_unit: bytes
     header: SliceHeader
+
+
+class _ReadAheadPriority:
+    def __init__(self, connection, priority: int):
+        self.connection = connection
+        self.priority = priority
+
+    def yield_for_priority(self) -> None:
+        while self.connection.poll():
+            try:
+                self.priority = self.connection.recv()
+            except EOFError:
+                break
+        for _ in range(max(0, -self.priority)):
+            yield_control = getattr(os, "sched_yield", None)
+            if yield_control is None:
+                time.sleep(0)
+            else:
+                yield_control()
+
+
+@dataclass(frozen=True)
+class _SharedFrameMetadata:
+    index: int
+    shared_name: str
+    width: int
+    height: int
+    y_stride: int
+    u_stride: int
+    v_stride: int
+    y_length: int
+    u_length: int
+    v_length: int
+
+
+class _SharedFrameBufferPool:
+    def __init__(self, frame_bytes: int):
+        if frame_bytes <= 0:
+            raise ValueError("shared frame buffer size must be positive")
+        self.frame_bytes = frame_bytes
+        self._buffers: dict[str, shared_memory.SharedMemory] = {}
+        self._available: list[str] = []
+        self._leased: set[str] = set()
+        self._views: dict[str, tuple[memoryview, ...]] = {}
+
+    @property
+    def allocated_count(self) -> int:
+        return len(self._buffers)
+
+    @property
+    def available_count(self) -> int:
+        return len(self._available)
+
+    def _allocate(self) -> str:
+        buffer = shared_memory.SharedMemory(
+            create=True, size=self.frame_bytes
+        )
+        self._buffers[buffer.name] = buffer
+        self._available.append(buffer.name)
+        return buffer.name
+
+    def _trim_unused(self) -> int:
+        removed = 0
+        while self._available:
+            name = self._available.pop()
+            buffer = self._buffers.pop(name)
+            buffer.close()
+            buffer.unlink()
+            removed += 1
+        return removed
+
+    def reserve(self, count: int) -> tuple[str, ...]:
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("shared frame reservation count is invalid")
+        if count == 0:
+            return ()
+        names = [
+            self._available.pop()
+            for _ in range(min(count, len(self._available)))
+        ]
+        self._leased.update(names)
+        while len(names) < count:
+            if self._available:
+                names.append(self._available.pop())
+                self._leased.add(names[-1])
+                continue
+            try:
+                allocated = self._allocate()
+                self._available.remove(allocated)
+                names.append(allocated)
+                self._leased.add(allocated)
+            except (MemoryError, OSError):
+                self._trim_unused()
+                self.release_many(names)
+                raise
+        available_memory = _available_memory_bytes()
+        if available_memory is not None and available_memory < self.frame_bytes:
+            self._trim_unused()
+        return tuple(names)
+
+    def release(self, name: str) -> None:
+        if name not in self._leased:
+            return
+        self._leased.remove(name)
+        for view in self._views.pop(name, ()):
+            view.release()
+        self._available.append(name)
+        available_memory = _available_memory_bytes()
+        if (
+            available_memory is not None
+            and available_memory < self.frame_bytes
+        ):
+            self._trim_unused()
+
+    def release_many(self, names: Sequence[str]) -> None:
+        for name in names:
+            self.release(name)
+
+    def frame(
+        self, metadata: _SharedFrameMetadata
+    ) -> Yuv420Frame:
+        buffer = self._buffers[metadata.shared_name]
+        if metadata.shared_name not in self._leased:
+            raise DecoderError("shared frame buffer is not reserved")
+        y_end = metadata.y_length
+        u_end = y_end + metadata.u_length
+        v_end = u_end + metadata.v_length
+        if v_end > self.frame_bytes:
+            raise DecoderError("shared frame buffer layout exceeds its capacity")
+        view = memoryview(buffer.buf)
+        planes = (view[:y_end], view[y_end:u_end], view[u_end:v_end])
+        self._views[metadata.shared_name] = planes
+        return Yuv420Frame(
+            metadata.width,
+            metadata.height,
+            metadata.y_stride,
+            metadata.u_stride,
+            metadata.v_stride,
+            *planes,
+        )
+
+    def close(self) -> None:
+        for views in self._views.values():
+            for view in views:
+                view.release()
+        self._views.clear()
+        buffers = tuple(self._buffers.values())
+        self._buffers.clear()
+        self._available.clear()
+        self._leased.clear()
+        for buffer in buffers:
+            buffer.close()
+            try:
+                buffer.unlink()
+            except FileNotFoundError:
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except (AttributeError, BufferError, OSError):
+            pass
+
+
+def _pack_frame_into_shared_memory(
+    name: str, index: int, frame: Yuv420Frame
+) -> _SharedFrameMetadata:
+    y = frame.luma_plane_bytes()
+    u = frame.u_plane_bytes()
+    v = frame.v_plane_bytes()
+    buffer = shared_memory.SharedMemory(name=name)
+    try:
+        packed_length = len(y) + len(u) + len(v)
+        if packed_length > buffer.size:
+            raise DecoderError(
+                f"presentation frame {index}: decoded frame exceeds "
+                "its shared memory buffer"
+            )
+        y_end = len(y)
+        u_end = y_end + len(u)
+        buffer.buf[:y_end] = y
+        buffer.buf[y_end:u_end] = u
+        buffer.buf[u_end:packed_length] = v
+        return _SharedFrameMetadata(
+            index=index,
+            shared_name=name,
+            width=frame.width,
+            height=frame.height,
+            y_stride=frame.width,
+            u_stride=frame.width // 2 + frame.width % 2,
+            v_stride=frame.width // 2 + frame.width % 2,
+            y_length=len(y),
+            u_length=len(u),
+            v_length=len(v),
+        )
+    finally:
+        buffer.close()
+
+
+def _decode_closed_gop(
+    path: str,
+    presentation_indices: Sequence[int],
+    threads: int,
+    debug_progress: bool,
+    priority: int,
+    priority_connection,
+    result_queue,
+    buffer_names: Sequence[str],
+) -> None:
+    try:
+        priority_control = _ReadAheadPriority(priority_connection, priority)
+        reader = VideoSampleReader(path)
+        try:
+            decoder = H264Decoder(
+                reader,
+                threads=threads,
+                debug_progress=debug_progress,
+                decode_yield_callback=priority_control.yield_for_priority,
+            )
+            decoder.frame_cache_size = 1
+            if len(presentation_indices) != len(buffer_names):
+                raise DecoderError(
+                    "closed GOP shared frame reservation count does not match"
+                )
+            for index, buffer_name in zip(
+                presentation_indices, buffer_names
+            ):
+                frame = decoder.decode_frame(index)
+                metadata = _pack_frame_into_shared_memory(
+                    buffer_name, index, frame
+                )
+                result_queue.put(("frame", metadata))
+                decoder.discard_cached_frame(index)
+            result_queue.put(("done",))
+        finally:
+            reader.close()
+    except Exception as error:
+        try:
+            result_queue.put(("error", str(error)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        priority_connection.close()
+        result_queue.close()
+
+
+def _available_memory_bytes() -> Optional[int]:
+    if sys.platform.startswith("linux"):
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError):
+            pass
+    try:
+        page_count = os.sysconf("SC_AVPHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    return page_count * page_size
+
+
+def _readahead_process_limit(
+    threads: int,
+    frame_bytes: int,
+    maximum_gop_frames: int,
+    available_memory_bytes: Optional[int] = None,
+) -> int:
+    requested = max(0, threads - 1)
+    if requested == 0:
+        return 0
+    if available_memory_bytes is None:
+        available_memory_bytes = _available_memory_bytes()
+    if available_memory_bytes is None or frame_bytes <= 0 or maximum_gop_frames <= 0:
+        return requested
+    cache_budget_bytes = available_memory_bytes // 2
+    cached_gop_bytes = frame_bytes * maximum_gop_frames
+    return min(requested, cache_budget_bytes // cached_gop_bytes)
 
 
 def _apply_adaptive_reference_marking(
@@ -324,6 +604,8 @@ class H264Decoder:
         checkpoint_dir: Optional[str | Path] = None,
         threads: Optional[int] = None,
         frame_cache_size: int = 8,
+        readahead: bool = False,
+        decode_yield_callback: Optional[Callable[[], None]] = None,
     ):
         if threads is not None and (
             isinstance(threads, bool)
@@ -332,6 +614,12 @@ class H264Decoder:
         ):
             raise ValueError("decoder thread count must be a positive integer")
         self.threads = default_decoder_threads() if threads is None else threads
+        if not isinstance(readahead, bool):
+            raise ValueError("decoder readahead must be a boolean")
+        if decode_yield_callback is not None and not callable(decode_yield_callback):
+            raise ValueError("decoder yield callback must be callable")
+        self.readahead = readahead
+        self._decode_yield_callback = decode_yield_callback
         if time_limit_seconds is not None and (
             isinstance(time_limit_seconds, bool)
             or not isinstance(time_limit_seconds, (int, float))
@@ -357,6 +645,7 @@ class H264Decoder:
         self._poc_type0_state = None
         self._poc_type12_state = None
         self._poc_cache = None
+        self._shared_frame_pool: Optional[_SharedFrameBufferPool] = None
         self._parsed_parameter_sets = None
         self._gop_sync_sample_index: Optional[int] = None
         self._last_decoded_sample_index: Optional[int] = None
@@ -424,6 +713,309 @@ class H264Decoder:
     def _trim_decoded_frame_cache(self) -> None:
         while len(self._decoded_frames) > self._frame_cache_size:
             self._decoded_frames.popitem(last=False)
+
+    def discard_cached_frame(self, index: int) -> None:
+        self._decoded_frames.pop(index, None)
+
+    def closed_gop_presentation_indices(
+        self,
+    ) -> tuple[tuple[tuple[int, ...], bool], ...]:
+        if self.sample_reader is None:
+            raise DecoderError("H.264 decoder requires a sample reader")
+        sample_count = self.sample_reader.sample_count
+        if sample_count == 0:
+            return ()
+        presentation_by_sample = {
+            sample_index: presentation_index
+            for presentation_index, sample_index in enumerate(
+                self.sample_reader.presentation_sample_indices()
+            )
+        }
+        closed_starts = []
+        for sample_index in range(sample_count):
+            sample = self.sample_reader.sample_at(sample_index)
+            if not sample.is_sync:
+                continue
+            try:
+                nals = split_h264_sample_nals(
+                    sample.data, self.sample_reader.configuration.nal_length_size
+                )
+                if any(parse_nal_header(nal).unit_type == 5 for nal in nals):
+                    closed_starts.append(sample_index)
+            except NALUnitError as error:
+                raise DecoderError(
+                    f"presentation frame "
+                    f"{presentation_by_sample[sample_index]} "
+                    f"(sample {sample_index}): cannot inspect closed GOP: {error}"
+                ) from error
+        if not closed_starts:
+            return ()
+        boundaries = closed_starts.copy()
+        if boundaries[0] != 0:
+            boundaries.insert(0, 0)
+        boundaries = sorted(set(boundaries))
+        ranges = []
+        for boundary_index, start in enumerate(boundaries):
+            end = (
+                boundaries[boundary_index + 1]
+                if boundary_index + 1 < len(boundaries)
+                else sample_count
+            )
+            presentation_indices = tuple(
+                sorted(presentation_by_sample[sample_index]
+                       for sample_index in range(start, end))
+            )
+            ranges.append((
+                presentation_indices,
+                start in closed_starts,
+            ))
+        return tuple(ranges)
+
+    def _read_ahead_worker_limit(
+        self, groups: Sequence[tuple[tuple[int, ...], bool]]
+    ) -> int:
+        maximum_gop_frames = max(
+            (len(indices) for indices, closed in groups if closed),
+            default=0,
+        )
+        sequence_sets, _ = self._parsed_parameter_sets_by_id()
+        frame_bytes = max(
+            (
+                sequence_set.width * sequence_set.height
+                + 2
+                * (sequence_set.width // 2 + sequence_set.width % 2)
+                * (sequence_set.height // 2 + sequence_set.height % 2)
+                for sequence_set in sequence_sets.values()
+            ),
+            default=0,
+        )
+        return _readahead_process_limit(
+            self.threads, frame_bytes, maximum_gop_frames
+        )
+
+    def decode_sequential_frames(
+        self, frame_indices
+    ):
+        indices = tuple(frame_indices)
+        expected = tuple(range(self.sample_count))
+        if (
+            not self.readahead
+            or indices != expected
+            or self.sample_reader is None
+        ):
+            for index in indices:
+                yield index, self.decode_frame(index)
+                self.discard_cached_frame(index)
+            return
+
+        groups = self.closed_gop_presentation_indices()
+        closed_groups = [position for position, (_, closed) in enumerate(groups) if closed]
+        if len(closed_groups) < 2:
+            for index in indices:
+                yield index, self.decode_frame(index)
+                self.discard_cached_frame(index)
+            return
+
+        first_closed_group = closed_groups[0]
+        for group_position in range(first_closed_group):
+            for index in groups[group_position][0]:
+                yield index, self.decode_frame(index)
+                self.discard_cached_frame(index)
+
+        worker_limit = self._read_ahead_worker_limit(groups)
+        if self.debug_progress and worker_limit < self.threads - 1:
+            print(
+                f"Readahead workers reduced from {self.threads - 1} "
+                f"to {worker_limit} to fit decoded frame cache memory",
+                file=sys.stderr,
+                flush=True,
+            )
+        if worker_limit == 0:
+            for group_position in closed_groups:
+                for index in groups[group_position][0]:
+                    yield index, self.decode_frame(index)
+                    self.discard_cached_frame(index)
+            return
+
+        path = getattr(self.sample_reader, "path", None)
+        if path is None:
+            for group_position in closed_groups:
+                for index in groups[group_position][0]:
+                    yield index, self.decode_frame(index)
+                    self.discard_cached_frame(index)
+            return
+
+        jobs = {}
+        context = multiprocessing.get_context()
+        next_closed_position = 1
+
+        sequence_sets, _ = self._parsed_parameter_sets_by_id()
+        frame_bytes = max(
+            (
+                sequence_set.width * sequence_set.height
+                + 2
+                * (sequence_set.width // 2 + sequence_set.width % 2)
+                * (sequence_set.height // 2 + sequence_set.height % 2)
+                for sequence_set in sequence_sets.values()
+            ),
+            default=0,
+        )
+        if frame_bytes <= 0:
+            raise DecoderError(
+                "readahead cannot determine decoded frame buffer size"
+            )
+        if self._shared_frame_pool is None:
+            self._shared_frame_pool = _SharedFrameBufferPool(frame_bytes)
+        frame_pool = self._shared_frame_pool
+
+        def start_job(group_position: int, priority: int) -> None:
+            priority_parent, priority_child = context.Pipe()
+            result_queue = context.Queue()
+            try:
+                buffer_names = frame_pool.reserve(
+                    len(groups[group_position][0])
+                )
+                process = context.Process(
+                    target=_decode_closed_gop,
+                    args=(
+                        str(path),
+                        groups[group_position][0],
+                        self.threads,
+                        self.debug_progress,
+                        priority,
+                        priority_child,
+                        result_queue,
+                        buffer_names,
+                    ),
+                )
+                process.start()
+            except BaseException:
+                if "buffer_names" in locals():
+                    frame_pool.release_many(buffer_names)
+                priority_parent.close()
+                priority_child.close()
+                result_queue.close()
+                raise
+            priority_child.close()
+            jobs[group_position] = (
+                process,
+                priority_parent,
+                result_queue,
+                priority,
+                buffer_names,
+            )
+
+        def fill_jobs(current_closed_position: int) -> None:
+            nonlocal next_closed_position
+            while (
+                len(jobs) < worker_limit
+                and next_closed_position < len(closed_groups)
+                and next_closed_position > current_closed_position
+            ):
+                group_position = closed_groups[next_closed_position]
+                distance = next_closed_position - current_closed_position
+                start_job(group_position, -distance)
+                next_closed_position += 1
+
+        def increment_job_priorities() -> None:
+            for group_position, job in list(jobs.items()):
+                (
+                    process,
+                    priority_connection,
+                    result_queue,
+                    priority,
+                    buffer_names,
+                ) = job
+                if process.is_alive():
+                    try:
+                        new_priority = priority + 1
+                        priority_connection.send(new_priority)
+                        jobs[group_position] = (
+                            process,
+                            priority_connection,
+                            result_queue,
+                            new_priority,
+                            buffer_names,
+                        )
+                    except (BrokenPipeError, EOFError, OSError):
+                        pass
+
+        def consume_job(group_position: int):
+            (
+                process,
+                priority_connection,
+                result_queue,
+                _,
+                buffer_names,
+            ) = jobs.pop(group_position)
+            frames = OrderedDict()
+            try:
+                while True:
+                    kind, *payload = result_queue.get()
+                    if kind == "done":
+                        break
+                    if kind == "error":
+                        raise DecoderError(payload[0])
+                    if kind != "frame":
+                        raise DecoderError("readahead process returned an invalid result")
+                    metadata = payload[0]
+                    frames[metadata.index] = metadata
+                process.join()
+            except BaseException:
+                frame_pool.release_many(buffer_names)
+                raise
+            finally:
+                priority_connection.close()
+                result_queue.close()
+                result_queue.cancel_join_thread()
+                if process.is_alive():
+                    process.terminate()
+                process.join()
+            return frames, buffer_names
+
+        try:
+            fill_jobs(0)
+            for closed_position, group_position in enumerate(closed_groups):
+                group_indices = groups[group_position][0]
+                if closed_position == 0:
+                    for index in group_indices:
+                        frame = self.decode_frame(index)
+                        yield index, frame
+                        self.discard_cached_frame(index)
+                else:
+                    frames, buffer_names = consume_job(group_position)
+                    try:
+                        for index in group_indices:
+                            metadata = frames.pop(index, None)
+                            if metadata is None:
+                                raise DecoderError(
+                                    f"presentation frame {index}: "
+                                    "readahead result is missing"
+                                )
+                            frame = frame_pool.frame(metadata)
+                            try:
+                                yield index, frame
+                            finally:
+                                frame_pool.release(metadata.shared_name)
+                    finally:
+                        frames.clear()
+                        frame_pool.release_many(buffer_names)
+                increment_job_priorities()
+                fill_jobs(closed_position)
+        finally:
+            for (
+                process,
+                priority_connection,
+                result_queue,
+                _,
+                buffer_names,
+            ) in jobs.values():
+                priority_connection.close()
+                result_queue.close()
+                if process.is_alive():
+                    process.terminate()
+                process.join()
+                frame_pool.release_many(buffer_names)
 
     def _parsed_parameter_sets_by_id(self):
         if self._parsed_parameter_sets is None:
@@ -1415,6 +2007,8 @@ class H264Decoder:
             raise DecoderError("H.264 decoder requires a sample reader")
         if not isinstance(index, int) or isinstance(index, bool) or index < 0 or index >= sample_count:
             raise DecoderError(f"frame index {index} is out of range for {sample_count} sample(s)")
+        if self._decode_yield_callback is not None:
+            self._decode_yield_callback()
 
         cached_frame = self._decoded_frames.get(index)
         if cached_frame is not None:
@@ -1538,6 +2132,8 @@ class H264Decoder:
 
                 def report_macroblock_progress(_address: int) -> None:
                     nonlocal decoded_macroblocks, next_progress_percent
+                    if self._decode_yield_callback is not None:
+                        self._decode_yield_callback()
                     check_frame_deadline()
                     decoded_macroblocks += 1
                     while (
@@ -1570,7 +2166,11 @@ class H264Decoder:
                             current_slice, address, history
                         ),
                         report_macroblock_progress
-                        if self.debug_progress or deadline is not None
+                        if (
+                            self.debug_progress
+                            or deadline is not None
+                            or self._decode_yield_callback is not None
+                        )
                         else None,
                         check_frame_deadline if deadline is not None else None,
                     )

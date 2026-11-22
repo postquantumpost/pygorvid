@@ -48,6 +48,7 @@ fn run(args: Vec<String>) -> i32 {
         read_all,
         hash_frames,
         slideshow,
+        _readahead,
         verbose,
         mut files,
         generate,
@@ -288,6 +289,7 @@ fn parse_args(
         bool,
         bool,
         bool,
+        bool,
         Vec<String>,
         Option<String>,
     ),
@@ -302,6 +304,7 @@ fn parse_args(
     let mut read_all = false;
     let mut hash_frames = false;
     let mut slideshow = false;
+    let mut readahead = false;
     let mut verbose = false;
     let parse_threads = |value: &str| {
         value
@@ -347,6 +350,8 @@ fn parse_args(
             hash_frames = true;
         } else if arg == "--slideshow" {
             slideshow = true;
+        } else if arg == "--readahead" {
+            readahead = true;
         } else if arg == "--verbose" {
             verbose = true;
         } else if let Some(value) = arg.strip_prefix("--input=") {
@@ -381,6 +386,7 @@ fn parse_args(
         read_all,
         hash_frames,
         slideshow,
+        readahead,
         verbose,
         files,
         generate,
@@ -389,7 +395,7 @@ fn parse_args(
 
 fn print_usage() {
     eprintln!("       vidprobe --generate OUTPUT.mp4");
-    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--readahead] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
 }
 
 #[cfg(not(feature = "slideshow"))]
@@ -962,9 +968,10 @@ mod tests {
         );
         assert!(parse_args(&args(&["--threads", "0", "a.mp4"])).is_err());
         assert!(parse_args(&args(&["--threads=x", "a.mp4"])).is_err());
-        assert!(!parse_args(&args(&["a.mp4"])).unwrap().8);
-        assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().8);
+        assert!(!parse_args(&args(&["a.mp4"])).unwrap().9);
+        assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().9);
         assert!(parse_args(&args(&["--hash", "a.mp4"])).unwrap().6);
+        assert!(parse_args(&args(&["--readahead", "a.mp4"])).unwrap().8);
     }
 
     #[test]

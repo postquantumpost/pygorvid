@@ -41,13 +41,14 @@ struct Options {
     bool read_all = false;
     bool hash_frames = false;
     bool slideshow = false;
+    bool readahead = false;
     std::size_t threads = std::max<std::size_t>(
         1, std::thread::hardware_concurrency());
 };
 
 void usage() {
     std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
-    std::cerr << "usage: vidprobe [--threads N] [--hash] [--slideshow | --readall | "
+    std::cerr << "usage: vidprobe [--threads N] [--readahead] [--hash] [--slideshow | --readall | "
                  "--extractframe INDEX --output IMAGE] [--prefix TEXT] "
                  "[--input FILE] FILE...\n";
 }
@@ -991,6 +992,8 @@ Options parse_options(const std::vector<std::string>& args) {
             options.hash_frames = true;
         } else if (arg == "--slideshow") {
             options.slideshow = true;
+        } else if (arg == "--readahead") {
+            options.readahead = true;
         } else if (arg == "--threads") {
             if (++index == args.size()) {
                 throw std::invalid_argument("--threads requires a positive integer");

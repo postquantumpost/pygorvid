@@ -18,6 +18,11 @@ from pygorvid import (
     Yuv420Frame,
 )
 from pygorvid.reconstruction import Yuv420FrameBuilder
+from pygorvid.h264_decoder import (
+    _ReadAheadPriority,
+    _SharedFrameBufferPool,
+    _readahead_process_limit,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "testdata" / "h264" / "high42-1080p.mp4"
@@ -50,6 +55,76 @@ def test_h264_decoder_accepts_reserved_threads_argument():
 def test_h264_decoder_defaults_threads_to_available_processors(monkeypatch):
     monkeypatch.setattr("pygorvid.codec.os.cpu_count", lambda: 12)
     assert H264Decoder().threads == 12
+
+
+def test_readahead_process_limit_reserves_frame_cache_memory():
+    assert _readahead_process_limit(8, 100, 10, 10_000) == 5
+    assert _readahead_process_limit(8, 100, 10, 1_500) == 0
+    assert _readahead_process_limit(1, 100, 10, 0) == 0
+
+
+def test_shared_frame_pool_reuses_and_trims_idle_buffers(monkeypatch):
+    pool = _SharedFrameBufferPool(64)
+    try:
+        reserved = pool.reserve(3)
+        assert pool.allocated_count == 3
+        pool.release_many(reserved)
+        assert pool.available_count == 3
+        second_reservation = pool.reserve(2)
+        assert set(second_reservation) <= set(reserved)
+        assert pool.allocated_count == 3
+
+        monkeypatch.setattr(
+            "pygorvid.h264_decoder._available_memory_bytes",
+            lambda: 63,
+        )
+        pool.release(second_reservation[0])
+        assert pool.allocated_count == 1
+        assert pool.available_count == 0
+        pool.release(second_reservation[1])
+        assert pool.available_count == 0
+        assert pool.allocated_count == 0
+    finally:
+        pool.close()
+
+
+def test_readahead_priority_yields_less_as_gop_moves_forward(monkeypatch):
+    class Connection:
+        def __init__(self):
+            self.values = [-3]
+
+        def poll(self):
+            return bool(self.values)
+
+        def recv(self):
+            return self.values.pop(0)
+
+    yields = []
+    connection = Connection()
+    controller = _ReadAheadPriority(connection, -3)
+    monkeypatch.setattr("pygorvid.h264_decoder.os.sched_yield", lambda: yields.append(1))
+    controller.yield_for_priority()
+    assert len(yields) == 3
+    connection.values.append(-2)
+    controller.yield_for_priority()
+    assert len(yields) == 5
+    connection.values.append(-1)
+    controller.yield_for_priority()
+    assert len(yields) == 6
+    connection.values.append(0)
+    controller.yield_for_priority()
+    assert len(yields) == 6
+
+
+def test_readahead_sequential_fallback_evicts_cached_frames():
+    reader = VideoSampleReader(ROOT / "samples" / "decoder-smoke-16x16.mp4")
+    try:
+        decoder = H264Decoder(reader, readahead=True, threads=2, frame_cache_size=8)
+        frames = list(decoder.decode_sequential_frames(range(reader.sample_count)))
+        assert [index for index, _ in frames] == [0, 1, 2]
+        assert not decoder._decoded_frames
+    finally:
+        reader.close()
 
 
 @pytest.mark.parametrize("name", ("weighted-32x32.mp4", "weighted-eos-32x32.mp4"))

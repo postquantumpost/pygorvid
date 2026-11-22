@@ -35,7 +35,11 @@ set -x
 # Rust 0m45.875s
 # Go 0m48.736s
 # python 176m56.307s
-
 #./pygorvid --slideshow --input samples/samp3.mp4
 #./pygorvid --slideshow --input samples/ew1.mp4
-./pygorvid --readall --hash --input samples/ew1.mp4
+./pygorvid --slideshow --readahead --input samples/samp3.mp4
+./pygorvid --slideshow --readahead --input samples/ew1.mp4
+
+#./pygorvid --readall --hash --input samples/ew1.mp4
+#./pygorvid --slideshow --threads 4 --readahead --input samples/drone1_320x240.mp4
+#./pygorvid --slideshow --readahead --input samples/drone1_320x240.mp4

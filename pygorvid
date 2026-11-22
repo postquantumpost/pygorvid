@@ -6,8 +6,7 @@
 #for d in c
 #for d in c r g p
 #for d in c r g
-#for d in p
-for d in c r g p
+for d in p
 do
     time "$d/pygorvid" --prefix "j${d}_" "$@" | tee "e0${d}"
 done

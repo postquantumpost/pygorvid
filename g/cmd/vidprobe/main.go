@@ -41,11 +41,13 @@ func run(args []string) int {
 	hashFrames := flags.Bool("hash", false, "print SHA-256 hashes for frames decoded by --readall or --extractframe")
 	slideshow := flags.Bool("slideshow", false, "display decoded frames in a window")
 	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
+	readahead := flags.Bool("readahead", false, "decode upcoming closed GOPs ahead in order (not implemented)")
 	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
 	if err := flags.Parse(flagsFirst(args)); err != nil {
 		return 2
 	}
+	_ = readahead
 	if *threads < 1 {
 		fmt.Fprintln(os.Stderr, "--threads must be a positive integer")
 		return 2
@@ -241,7 +243,7 @@ func flagsFirst(args []string) []string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "       vidprobe --generate OUTPUT.mp4")
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--readahead] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
 func readAllFrames(input string, threads int, verbose, hashFrames bool) (int, error) {

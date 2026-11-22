@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from pygorvid.cli import main
+from pygorvid.h264encoder import H264Encoder
+from pygorvid.mp4writer import Mp4Writer
 
 
 FIXTURE = Path(__file__).resolve().parents[2] / "samples" / "decoder-smoke-16x16.mp4"
@@ -32,6 +34,56 @@ def test_read_all_hashes_packed_frames(capsys):
         f"{FIXTURE}: frame 2 sha256=3c34cdaf1396e4ddf7213b068a17fa73e1fcdbcf08cbc0ed56a3c58736c88d78",
         f"{FIXTURE}: read 3 frames",
     ]
+
+
+def test_readahead_matches_sequential_closed_gop_decoding(
+    tmp_path, capsys
+):
+    video = tmp_path / "two-closed-gops.mp4"
+    video.write_bytes(Mp4Writer().encode(H264Encoder()))
+
+    assert main(["--readall", "--hash", "--threads", "2", str(video)]) == 0
+    sequential = capsys.readouterr().out
+    assert main([
+        "--readall", "--hash", "--readahead", "--threads", "2", str(video),
+    ]) == 0
+    readahead = capsys.readouterr().out
+    assert readahead == sequential
+
+
+def test_readahead_is_forwarded_to_python_decoder(monkeypatch):
+    from pygorvid import cli
+
+    class FakeReader:
+        sample_count = 0
+
+        def __init__(self, path):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeDecoder:
+        def __init__(self, reader, **options):
+            assert options["readahead"] is True
+
+        frame_cache_size = 0
+
+        def decode_sequential_frames(self, indices):
+            return iter(())
+
+    monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
+    monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
+    assert cli._read_all_frames("fake.mp4", readahead=True) == 0
+
+
+def test_readahead_ignores_file_without_multiple_closed_gops(capsys):
+    assert main(["--readall", "--hash", str(FIXTURE)]) == 0
+    sequential = capsys.readouterr().out
+    assert main([
+        "--readall", "--hash", "--readahead", "--threads", "3", str(FIXTURE),
+    ]) == 0
+    assert capsys.readouterr().out == sequential
 
 
 def test_hash_requires_decoding_mode():
@@ -197,6 +249,58 @@ def test_slideshow_presents_frames_in_order_and_stops_on_close(monkeypatch):
     assert read_indices == [0, 2]
     assert shown == [0, 1]
     assert closed == ["reader", "window"]
+
+
+def test_slideshow_forwards_readahead_to_decoder(monkeypatch):
+    from pygorvid import cli, slideshow
+
+    class FakeReader:
+        sample_count = 2
+        configuration = type("Configuration", (), {"timescale": 10})()
+
+        def __init__(self, path):
+            pass
+
+        def presentation_sample_indices(self):
+            return [0, 1]
+
+        def sample_at(self, index):
+            return type("Sample", (), {"duration_ticks": 1})()
+
+        def close(self):
+            pass
+
+    class FakeDecoder:
+        def __init__(self, reader, **options):
+            assert options["readahead"] is True
+
+        frame_cache_size = 0
+
+        def decode_sequential_frames(self, indices):
+            assert tuple(indices) == (0, 1)
+            yield 0, "first"
+            yield 1, "second"
+
+    class FakeWindow:
+        def __init__(self, title):
+            pass
+
+        def is_open(self):
+            return True
+
+        def wait_until(self, deadline_seconds):
+            return True
+
+        def show(self, frame):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
+    monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
+    monkeypatch.setattr(slideshow, "SlideshowWindow", FakeWindow)
+    assert cli._slideshow("fake.mp4", readahead=True) == 2
 
 
 @pytest.mark.parametrize("options", (

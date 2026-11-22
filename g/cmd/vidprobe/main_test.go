@@ -177,6 +177,13 @@ func TestRunRejectsNonPositiveThreads(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsReadaheadOption(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
+	if status := run([]string{"--readall", "--readahead", path}); status != 0 {
+		t.Fatalf("read-all with --readahead status = %d; want 0", status)
+	}
+}
+
 func TestReadAllFrames(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
 	for _, threads := range []int{1, 2} {

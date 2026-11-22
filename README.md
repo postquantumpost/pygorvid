@@ -425,6 +425,16 @@ vidprobe --readall --threads 4 first.mp4 second.mp4
 Each successful input reports its decoded frame count. A decode failure reports
 the zero-based frame index, continues with subsequent inputs, and produces exit
 status 1. `--readall` cannot be combined with `--extractframe` or `--output`.
+Add `--readahead` to `--readall` or `--slideshow` to let Python decode future
+closed GOPs in separate processes while frames from the current GOP are
+consumed in presentation order. Python uses an individual shared-memory
+frame-buffer pool for each process-to-process frame transfer. Each GOP reserves
+all buffers it needs before its process starts; consumed buffers return to the
+pool and idle buffers are freed when memory becomes low. Python uses at most
+`--threads - 1` readahead processes and reduces the lookahead count when the
+estimated decoded-frame cache would not fit in half of the available memory.
+Files without multiple closed GOPs use normal sequential decoding. The option
+is accepted but not yet implemented by Go, Rust, and C++.
 This uses the same native MP4/H.264 decoder and supported codec subset as frame
 extraction; it does not just read compressed samples.
 
@@ -443,7 +453,7 @@ four implementations; different digests indicate that decoded frame pixels
 differ. `--hash` requires either `--readall` or `--extractframe`.
 
 To display decoded frames in presentation order, run
-`vidprobe --slideshow --input input.mp4`. The window closes
+`vidprobe --slideshow [--readahead] --input input.mp4`. The window closes
 after the last frame; closing it early stops that input. Subsequent inputs are
 handled in order. Frame durations are respected when decoding is fast enough;
 slow decoding reduces the display rate. Audio is not played. This mode cannot be
@@ -505,8 +515,9 @@ all four language implementations. The C, Go, and Rust decoders are also checked
 with one and four threads.
 
 `--threads N` sets the requested decoder worker count in all four implementations
-and defaults to the number of available processors. C and Python currently
-reserve that value for future parallel decoding; Go and Rust use it for
+and defaults to the number of available processors. Python uses it as the
+foreground GOP plus readahead process budget only with `--readahead`; otherwise
+Python and C++ reserve it for future parallel decoding. Go and Rust use it for
 macroblock reconstruction and deblocking.
 `--verbose` enables decoder progress and diagnostic output; without it, the tool
 prints only its normal per-file result.
