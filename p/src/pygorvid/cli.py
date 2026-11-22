@@ -217,6 +217,10 @@ def _slideshow(
 
 
 def main(argv=None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True, write_through=True)
     parser = argparse.ArgumentParser(prog="vidprobe")
     parser.add_argument("--input", help="first input video file")
     parser.add_argument("--generate", help="generate 64x64 H.264 feature-test video with stereo silence (.mp4)")

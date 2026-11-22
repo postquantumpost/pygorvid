@@ -1461,6 +1461,8 @@ int run(const std::vector<std::string>& args) {
 } // namespace
 
 int main(int argc, char** argv) {
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
     std::vector<std::string> args;
     for (int index = 1; index < argc; ++index) {
         args.emplace_back(argv[index]);
