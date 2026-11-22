@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import math
 import sys
 import tempfile
@@ -64,6 +65,7 @@ def _positive_int(value: str) -> int:
 def _extract_frame(
     input_path: str, frame: int, output_path: str,
     threads: int = 1, verbose: bool = False,
+    hash_frame: bool = False,
 ) -> None:
     output = Path(output_path)
     extension = output.suffix.lower()
@@ -74,6 +76,15 @@ def _extract_frame(
         decoded = create_decoder(
             reader, threads=threads, debug_progress=verbose
         ).decode_frame(frame)
+        if hash_frame:
+            digest = hashlib.sha256()
+            digest.update(decoded.luma_plane_bytes())
+            digest.update(decoded.u_plane_bytes())
+            digest.update(decoded.v_plane_bytes())
+            print(
+                f"{input_path}: frame {frame} "
+                f"sha256={digest.hexdigest()}"
+            )
     finally:
         reader.close()
     rgb = PixelConverter(PixelColorRange.LIMITED).convert_yuv420_to_rgb(
@@ -89,6 +100,7 @@ def _extract_frame(
 
 def _read_all_frames(
     input_path: str, threads: int = 1, verbose: bool = False,
+    hash_frames: bool = False,
 ) -> int:
     reader = VideoSampleReader(input_path)
     try:
@@ -100,7 +112,16 @@ def _read_all_frames(
                     decoder = create_decoder(
                         reader, threads=threads, debug_progress=verbose
                     )
-                decoder.decode_frame(index)
+                frame = decoder.decode_frame(index)
+                if hash_frames:
+                    digest = hashlib.sha256()
+                    digest.update(frame.luma_plane_bytes())
+                    digest.update(frame.u_plane_bytes())
+                    digest.update(frame.v_plane_bytes())
+                    print(
+                        f"{input_path}: frame {index} "
+                        f"sha256={digest.hexdigest()}"
+                    )
             except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
                 raise DecoderError(f"decode frame {index}: {error}") from error
         return reader.sample_count
@@ -156,6 +177,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
     parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
+    parser.add_argument("--hash", action="store_true", help="print SHA-256 hashes for frames decoded by --readall or --extractframe")
     parser.add_argument("--slideshow", action="store_true", help="display decoded frames in an SDL2 window")
     parser.add_argument("--verbose", action="store_true", help="print decoder progress and debug information")
     parser.add_argument(
@@ -173,8 +195,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     files = ([args.input] if args.input is not None else []) + args.files
     if args.generate is not None:
-        if files or args.readall or args.slideshow or args.extractframe is not None or args.output is not None:
-            parser.error("--generate cannot be combined with inputs, --readall, --slideshow, --extractframe or --output")
+        if files or args.readall or args.hash or args.slideshow or args.extractframe is not None or args.output is not None:
+            parser.error("--generate cannot be combined with inputs, --readall, --hash, --slideshow, --extractframe or --output")
         output = Path(args.generate)
         if output.suffix.lower() != ".mp4":
             parser.error("--generate must end in .mp4")
@@ -213,6 +235,8 @@ def main(argv=None) -> int:
         return 2
     if args.readall and args.slideshow:
         parser.error("--readall cannot be combined with --slideshow")
+    if args.hash and not args.readall and args.extractframe is None:
+        parser.error("--hash requires --readall or --extractframe")
     if (args.readall or args.slideshow) and (args.extractframe is not None or args.output is not None):
         parser.error("--readall and --slideshow cannot be used with --extractframe or --output")
     if (args.extractframe is None) != (args.output is None):
@@ -225,7 +249,8 @@ def main(argv=None) -> int:
             output = output.with_name(args.prefix + output.name)
         try:
             _extract_frame(
-                files[0], args.extractframe, str(output), args.threads, args.verbose
+                files[0], args.extractframe, str(output), args.threads,
+                args.verbose, args.hash
             )
         except (OSError, ValueError, DecoderError, Mp4FormatError) as e:
             print(f"{files[0]}: {e}", file=sys.stderr)
@@ -246,7 +271,9 @@ def main(argv=None) -> int:
             continue
         if args.readall:
             try:
-                count = _read_all_frames(path, args.threads, args.verbose)
+                count = _read_all_frames(
+                    path, args.threads, args.verbose, args.hash
+                )
             except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
                 print(f"{path}: {error}", file=sys.stderr)
                 status = 1

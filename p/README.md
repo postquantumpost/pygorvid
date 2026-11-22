@@ -105,7 +105,11 @@ vidprobe --readall --threads 4 first.mp4 second.mp4
 ```
 
 The command reports a frame count per input and continues to later files after
-a failure, returning status 1 if any input fails. `--readall` is mutually
+a failure, returning status 1 if any input fails. Add `--hash` to print the
+SHA-256 of each packed Y+U+V frame without stride padding; the output is
+identical across the Python, Go, Rust, and C++ commands. `--hash` requires
+`--readall` or `--extractframe`; extraction prints only the selected frame's
+digest. `--readall` is mutually
 exclusive with `--extractframe` and `--output`. Add `--verbose` to print frame
 decode progress; the default output is limited to per-file results. `--threads`
 accepts a positive worker count and defaults to the number of available

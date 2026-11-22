@@ -428,6 +428,19 @@ status 1. `--readall` cannot be combined with `--extractframe` or `--output`.
 This uses the same native MP4/H.264 decoder and supported codec subset as frame
 extraction; it does not just read compressed samples.
 
+Add `--hash` to print one SHA-256 digest per decoded frame before the file
+summary. It also works with `--extractframe`, printing the selected frame's
+digest before the extraction summary:
+
+```text
+vidprobe --readall --hash --threads 4 first.mp4
+vidprobe --hash --extractframe 12 --output frame.png first.mp4
+```
+
+Each digest covers packed Y plane bytes followed by packed U and V plane bytes,
+without stride padding. The hash lines are identical across the four
+implementations. `--hash` requires either `--readall` or `--extractframe`.
+
 To display decoded frames in presentation order, run
 `vidprobe --slideshow --input input.mp4`. The window closes
 after the last frame; closing it early stops that input. Subsequent inputs are

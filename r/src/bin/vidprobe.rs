@@ -39,22 +39,39 @@ fn generation_metadata() -> pygorvid::Mp4Metadata {
 }
 
 fn run(args: Vec<String>) -> i32 {
-    let (input, output, frame, prefix, threads, read_all, slideshow, verbose, mut files, generate) =
-        match parse_args(&args) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                eprintln!("{error}");
-                print_usage();
-                return 2;
-            }
-        };
+    let (
+        input,
+        output,
+        frame,
+        prefix,
+        threads,
+        read_all,
+        hash_frames,
+        slideshow,
+        verbose,
+        mut files,
+        generate,
+    ) = match parse_args(&args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            return 2;
+        }
+    };
     if let Some(input) = input {
         files.insert(0, input);
     }
     if let Some(output_path) = generate {
-        if !files.is_empty() || read_all || slideshow || frame.is_some() || output.is_some() {
+        if !files.is_empty()
+            || read_all
+            || hash_frames
+            || slideshow
+            || frame.is_some()
+            || output.is_some()
+        {
             eprintln!(
-                "--generate cannot be combined with inputs, --readall, --extractframe or --output"
+                "--generate cannot be combined with inputs, --readall, --hash, --extractframe or --output"
             );
             return 2;
         }
@@ -98,6 +115,10 @@ fn run(args: Vec<String>) -> i32 {
         eprintln!("--slideshow, --readall and extraction options cannot be combined");
         return 2;
     }
+    if hash_frames && !read_all && frame.is_none() {
+        eprintln!("--hash requires --readall or --extractframe");
+        return 2;
+    }
     if frame.is_some() != output.is_some() {
         eprintln!("--extractframe and --output must be used together");
         return 2;
@@ -108,7 +129,8 @@ fn run(args: Vec<String>) -> i32 {
             return 2;
         }
         let output = prefixed_output(&output, prefix.as_deref());
-        if let Err(error) = extract_frame(&files[0], frame, &output, threads, verbose) {
+        if let Err(error) = extract_frame(&files[0], frame, &output, threads, verbose, hash_frames)
+        {
             eprintln!("{}: {error}", files[0]);
             return 1;
         }
@@ -128,7 +150,7 @@ fn run(args: Vec<String>) -> i32 {
             continue;
         }
         if read_all {
-            match read_all_frames(p, threads, verbose) {
+            match read_all_frames(p, threads, verbose, hash_frames) {
                 Ok(count) => println!("{p}: read {count} frames"),
                 Err(error) => {
                     eprintln!("{p}: {error}");
@@ -265,6 +287,7 @@ fn parse_args(
         bool,
         bool,
         bool,
+        bool,
         Vec<String>,
         Option<String>,
     ),
@@ -277,6 +300,7 @@ fn parse_args(
     let mut prefix = None;
     let mut threads = pygorvid::default_decoder_threads();
     let mut read_all = false;
+    let mut hash_frames = false;
     let mut slideshow = false;
     let mut verbose = false;
     let parse_threads = |value: &str| {
@@ -319,6 +343,8 @@ fn parse_args(
             }
         } else if arg == "--readall" {
             read_all = true;
+        } else if arg == "--hash" {
+            hash_frames = true;
         } else if arg == "--slideshow" {
             slideshow = true;
         } else if arg == "--verbose" {
@@ -347,13 +373,23 @@ fn parse_args(
         index += 1;
     }
     Ok((
-        input, output, frame, prefix, threads, read_all, slideshow, verbose, files, generate,
+        input,
+        output,
+        frame,
+        prefix,
+        threads,
+        read_all,
+        hash_frames,
+        slideshow,
+        verbose,
+        files,
+        generate,
     ))
 }
 
 fn print_usage() {
     eprintln!("       vidprobe --generate OUTPUT.mp4");
-    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--verbose] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
 }
 
 #[cfg(not(feature = "slideshow"))]
@@ -369,7 +405,12 @@ fn show_slideshow(input: &str, threads: usize, verbose: bool) -> Result<usize, S
     slideshow::show(input, threads, verbose)
 }
 
-fn read_all_frames(input: &str, threads: usize, verbose: bool) -> Result<usize, String> {
+fn read_all_frames(
+    input: &str,
+    threads: usize,
+    verbose: bool,
+    hash_frames: bool,
+) -> Result<usize, String> {
     let mut reader = pygorvid::VideoSampleReader::open(input).map_err(|error| error.to_string())?;
     let count = reader.sample_count();
     let mut decoder = pygorvid::VideoDecoder::new(
@@ -392,11 +433,126 @@ fn read_all_frames(input: &str, threads: usize, verbose: bool) -> Result<usize, 
             decoder.set_threads(threads);
             decoder.set_verbose(verbose);
         }
-        decoder
+        let frame = decoder
             .decode_frame(index as u64)
             .map_err(|error| format!("decode frame {index}: {error}"))?;
+        if hash_frames {
+            let y = frame
+                .luma_plane()
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            let u = frame
+                .u_plane()
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            let v = frame
+                .v_plane()
+                .map_err(|error| format!("decode frame {index}: {error}"))?;
+            let digest = sha256_planes(&[&y, &u, &v]);
+            println!("{input}: frame {index} sha256={digest}");
+        }
     }
     Ok(count)
+}
+
+fn sha256_planes(planes: &[&[u8]]) -> String {
+    const CONSTANTS: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut state = [
+        0x6a09e667_u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut block = [0_u8; 64];
+    let mut block_len = 0;
+    let mut bit_length = 0_u64;
+    let transform = |block: &[u8; 64], state: &mut [u32; 8]| {
+        let mut schedule = [0_u32; 64];
+        for (index, word) in schedule[..16].iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_be_bytes(block[offset..offset + 4].try_into().unwrap());
+        }
+        for index in 16..64 {
+            let previous_15 = schedule[index - 15];
+            let previous_2 = schedule[index - 2];
+            let sigma_0 =
+                previous_15.rotate_right(7) ^ previous_15.rotate_right(18) ^ (previous_15 >> 3);
+            let sigma_1 =
+                previous_2.rotate_right(17) ^ previous_2.rotate_right(19) ^ (previous_2 >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(sigma_0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(sigma_1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+        for index in 0..64 {
+            let big_sigma_1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ (!e & g);
+            let temporary_1 = h
+                .wrapping_add(big_sigma_1)
+                .wrapping_add(choose)
+                .wrapping_add(CONSTANTS[index])
+                .wrapping_add(schedule[index]);
+            let big_sigma_0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temporary_2 = big_sigma_0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temporary_1);
+            d = c;
+            c = b;
+            b = a;
+            a = temporary_1.wrapping_add(temporary_2);
+        }
+        for (word, addition) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *word = word.wrapping_add(addition);
+        }
+    };
+    for plane in planes {
+        let mut offset = 0;
+        while offset < plane.len() {
+            let count = (64 - block_len).min(plane.len() - offset);
+            block[block_len..block_len + count].copy_from_slice(&plane[offset..offset + count]);
+            block_len += count;
+            offset += count;
+            bit_length += (count as u64) * 8;
+            if block_len == 64 {
+                transform(&block, &mut state);
+                block_len = 0;
+            }
+        }
+    }
+    block[block_len] = 0x80;
+    block_len += 1;
+    if block_len > 56 {
+        block[block_len..].fill(0);
+        transform(&block, &mut state);
+        block.fill(0);
+    } else {
+        block[block_len..56].fill(0);
+    }
+    block[56..].copy_from_slice(&bit_length.to_be_bytes());
+    transform(&block, &mut state);
+    let mut digest = String::with_capacity(64);
+    for word in state {
+        use std::fmt::Write;
+        write!(&mut digest, "{word:08x}").unwrap();
+    }
+    digest
 }
 
 fn prefixed_output(output: &str, prefix: Option<&str>) -> String {
@@ -416,6 +572,7 @@ fn extract_frame(
     output: &str,
     threads: usize,
     verbose: bool,
+    hash_frame: bool,
 ) -> Result<(), String> {
     let extension = Path::new(output)
         .extension()
@@ -432,6 +589,15 @@ fn extract_frame(
     let decoded = decoder
         .decode_frame(frame as u64)
         .map_err(|error| error.to_string())?;
+    if hash_frame {
+        let y = decoded.luma_plane().map_err(|error| error.to_string())?;
+        let u = decoded.u_plane().map_err(|error| error.to_string())?;
+        let v = decoded.v_plane().map_err(|error| error.to_string())?;
+        println!(
+            "{input}: frame {frame} sha256={}",
+            sha256_planes(&[&y, &u, &v])
+        );
+    }
     let payload = if extension == "png" {
         pygorvid::encode_png_frame(&decoded)
     } else {
@@ -714,7 +880,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
         let input = input.to_str().unwrap();
         for threads in [1, 2] {
-            assert_eq!(read_all_frames(input, threads, false).unwrap(), 3);
+            assert_eq!(read_all_frames(input, threads, false, false).unwrap(), 3);
         }
         let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect();
         assert_eq!(
@@ -744,6 +910,23 @@ mod tests {
     }
 
     #[test]
+    fn hashes_packed_frame_bytes() {
+        assert_eq!(
+            sha256_planes(&[b"abc"]),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_planes(&[b"", b"abc", b""]),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn hash_requires_decoding_mode() {
+        assert_eq!(run(vec!["--hash".into(), "input.mp4".into()]), 2);
+    }
+
+    #[test]
     fn read_all_reports_failing_frame() {
         let input =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
@@ -761,7 +944,7 @@ mod tests {
         let cleanup = TemporaryOutputDirectory(directory.clone());
         let invalid = directory.join("invalid.mp4");
         fs::write(&invalid, data).unwrap();
-        assert!(read_all_frames(invalid.to_str().unwrap(), 1, false)
+        assert!(read_all_frames(invalid.to_str().unwrap(), 1, false, false)
             .unwrap_err()
             .contains("decode frame 1:"));
         drop(cleanup);
@@ -779,8 +962,9 @@ mod tests {
         );
         assert!(parse_args(&args(&["--threads", "0", "a.mp4"])).is_err());
         assert!(parse_args(&args(&["--threads=x", "a.mp4"])).is_err());
-        assert!(!parse_args(&args(&["a.mp4"])).unwrap().6);
-        assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().6);
+        assert!(!parse_args(&args(&["a.mp4"])).unwrap().8);
+        assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().8);
+        assert!(parse_args(&args(&["--hash", "a.mp4"])).unwrap().6);
     }
 
     #[test]
@@ -799,6 +983,7 @@ mod tests {
                 output.to_str().unwrap(),
                 2,
                 false,
+                true,
             )
             .unwrap();
             let payload = fs::read(&output).unwrap();
@@ -814,7 +999,8 @@ mod tests {
                 999,
                 output.to_str().unwrap(),
                 1,
-                false
+                false,
+                false,
             )
             .is_err());
             assert_eq!(fs::read(&output).unwrap(), payload);

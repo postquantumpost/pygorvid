@@ -39,6 +39,19 @@ foreach(extension IN ITEMS png jpg JPG)
     endif()
 endforeach()
 
+set(hash_output_file "${directory}/hashed.png")
+execute_process(
+    COMMAND "${VIDPROBE}" --hash --extractframe 1 --input "${FIXTURE}"
+            --output "${hash_output_file}"
+    RESULT_VARIABLE status OUTPUT_VARIABLE hash_output ERROR_VARIABLE error)
+if(NOT status EQUAL 0 OR NOT EXISTS "${hash_output_file}")
+    message(FATAL_ERROR "Hash extraction failed: ${error}${hash_output}")
+endif()
+if(NOT hash_output MATCHES
+       "frame 1 sha256=b9d622c5a46a873024f92f79adc3d2eff56b28361826a5cfbfaa2d99c47e0fc0")
+    message(FATAL_ERROR "Hash extraction produced an unexpected frame digest: ${hash_output}")
+endif()
+
 set(existing "${directory}/native_image with spaces.jpg")
 file(READ "${existing}" original HEX)
 execute_process(
@@ -62,6 +75,17 @@ execute_process(
     RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT status EQUAL 0 OR NOT output MATCHES "read 60 frames")
     message(FATAL_ERROR "Readall failed: ${error}${output}")
+endif()
+
+execute_process(
+    COMMAND "${VIDPROBE}" --readall --hash --input "${FIXTURE}"
+    RESULT_VARIABLE status OUTPUT_VARIABLE hash_output ERROR_VARIABLE error)
+if(NOT status EQUAL 0)
+    message(FATAL_ERROR "--readall --hash failed: ${error}${hash_output}")
+endif()
+if(NOT hash_output MATCHES
+       "frame 0 sha256=ab53e317c9229d1721018ffc000d6e4ecadb43706b38544b197ef7e8c9299644")
+    message(FATAL_ERROR "--readall --hash produced an unexpected frame digest: ${hash_output}")
 endif()
 
 execute_process(

@@ -24,6 +24,34 @@ def test_read_all_frames_and_multiple_inputs(tmp_path, monkeypatch, capsys):
     assert f"{FIXTURE}: read 3 frames" in captured.out
 
 
+def test_read_all_hashes_packed_frames(capsys):
+    assert main(["--readall", "--hash", str(FIXTURE)]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"{FIXTURE}: frame 0 sha256=ab53e317c9229d1721018ffc000d6e4ecadb43706b38544b197ef7e8c9299644",
+        f"{FIXTURE}: frame 1 sha256=b9d622c5a46a873024f92f79adc3d2eff56b28361826a5cfbfaa2d99c47e0fc0",
+        f"{FIXTURE}: frame 2 sha256=3c34cdaf1396e4ddf7213b068a17fa73e1fcdbcf08cbc0ed56a3c58736c88d78",
+        f"{FIXTURE}: read 3 frames",
+    ]
+
+
+def test_hash_requires_decoding_mode():
+    with pytest.raises(SystemExit) as error:
+        main(["--hash", str(FIXTURE)])
+    assert error.value.code == 2
+
+
+def test_extractframe_hashes_decoded_frame(tmp_path, capsys):
+    output = tmp_path / "frame.png"
+    assert main([
+        "--hash", "--extractframe", "1", "--output", str(output), str(FIXTURE),
+    ]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"{FIXTURE}: frame 1 sha256=b9d622c5a46a873024f92f79adc3d2eff56b28361826a5cfbfaa2d99c47e0fc0",
+        f"{FIXTURE}: extracted frame 1 to {output}",
+    ]
+    assert output.exists()
+
+
 @pytest.mark.parametrize("options", (
     ("--extractframe", "0"),
     ("--output", "out.png"),

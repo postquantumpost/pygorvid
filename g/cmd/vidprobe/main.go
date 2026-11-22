@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +38,7 @@ func run(args []string) int {
 	output := flags.String("output", "", "output image path (.png or .jpg)")
 	frame := flags.Int("extractframe", -1, "zero-based frame index to extract")
 	readAll := flags.Bool("readall", false, "decode all video frames without writing images")
+	hashFrames := flags.Bool("hash", false, "print SHA-256 hashes for frames decoded by --readall or --extractframe")
 	slideshow := flags.Bool("slideshow", false, "display decoded frames in a window")
 	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
 	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
@@ -69,8 +71,8 @@ func run(args []string) int {
 		paths = append([]string{*input}, paths...)
 	}
 	if generateSet {
-		if len(paths) != 0 || *readAll || *slideshow || frameSet || outputSet {
-			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --slideshow, --extractframe or --output")
+		if len(paths) != 0 || *readAll || *hashFrames || *slideshow || frameSet || outputSet {
+			fmt.Fprintln(os.Stderr, "--generate cannot be combined with inputs, --readall, --hash, --slideshow, --extractframe or --output")
 			return 2
 		}
 		if strings.ToLower(filepath.Ext(*generate)) != ".mp4" {
@@ -121,6 +123,10 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "--slideshow, --readall and extraction options cannot be combined")
 		return 2
 	}
+	if *hashFrames && !*readAll && !frameSet {
+		fmt.Fprintln(os.Stderr, "--hash requires --readall or --extractframe")
+		return 2
+	}
 	if frameSet || *output != "" {
 		if !frameSet || *output == "" {
 			fmt.Fprintln(os.Stderr, "--extractframe and --output must be used together")
@@ -135,7 +141,7 @@ func run(args []string) int {
 			return 2
 		}
 		outputPath := prefixedOutput(*output, *prefix)
-		if err := extractFrame(paths[0], *frame, outputPath, *threads, *verbose); err != nil {
+		if err := extractFrame(paths[0], *frame, outputPath, *threads, *verbose, *hashFrames); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", paths[0], err)
 			return 1
 		}
@@ -155,7 +161,7 @@ func run(args []string) int {
 			continue
 		}
 		if *readAll {
-			count, err := readAllFrames(p, *threads, *verbose)
+			count, err := readAllFrames(p, *threads, *verbose, *hashFrames)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -235,10 +241,10 @@ func flagsFirst(args []string) []string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "       vidprobe --generate OUTPUT.mp4")
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
-func readAllFrames(input string, threads int, verbose bool) (int, error) {
+func readAllFrames(input string, threads int, verbose, hashFrames bool) (int, error) {
 	reader, err := vid.OpenVideoSampleReader(input)
 	if err != nil {
 		return 0, err
@@ -266,8 +272,16 @@ func readAllFrames(input string, threads int, verbose bool) (int, error) {
 				decoder.SetVerbose(verbose)
 			}
 		}
-		if _, err := decoder.DecodeFrame(uint64(index)); err != nil {
+		frame, err := decoder.DecodeFrame(uint64(index))
+		if err != nil {
 			return index, fmt.Errorf("decode frame %d: %w", index, err)
+		}
+		if hashFrames {
+			digest, err := frameHash(frame)
+			if err != nil {
+				return index, fmt.Errorf("decode frame %d: %w", index, err)
+			}
+			fmt.Printf("%s: frame %d sha256=%x\n", input, index, digest)
 		}
 	}
 	return count, nil
@@ -307,7 +321,7 @@ func precheckOutputFile(output string) error {
 	return nil
 }
 
-func extractFrame(input string, frame int, output string, threads int, verbose bool) error {
+func extractFrame(input string, frame int, output string, threads int, verbose, hashFrame bool) error {
 	extension := strings.ToLower(filepath.Ext(output))
 	if extension != ".png" && extension != ".jpg" {
 		return errors.New("--output must end in .png or .jpg")
@@ -327,6 +341,13 @@ func extractFrame(input string, frame int, output string, threads int, verbose b
 	if err != nil {
 		return err
 	}
+	if hashFrame {
+		digest, err := frameHash(decoded)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s: frame %d sha256=%x\n", input, frame, digest)
+	}
 	rgb, err := decoded.ConvertToRGB(vid.ColorRangeLimited)
 	if err != nil {
 		return err
@@ -344,4 +365,24 @@ func extractFrame(input string, frame int, output string, threads int, verbose b
 		return err
 	}
 	return writeOutputFile(output, payload)
+}
+
+func frameHash(frame vid.Yuv420Frame) ([]byte, error) {
+	y, err := frame.LumaPlaneBytes()
+	if err != nil {
+		return nil, err
+	}
+	u, err := frame.UPlaneBytes()
+	if err != nil {
+		return nil, err
+	}
+	v, err := frame.VPlaneBytes()
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.New()
+	_, _ = digest.Write(y)
+	_, _ = digest.Write(u)
+	_, _ = digest.Write(v)
+	return digest.Sum(nil), nil
 }

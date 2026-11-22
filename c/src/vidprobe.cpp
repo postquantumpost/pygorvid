@@ -9,15 +9,19 @@
 #include "pygorvid/av1.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +39,7 @@ struct Options {
     std::string output_prefix;
     std::optional<std::string> generate_path;
     bool read_all = false;
+    bool hash_frames = false;
     bool slideshow = false;
     std::size_t threads = std::max<std::size_t>(
         1, std::thread::hardware_concurrency());
@@ -42,7 +47,7 @@ struct Options {
 
 void usage() {
     std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
-    std::cerr << "usage: vidprobe [--threads N] [--slideshow | --readall | "
+    std::cerr << "usage: vidprobe [--threads N] [--hash] [--slideshow | --readall | "
                  "--extractframe INDEX --output IMAGE] [--prefix TEXT] "
                  "[--input FILE] FILE...\n";
 }
@@ -129,11 +134,108 @@ void save_image(const std::string& path, const pygorvid::Yuv420Frame& frame) {
     }
 }
 
+std::string sha256_frame(const pygorvid::Yuv420Frame& frame) {
+    static constexpr std::array<std::uint32_t, 64> constants{{
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    }};
+    std::vector<std::uint8_t> data;
+    const auto frame_bytes =
+        frame.luma.size() + frame.chroma_u.size() + frame.chroma_v.size();
+    if (frame_bytes > data.max_size() - 72) {
+        throw std::overflow_error("decoded frame is too large to hash");
+    }
+    data.reserve(frame_bytes + 72);
+    data.insert(data.end(), frame.luma.begin(), frame.luma.end());
+    data.insert(data.end(), frame.chroma_u.begin(), frame.chroma_u.end());
+    data.insert(data.end(), frame.chroma_v.begin(), frame.chroma_v.end());
+    const auto bit_length = static_cast<std::uint64_t>(frame_bytes) * 8;
+    data.push_back(0x80);
+    while (data.size() % 64 != 56) data.push_back(0);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        data.push_back(static_cast<std::uint8_t>(bit_length >> shift));
+    }
+
+    std::array<std::uint32_t, 8> state{{
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    }};
+    const auto rotate_right = [](std::uint32_t value, unsigned int count) {
+        return (value >> count) | (value << (32 - count));
+    };
+    for (std::size_t offset = 0; offset < data.size(); offset += 64) {
+        std::array<std::uint32_t, 64> schedule{};
+        for (std::size_t index = 0; index < 16; ++index) {
+            const auto base = offset + index * 4;
+            schedule[index] =
+                (static_cast<std::uint32_t>(data[base]) << 24) |
+                (static_cast<std::uint32_t>(data[base + 1]) << 16) |
+                (static_cast<std::uint32_t>(data[base + 2]) << 8) |
+                static_cast<std::uint32_t>(data[base + 3]);
+        }
+        for (std::size_t index = 16; index < schedule.size(); ++index) {
+            const auto previous_15 = schedule[index - 15];
+            const auto previous_2 = schedule[index - 2];
+            const auto sigma_0 = rotate_right(previous_15, 7) ^
+                rotate_right(previous_15, 18) ^ (previous_15 >> 3);
+            const auto sigma_1 = rotate_right(previous_2, 17) ^
+                rotate_right(previous_2, 19) ^ (previous_2 >> 10);
+            schedule[index] = schedule[index - 16] + sigma_0 +
+                schedule[index - 7] + sigma_1;
+        }
+        auto [a, b, c, d, e, f, g, h] = state;
+        for (std::size_t index = 0; index < schedule.size(); ++index) {
+            const auto big_sigma_1 =
+                rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
+            const auto choose = (e & f) ^ (~e & g);
+            const auto temporary_1 = h + big_sigma_1 + choose +
+                constants[index] + schedule[index];
+            const auto big_sigma_0 =
+                rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22);
+            const auto majority = (a & b) ^ (a & c) ^ (b & c);
+            const auto temporary_2 = big_sigma_0 + majority;
+            h = g;
+            g = f;
+            f = e;
+            e = d + temporary_1;
+            d = c;
+            c = b;
+            b = a;
+            a = temporary_1 + temporary_2;
+        }
+        const std::array<std::uint32_t, 8> additions{{
+            a, b, c, d, e, f, g, h,
+        }};
+        for (std::size_t index = 0; index < state.size(); ++index) {
+            state[index] += additions[index];
+        }
+    }
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (const auto word : state) output << std::setw(8) << word;
+    return output.str();
+}
+
 std::size_t decode_video(
     const std::string& input_path,
     const std::optional<std::size_t>& frame_index = std::nullopt,
     const std::optional<std::string>& output_path = std::nullopt,
-    bool slideshow = false, std::size_t threads = 0) {
+    bool slideshow = false, std::size_t threads = 0,
+    bool hash_frames = false) {
 #ifndef PYGORVID_SLIDESHOW
     if (slideshow) throw std::runtime_error(
         "optional slideshow build feature was not included; rebuild with -DPYGORVID_SLIDESHOW=ON");
@@ -613,6 +715,12 @@ std::size_t decode_video(
         }
 #endif
         decoded_frame = decoded;
+        if (hash_frames &&
+            (!frame_index || sample_index == *target_sample_index)) {
+            std::cout << input_path << ": frame "
+                      << (frame_index ? *frame_index : decoded_count)
+                      << " sha256=" << sha256_frame(decoded) << '\n';
+        }
         ++decoded_count;
         if (current_picture_is_reference) {
             auto stored_frame_num = current_frame_num;
@@ -864,6 +972,8 @@ Options parse_options(const std::vector<std::string>& args) {
             options.output_prefix = arg.substr(9);
         } else if (arg == "--readall") {
             options.read_all = true;
+        } else if (arg == "--hash") {
+            options.hash_frames = true;
         } else if (arg == "--slideshow") {
             options.slideshow = true;
         } else if (arg == "--threads") {
@@ -992,8 +1102,8 @@ int run(const std::vector<std::string>& args) {
     }
     if (options.generate_path) {
         if (!options.files.empty() || options.extract_frame || options.output_path ||
-            options.read_all || options.slideshow) {
-            std::cerr << "--generate cannot be combined with inputs, --readall, --extractframe or --output\n";
+            options.read_all || options.hash_frames || options.slideshow) {
+            std::cerr << "--generate cannot be combined with inputs, --readall, --hash, --extractframe or --output\n";
             return 2;
         }
         auto extension = std::filesystem::path(*options.generate_path).extension().string();
@@ -1026,6 +1136,12 @@ int run(const std::vector<std::string>& args) {
         usage();
         return 2;
     }
+    if (options.hash_frames && !options.read_all &&
+        !options.extract_frame) {
+        std::cerr << "--hash requires --readall or --extractframe\n";
+        usage();
+        return 2;
+    }
     if (options.extract_frame.has_value() != options.output_path.has_value()) {
         std::cerr << "--extractframe and --output must be used together\n";
         usage();
@@ -1041,7 +1157,8 @@ int run(const std::vector<std::string>& args) {
             *options.output_path, options.output_prefix);
         try {
             (void)decode_video(options.files[0], options.extract_frame,
-                               output_path, false, options.threads);
+                               output_path, false, options.threads,
+                               options.hash_frames);
             std::cout << options.files[0] << ": wrote frame "
                       << *options.extract_frame << " to "
                       << output_path << '\n';
@@ -1067,7 +1184,8 @@ int run(const std::vector<std::string>& args) {
         if (options.read_all) {
             try {
                 const auto decoded_count = decode_video(
-                    path, std::nullopt, std::nullopt, false, options.threads);
+                    path, std::nullopt, std::nullopt, false, options.threads,
+                    options.hash_frames);
                 std::cout << path << ": read " << decoded_count << " frames\n";
             } catch (const std::exception& error) {
                 std::cerr << path << ": " << error.what() << '\n';
