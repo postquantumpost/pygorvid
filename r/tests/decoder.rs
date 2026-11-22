@@ -668,7 +668,7 @@ fn debug_rust_p_slice_with_slice_qp_history() {
             &reference,
         )
         .unwrap();
-    let pps = decoder.picture_parameter_sets[0];
+    let pps = &decoder.picture_parameter_sets[0];
     let slice_qpy = 26 + pps.pic_init_qp_minus26 as i32 + p_slice.header.slice_qp_delta as i32;
     let mut builder = Yuv420FrameBuilder::new(
         sps.coded_width as usize / 16,
