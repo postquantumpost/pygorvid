@@ -23,7 +23,18 @@ set -x
 #do
 #./pygorvid --slideshow --input $f
 #done
-# python 91m6.013s samples/samp3.mp4
-# python 176m56.307s samples/ew1.mp4
+#
+# samples/samp3.mp4 1s
+# C++ 0m17.447s
+# Rust 1m7.118s
+# Go hang
+# python 91m6.013s
+#
+# samples/ew1.mp4 7s
+# C++ 0m29.514s
+# Rust 0m46.449s
+# Go hang
+# python 176m56.307s
+
 ./pygorvid --slideshow --input samples/samp3.mp4
 ./pygorvid --slideshow --input samples/ew1.mp4

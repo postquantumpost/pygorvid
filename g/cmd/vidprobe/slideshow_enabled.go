@@ -4,7 +4,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"runtime"
 	"sort"
 	"time"
@@ -13,6 +12,20 @@ import (
 	"github.com/veandco/go-sdl2/sdl"
 	"pygorvid/vid"
 )
+
+const maxSDLWaitMilliseconds = 2_147_483_647
+
+func sdlWaitTimeout(remaining time.Duration) int {
+	maximum := time.Duration(maxSDLWaitMilliseconds) * time.Millisecond
+	if remaining >= maximum {
+		return maxSDLWaitMilliseconds
+	}
+	timeout := int(remaining / time.Millisecond)
+	if remaining%time.Millisecond != 0 {
+		timeout++
+	}
+	return max(timeout, 1)
+}
 
 func showSlideshow(input string, threads int, verbose bool) (int, error) {
 	runtime.LockOSThread()
@@ -80,9 +93,7 @@ func showSlideshow(input string, threads int, verbose bool) (int, error) {
 			if remaining <= 0 {
 				return true
 			}
-			timeout := int(min(remaining, time.Duration(math.MaxInt32)*time.Millisecond).Round(time.Millisecond))
-			timeout = max(timeout, 1)
-			closed = isClosed(sdl.WaitEventTimeout(timeout))
+			closed = isClosed(sdl.WaitEventTimeout(sdlWaitTimeout(remaining)))
 		}
 		return !closed
 	}
