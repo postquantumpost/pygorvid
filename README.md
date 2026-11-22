@@ -438,8 +438,9 @@ vidprobe --hash --extractframe 12 --output frame.png first.mp4
 ```
 
 Each digest covers packed Y plane bytes followed by packed U and V plane bytes,
-without stride padding. The hash lines are identical across the four
-implementations. `--hash` requires either `--readall` or `--extractframe`.
+without stride padding. Formatting and frame ordering are identical across the
+four implementations; different digests indicate that decoded frame pixels
+differ. `--hash` requires either `--readall` or `--extractframe`.
 
 To display decoded frames in presentation order, run
 `vidprobe --slideshow --input input.mp4`. The window closes
@@ -581,7 +582,7 @@ a subset of adaptive reference marking; luma motion compensation supports
 quarter-pel positions and chroma supports fractional 4:2:0 positions. Default
 scaling lists and deblocking are implemented for the supported syntax paths.
 This is not a general-purpose H.264 decoder: field/MBAFF pictures, full
-long-term reference management, weighted B prediction, custom scaling lists,
+long-term reference management, custom scaling lists,
 I8x8 prediction, and other unimplemented syntax remain unsupported.
 
 The C++ CLI extracts a presentation frame by mapping its PTS-ordered index to

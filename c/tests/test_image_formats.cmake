@@ -89,6 +89,43 @@ if(NOT hash_output MATCHES
 endif()
 
 execute_process(
+    COMMAND "${VIDPROBE}" --readall --hash --input "${REORDERED_FIXTURE}"
+    RESULT_VARIABLE status OUTPUT_VARIABLE reordered_hash_output
+    ERROR_VARIABLE error)
+if(NOT status EQUAL 0)
+    message(FATAL_ERROR "Reordered --readall --hash failed: ${error}${reordered_hash_output}")
+endif()
+string(FIND "${reordered_hash_output}"
+    "frame 1 sha256=97a6ee33c31b09a278367a7a59e55ce7ea9b48d2203c28dbe803317b8b1a0a95"
+    frame_one_position)
+string(FIND "${reordered_hash_output}"
+    "frame 2 sha256=8e0a9935bf908f0a17def7e8c7bc103ac9937022bb48342f956d984e436e8ced"
+    frame_two_position)
+if(frame_one_position EQUAL -1 OR frame_two_position EQUAL -1 OR
+   NOT frame_one_position LESS frame_two_position)
+    message(FATAL_ERROR "Reordered hash output is not in presentation order: ${reordered_hash_output}")
+endif()
+
+execute_process(
+    COMMAND "${VIDPROBE}" --readall --hash --input "${WEIGHTED_FIXTURE}"
+    RESULT_VARIABLE status OUTPUT_VARIABLE weighted_hash_output
+    ERROR_VARIABLE error)
+if(NOT status EQUAL 0 OR NOT weighted_hash_output MATCHES
+       "frame 1 sha256=49dd89111184d6cc2225abf9ab71de58edf8bc39f8e2d67ecafd19584acf332e")
+    message(FATAL_ERROR "Weighted hash output is inconsistent: ${error}${weighted_hash_output}")
+endif()
+
+execute_process(
+    COMMAND "${VIDPROBE}" --extractframe 7 --hash --input "${EW1_FIXTURE}"
+            --output "${directory}/ew1-frame7.png"
+    RESULT_VARIABLE status OUTPUT_VARIABLE ew1_hash_output
+    ERROR_VARIABLE error)
+if(NOT status EQUAL 0 OR NOT ew1_hash_output MATCHES
+       "frame 7 sha256=d9328bd65b2f378c0acedc532f5d1ccea980b7c776a21db5c4e42c5233727f33")
+    message(FATAL_ERROR "Co-located motion hash output is inconsistent: ${error}${ew1_hash_output}")
+endif()
+
+execute_process(
     COMMAND "${VIDPROBE}" --readall --extractframe 0 --output "${existing}"
             "${generated}"
     RESULT_VARIABLE status OUTPUT_QUIET ERROR_QUIET)

@@ -326,6 +326,11 @@ std::size_t decode_video(
     std::optional<std::uint32_t> maximum_long_term_frame_idx;
     std::optional<pygorvid::Yuv420Frame> decoded_frame;
     std::size_t decoded_count = 0;
+    std::vector<std::string> frame_hashes;
+    std::size_t next_hash_frame = 0;
+    if (hash_frames && !frame_index) {
+        frame_hashes.resize(sample_reader.sample_count());
+    }
     for (std::size_t sample_index = 0; sample_index < sample_count;
          ++sample_index) {
         const auto sample = sample_reader.sample_at(sample_index);
@@ -715,11 +720,24 @@ std::size_t decode_video(
         }
 #endif
         decoded_frame = decoded;
-        if (hash_frames &&
-            (!frame_index || sample_index == *target_sample_index)) {
-            std::cout << input_path << ": frame "
-                      << (frame_index ? *frame_index : decoded_count)
-                      << " sha256=" << sha256_frame(decoded) << '\n';
+        if (hash_frames) {
+            const auto digest = sha256_frame(decoded);
+            if (frame_index) {
+                if (sample_index == *target_sample_index) {
+                    std::cout << input_path << ": frame " << *frame_index
+                              << " sha256=" << digest << '\n';
+                }
+            } else {
+                frame_hashes[display_indices[sample_index]] = digest;
+                while (next_hash_frame < frame_hashes.size() &&
+                       !frame_hashes[next_hash_frame].empty()) {
+                    std::cout << input_path << ": frame " << next_hash_frame
+                              << " sha256=" << frame_hashes[next_hash_frame]
+                              << '\n';
+                    frame_hashes[next_hash_frame].clear();
+                    ++next_hash_frame;
+                }
+            }
         }
         ++decoded_count;
         if (current_picture_is_reference) {

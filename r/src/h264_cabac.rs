@@ -1188,7 +1188,7 @@ fn cabac_spatial_b_direct_prediction(
         let state = list_neighbors[list_index];
         let a = candidate_index(state.left_candidate);
         let b = candidate_index(state.top_candidate);
-        let c = candidate_index(state.top_right_candidate);
+        let c = candidate_index(state.top_right_candidate.or(state.top_left_candidate));
         reference_indices[list_index] = minimum_positive(a, minimum_positive(b, c));
     }
     let direct_zero = reference_indices == [-1; 2];
@@ -2871,12 +2871,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 [
                     input.left_l0_candidate,
                     input.top_l0_candidate,
-                    input.top_right_l0_candidate,
+                    input.top_right_l0_candidate.or(input.top_left_l0_candidate),
                 ],
                 [
                     input.left_l1_candidate,
                     input.top_l1_candidate,
-                    input.top_right_l1_candidate,
+                    input.top_right_l1_candidate.or(input.top_left_l1_candidate),
                 ],
             ];
             let minimum_positive = |left: i32, right: i32| {
@@ -9639,6 +9639,31 @@ mod tests {
 
         assert_eq!(result.reference_indices, [0, 0]);
         assert_eq!(result.motion_vectors, [crate::MotionVector::default(); 2]);
+    }
+
+    #[test]
+    fn b_direct_spatial_falls_back_from_unavailable_top_right() {
+        let candidate = crate::MotionVectorCandidate {
+            reference_index: Some(0),
+            vector: crate::MotionVector { x: 4, y: 8 },
+        };
+        let list_neighbors = CabacInterListNeighbors {
+            top_left_candidate: Some(candidate),
+            ..CabacInterListNeighbors::default()
+        };
+        let neighbors = CabacInterPartitionNeighbors {
+            list0: list_neighbors,
+            list1: list_neighbors,
+            ..CabacInterPartitionNeighbors::default()
+        };
+        let mut input = b_direct_input(vec![b_reference(10, 0)], vec![b_reference(90, 2)]);
+        input.colocated_reference_index = 1;
+
+        let result = cabac_spatial_b_direct_prediction(&input, neighbors, 0, 0, false).unwrap();
+
+        assert_eq!(result.reference_indices, [0, 0]);
+        assert_eq!(result.prediction_flags, [true, true]);
+        assert_eq!(result.motion_vectors, [candidate.vector, candidate.vector]);
     }
 
     #[test]

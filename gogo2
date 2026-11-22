@@ -38,5 +38,4 @@ set -x
 
 #./pygorvid --slideshow --input samples/samp3.mp4
 #./pygorvid --slideshow --input samples/ew1.mp4
-#./pygorvid --readall --hash --input samples/samp3.mp4
-./pygorvid --extractframe 5 --hash --input samples/samp3.mp4 --output frame5.jpg
+./pygorvid --readall --hash --input samples/ew1.mp4

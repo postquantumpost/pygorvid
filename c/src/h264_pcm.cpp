@@ -316,6 +316,7 @@ void deblock_p_inter_frame(
     const std::vector<std::array<std::array<std::int32_t, 16>, 2>>&
         reference_indices,
     const std::vector<std::array<std::uint8_t, 16>>& prediction_flags,
+    const std::vector<std::uint8_t>& transform_8x8,
     const std::vector<std::uint8_t>& macroblock_intra16,
     const std::vector<std::uint8_t>& luma_total_coefficients,
     const std::vector<std::size_t>& slice_ids,
@@ -336,6 +337,7 @@ void deblock_p_inter_frame(
         motion_vectors_l1.size() != macroblock_count ||
         reference_indices.size() != macroblock_count ||
         prediction_flags.size() != macroblock_count ||
+        transform_8x8.size() != macroblock_count ||
         macroblock_intra16.size() != macroblock_count ||
         slice_ids.size() != macroblock_count ||
         disable_idc.size() != macroblock_count ||
@@ -457,26 +459,37 @@ void deblock_p_inter_frame(
                             ? 12 + segment
                             : q_block - 4;
                     }
-                    const auto p_macroblock_x = edge == 0 && vertical
-                        ? macroblock_x - 1
-                        : macroblock_x;
-                    const auto p_macroblock_y = edge == 0 && !vertical
-                        ? macroblock_y - 1
-                        : macroblock_y;
-                    const auto p_block_x = p_macroblock_x * 4 + p_block % 4;
-                    const auto p_block_y = p_macroblock_y * 4 + p_block / 4;
-                    const auto q_block_x = macroblock_x * 4 + q_block % 4;
-                    const auto q_block_y = macroblock_y * 4 + q_block / 4;
+                    const auto block_has_coefficients =
+                        [&](std::size_t address, std::uint32_t block) {
+                        if (!transform_8x8[address]) {
+                            const auto x = (address % macroblock_width) * 4 +
+                                           block % 4;
+                            const auto y = (address / macroblock_width) * 4 +
+                                           block / 4;
+                            return luma_total_coefficients[
+                                       y * luma_block_width + x] != 0;
+                        }
+                        const auto origin_x =
+                            (address % macroblock_width) * 4 +
+                            (block % 4 / 2) * 2;
+                        const auto origin_y =
+                            (address / macroblock_width) * 4 +
+                            (block / 4 / 2) * 2;
+                        for (std::uint32_t y = 0; y < 2; ++y) {
+                            for (std::uint32_t x = 0; x < 2; ++x) {
+                                if (luma_total_coefficients[
+                                        (origin_y + y) * luma_block_width +
+                                        origin_x + x] != 0) {
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    };
                     const auto p_has_coefficients =
-                        luma_total_coefficients[
-                            static_cast<std::size_t>(p_block_y) *
-                                luma_block_width +
-                            p_block_x] != 0;
+                        block_has_coefficients(neighbor_address, p_block);
                     const auto q_has_coefficients =
-                        luma_total_coefficients[
-                            static_cast<std::size_t>(q_block_y) *
-                                luma_block_width +
-                            q_block_x] != 0;
+                        block_has_coefficients(macroblock_address, q_block);
                     if (macroblock_intra16[neighbor_address] ||
                         macroblock_intra16[macroblock_address]) {
                         strengths[segment] = edge == 0 ? 4 : 3;
@@ -493,11 +506,14 @@ void deblock_p_inter_frame(
                         (vertical ? edge : segment * 4);
                     const auto y = macroblock_y * 16 +
                         (vertical ? segment * 4 : edge);
-                    filter_deblocking_edge(
-                        frame.luma, frame.width, frame.height, x, y,
-                        vertical, 4, strengths[segment], qp_p, qp_q,
-                        alpha_offsets[macroblock_address],
-                        beta_offsets[macroblock_address], false);
+                    if (edge == 0 || !transform_8x8[macroblock_address] ||
+                        edge == 8) {
+                        filter_deblocking_edge(
+                            frame.luma, frame.width, frame.height, x, y,
+                            vertical, 4, strengths[segment], qp_p, qp_q,
+                            alpha_offsets[macroblock_address],
+                            beta_offsets[macroblock_address], false);
+                    }
                 }
                 if (edge != 0 && edge != 8) {
                     continue;
@@ -5574,6 +5590,9 @@ Yuv420Frame decode_p_frame_with_lists(
                     if (!list_used[list_index]) {
                         continue;
                     }
+                    if (partition_direct[partition_index]) {
+                        continue;
+                    }
                     const auto sub_macroblock_index =
                         static_cast<std::size_t>(partition.y / 2) * 2 +
                         static_cast<std::size_t>(partition.x / 2);
@@ -6411,8 +6430,18 @@ Yuv420Frame decode_p_frame_with_lists(
             std::to_string(missing_address) + " of " +
             std::to_string(macroblock_count) + ")");
     }
-    frame.colocated_motion_field.resize(macroblock_count);
+    ColocatedMotionFact unavailable_colocated_motion;
+    unavailable_colocated_motion.reference_index = -1;
+    unavailable_colocated_motion.motion_vector.fill(0);
+    unavailable_colocated_motion.reference_picture_order_count =
+        std::numeric_limits<std::int64_t>::min();
+    std::array<ColocatedMotionFact, 16> unavailable{};
+    unavailable.fill(unavailable_colocated_motion);
+    frame.colocated_motion_field.assign(macroblock_count, unavailable);
     for (std::size_t address = 0; address < macroblock_count; ++address) {
+        if (macroblock_intra16[address] != 0) {
+            continue;
+        }
         for (std::size_t block_index = 0; block_index < 16; ++block_index) {
             const auto flags =
                 macroblock_prediction_flags[address][block_index];
@@ -6443,6 +6472,7 @@ Yuv420Frame decode_p_frame_with_lists(
         frame, macroblock_width, macroblock_height, macroblock_qpy,
         macroblock_motion_vectors, macroblock_motion_vectors_l1,
         macroblock_reference_indices, macroblock_prediction_flags,
+        macroblock_transform_8x8,
         macroblock_intra16, luma_total_coefficients,
         macroblock_slice_ids, macroblock_disable_idc,
         macroblock_alpha_offsets, macroblock_beta_offsets, pps,

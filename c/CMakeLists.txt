@@ -57,6 +57,9 @@ if(PYGORVID_BUILD_TESTS)
     add_test(NAME vidprobe_image_formats COMMAND ${CMAKE_COMMAND}
         -DVIDPROBE=$<TARGET_FILE:vidprobe>
         -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../samples/decoder-smoke-16x16.mp4
+        -DREORDERED_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../testdata/h264/cavlc-32x32.mp4
+        -DWEIGHTED_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../testdata/h264/weighted-32x32.mp4
+        -DEW1_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/../samples/ew1.mp4
         -DFFMPEG=${PYGORVID_FFMPEG}
         -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_formats.cmake)
