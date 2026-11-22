@@ -1106,38 +1106,69 @@ std::size_t decode_video_readahead(
     for (std::size_t group = 0; group < ranges.size(); ++group) {
         std::vector<DecodedFrame> frames;
         if (group == 0) {
-            frames = decode_gop_range(
-                input_path, threads,
-                ranges[group].first, ranges[group].second);
+            const std::function<void(std::size_t,
+                                     const pygorvid::Yuv420Frame&)> consumer =
+                [&](std::size_t index,
+                    const pygorvid::Yuv420Frame& frame) {
+                    if (hash_frames) {
+                        std::cout << input_path << ": frame " << index
+                                  << " sha256=" << sha256_frame(frame)
+                                  << '\n';
+                    }
+#ifdef PYGORVID_SLIDESHOW
+                    if (window) {
+                        if (!window->wait(deadline)) {
+                            throw std::runtime_error(
+                                "slideshow closed during readahead");
+                        }
+                        window->show(frame);
+                        const auto sample = reader.sample_at(
+                            presentation_order[index]);
+                        const auto duration_seconds =
+                            std::chrono::duration<double>(
+                                static_cast<double>(sample.duration_ticks) /
+                                reader.timescale());
+                        deadline = std::chrono::steady_clock::now() +
+                            std::chrono::duration_cast<
+                                std::chrono::steady_clock::duration>(
+                                duration_seconds);
+                        ++displayed_count;
+                    }
+#endif
+                    ++consumed;
+                };
+            (void)decode_video(
+                input_path, std::nullopt, std::nullopt, false, threads, false,
+                ranges[group].first, ranges[group].second, &consumer);
         } else {
             frames = std::move(jobs.at(group).get());
             jobs.erase(group);
-        }
-        for (auto& [index, frame] : frames) {
-            if (hash_frames) {
-                std::cout << input_path << ": frame " << index
-                          << " sha256=" << sha256_frame(frame) << '\n';
-            }
-#ifdef PYGORVID_SLIDESHOW
-            if (window) {
-                if (!window->wait(deadline)) {
-                    return displayed_count;
+            for (auto& [index, frame] : frames) {
+                if (hash_frames) {
+                    std::cout << input_path << ": frame " << index
+                              << " sha256=" << sha256_frame(frame) << '\n';
                 }
-                window->show(frame);
-                const auto sample = reader.sample_at(
-                    presentation_order[index]);
-                const auto duration_seconds =
-                    std::chrono::duration<double>(
-                        static_cast<double>(sample.duration_ticks) /
-                        reader.timescale());
-                deadline = std::chrono::steady_clock::now() +
-                    std::chrono::duration_cast<
-                        std::chrono::steady_clock::duration>(
-                        duration_seconds);
-                ++displayed_count;
-            }
+#ifdef PYGORVID_SLIDESHOW
+                if (window) {
+                    if (!window->wait(deadline)) {
+                        return displayed_count;
+                    }
+                    window->show(frame);
+                    const auto sample = reader.sample_at(
+                        presentation_order[index]);
+                    const auto duration_seconds =
+                        std::chrono::duration<double>(
+                            static_cast<double>(sample.duration_ticks) /
+                            reader.timescale());
+                    deadline = std::chrono::steady_clock::now() +
+                        std::chrono::duration_cast<
+                            std::chrono::steady_clock::duration>(
+                            duration_seconds);
+                    ++displayed_count;
+                }
 #endif
-            ++consumed;
+                ++consumed;
+            }
         }
         if (next_group < ranges.size()) {
             start_job(next_group++);

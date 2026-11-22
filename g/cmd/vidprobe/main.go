@@ -434,30 +434,34 @@ func decodeSequentialFrames(input string, threads int, verbose bool, consume fun
 	decoder.SetVerbose(verbose)
 	consumed := 0
 	for groupIndex, group := range groups {
-		results := make([]frameResult, 0, len(group.frames))
 		if groupIndex == 0 {
 			for _, index := range group.frames {
 				frame, decodeErr := decoder.DecodeFrame(uint64(index))
-				results = append(results, frameResult{index: index, frame: frame, err: decodeErr})
 				if decodeErr != nil {
-					break
+					return consumed, fmt.Errorf(
+						"decode frame %d: %w", index, decodeErr,
+					)
 				}
+				if err := consume(frameResult{index: index, frame: frame}); err != nil {
+					return consumed, err
+				}
+				consumed++
 			}
 		} else {
 			pendingMu.Lock()
 			result := pending[groupIndex]
 			delete(pending, groupIndex)
 			pendingMu.Unlock()
-			results = <-result
-		}
-		for _, result := range results {
-			if result.err != nil {
-				return consumed, fmt.Errorf("decode frame %d: %w", result.index, result.err)
+			results := <-result
+			for _, result := range results {
+				if result.err != nil {
+					return consumed, fmt.Errorf("decode frame %d: %w", result.index, result.err)
+				}
+				if err := consume(result); err != nil {
+					return consumed, err
+				}
+				consumed++
 			}
-			if err := consume(result); err != nil {
-				return consumed, err
-			}
-			consumed++
 		}
 		if nextJob < len(groups) {
 			startJob(nextJob)

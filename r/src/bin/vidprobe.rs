@@ -581,24 +581,23 @@ fn decode_sequential_frames(
     decoder.set_verbose(verbose);
     let mut consumed = 0;
     for (group_index, frames) in groups.iter().enumerate() {
-        let decoded = if group_index == 0 {
-            let mut decoded = Vec::with_capacity(frames.len());
+        if group_index == 0 {
             for &index in frames {
                 let frame = decoder
                     .decode_frame(index as u64)
                     .map_err(|error| format!("decode frame {index}: {error}"))?;
-                decoded.push((index, frame));
+                consume(index, frame)?;
+                consumed += 1;
             }
-            decoded
         } else {
-            jobs.remove(&group_index)
+            let decoded = jobs.remove(&group_index)
                 .ok_or_else(|| "readahead worker is unavailable".to_string())?
                 .recv()
-                .map_err(|_| "readahead worker ended unexpectedly".to_string())??
-        };
-        for (index, frame) in decoded {
-            consume(index, frame)?;
-            consumed += 1;
+                .map_err(|_| "readahead worker ended unexpectedly".to_string())??;
+            for (index, frame) in decoded {
+                consume(index, frame)?;
+                consumed += 1;
+            }
         }
         if next_group < groups.len() {
             jobs.insert(
