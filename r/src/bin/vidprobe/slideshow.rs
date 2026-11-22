@@ -3,6 +3,15 @@ use std::time::{Duration, Instant};
 use sdl2::event::{Event, WindowEvent};
 use sdl2::pixels::PixelFormatEnum;
 
+fn sdl_wait_timeout(remaining: Duration) -> u32 {
+    let milliseconds = remaining.as_millis();
+    let round_up = u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
+    milliseconds
+        .saturating_add(round_up)
+        .min(u128::from(u32::MAX))
+        .max(1) as u32
+}
+
 pub fn show(input: &str, threads: usize, verbose: bool) -> Result<usize, String> {
     let mut reader = pygorvid::VideoSampleReader::open(input).map_err(|e| e.to_string())?;
     let presentation_order = reader.presentation_sample_indices();
@@ -130,7 +139,7 @@ fn wait(events: &mut sdl2::EventPump, deadline: Instant) -> bool {
         if remaining.is_zero() {
             return true;
         }
-        let timeout = remaining.as_millis().min(u32::MAX as u128).max(1) as u32;
+        let timeout = sdl_wait_timeout(remaining);
         if let Some(event) = events.wait_event_timeout(timeout) {
             if matches!(
                 event,
@@ -143,5 +152,21 @@ fn wait(events: &mut sdl2::EventPump, deadline: Instant) -> bool {
                 return false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sdl_wait_timeout;
+    use std::time::Duration;
+
+    #[test]
+    fn sdl_timeout_rounds_partial_milliseconds_up() {
+        assert_eq!(sdl_wait_timeout(Duration::from_nanos(1)), 1);
+        assert_eq!(sdl_wait_timeout(Duration::from_millis(1)), 1);
+        assert_eq!(
+            sdl_wait_timeout(Duration::from_millis(1) + Duration::from_nanos(1)),
+            2
+        );
     }
 }

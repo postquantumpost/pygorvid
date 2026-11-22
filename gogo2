@@ -25,15 +25,15 @@ set -x
 #done
 #
 # samples/samp3.mp4 1s
-# C++ 0m17.447s
-# Rust 1m7.118s
-# Go hang
+# C++ 0m14.750s
+# Rust 1m0.674s
+# Go 0m23.974s
 # python 91m6.013s
 #
 # samples/ew1.mp4 7s
-# C++ 0m29.514s
-# Rust 0m46.449s
-# Go hang
+# C++ 0m28.850s
+# Rust 0m45.875s
+# Go 0m48.736s
 # python 176m56.307s
 
 ./pygorvid --slideshow --input samples/samp3.mp4

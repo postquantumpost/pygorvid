@@ -27,24 +27,35 @@ fn weighted_ipb_frames_match_reference() {
         .into_iter()
         .flat_map(|name| [1, 4].map(|threads| (name, threads)))
     {
-        let mut decoder = H264Decoder::new(
-            VideoSampleReader::open(root.join(name)).unwrap(),
-        );
+        let mut decoder = H264Decoder::new(VideoSampleReader::open(root.join(name)).unwrap());
         decoder.set_threads(threads);
         let pictures = decoder.dependency_slice_pictures(7).unwrap();
-        assert!(pictures.iter().flatten().any(|slice| {
-            slice.header.prediction_weight_table.as_ref().is_some_and(|table| {
-                table.lists.iter().flatten().any(|entry| {
-                    entry.weights.iter().zip(table.denominators).any(|(&weight, denominator)| {
-                        weight != 1 << denominator
-                    }) || entry.offsets != [0; 3]
-                })
-            })
-        }), "fixture must exercise non-default explicit weights");
+        assert!(
+            pictures.iter().flatten().any(|slice| {
+                slice
+                    .header
+                    .prediction_weight_table
+                    .as_ref()
+                    .is_some_and(|table| {
+                        table.lists.iter().flatten().any(|entry| {
+                            entry
+                                .weights
+                                .iter()
+                                .zip(table.denominators)
+                                .any(|(&weight, denominator)| weight != 1 << denominator)
+                                || entry.offsets != [0; 3]
+                        })
+                    })
+            }),
+            "fixture must exercise non-default explicit weights"
+        );
         for (index, reference) in expected.chunks_exact(32 * 32 * 3 / 2).enumerate() {
             let frame = decoder.decode_frame(index as u64).unwrap();
             let actual = [frame.y, frame.u, frame.v].concat();
-            assert_eq!(actual, reference, "{name}: frame {index}, threads {threads}");
+            assert_eq!(
+                actual, reference,
+                "{name}: frame {index}, threads {threads}"
+            );
         }
     }
 }
