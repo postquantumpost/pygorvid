@@ -1166,6 +1166,16 @@ const H264SampleConfiguration& VideoSampleReader::configuration() const noexcept
     return configuration_;
 }
 
+std::vector<std::size_t> VideoSampleReader::sync_sample_indices() const {
+    std::vector<std::size_t> result;
+    for (std::size_t index = 0; index < samples_.size(); ++index) {
+        if (samples_[index].is_sync) {
+            result.push_back(index);
+        }
+    }
+    return result;
+}
+
 const AV1SampleConfiguration&
 VideoSampleReader::av1_configuration() const noexcept {
     return av1_configuration_;
@@ -1921,23 +1931,7 @@ std::vector<std::pair<std::size_t, std::size_t>> closed_gop_ranges(
     if (!reader.open(input_path)) {
         throw std::runtime_error(reader.error_info());
     }
-    std::vector<std::size_t> starts;
-    for (std::size_t sample_index = 0;
-         sample_index < reader.sample_count(); ++sample_index) {
-        const auto sample = reader.sample_at(sample_index);
-        if (!sample.is_sync) {
-            continue;
-        }
-        const auto nals = pygorvid::split_h264_sample_nals(
-            sample.data, reader.configuration().nal_length_size);
-        const bool closed = std::any_of(
-            nals.begin(), nals.end(), [](const auto& nal) {
-                return pygorvid::parse_nal_header(nal).unit_type == 5;
-            });
-        if (closed) {
-            starts.push_back(sample_index);
-        }
-    }
+    auto starts = reader.sync_sample_indices();
     if (starts.size() < 2) {
         return {};
     }
@@ -1958,7 +1952,17 @@ std::vector<std::pair<std::size_t, std::size_t>> closed_gop_ranges(
 
 std::vector<DecodedFrame> decode_gop_range(
     const std::string& input_path, std::size_t threads,
-    std::size_t start, std::size_t end) {
+    std::size_t start, std::size_t end,
+    std::promise<void>* started = nullptr) {
+    if (started) {
+        VideoSampleReader reader;
+        if (!reader.open(input_path)) {
+            started->set_exception(std::make_exception_ptr(
+                std::runtime_error(reader.error_info())));
+            throw std::runtime_error(reader.error_info());
+        }
+        started->set_value();
+    }
     std::vector<DecodedFrame> frames;
     const std::function<void(std::size_t,
                              pygorvid::Yuv420Frame&&)> consumer =
@@ -2051,11 +2055,14 @@ std::size_t decode_readahead(
     std::map<std::size_t, std::future<std::vector<DecodedFrame>>> jobs;
     std::size_t next_group = 1;
     const auto start_job = [&](std::size_t group) {
-        jobs.emplace(group, std::async(std::launch::async, [&, group] {
+        auto started = std::make_shared<std::promise<void>>();
+        auto ready = started->get_future();
+        jobs.emplace(group, std::async(std::launch::async, [&, group, started] {
             return decode_gop_range(input_path, threads,
                                     ranges[group].first,
-                                    ranges[group].second);
+                                    ranges[group].second, started.get());
         }));
+        ready.get();
     };
     for (; next_group <= worker_limit; ++next_group) start_job(next_group);
 

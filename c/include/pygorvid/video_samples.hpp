@@ -55,6 +55,7 @@ public:
     bool is_open() const noexcept;
     const std::string& error_info() const noexcept;
     std::size_t sample_count() const noexcept;
+    std::vector<std::size_t> sync_sample_indices() const;
     std::vector<std::size_t> presentation_sample_indices() const;
     std::size_t presentation_sample_index(std::size_t index) const;
     std::uint32_t timescale() const noexcept;

@@ -20,7 +20,9 @@ from pygorvid import (
 from pygorvid.reconstruction import Yuv420FrameBuilder
 from pygorvid.h264_decoder import (
     _ReadAheadPriority,
+    _SharedFrameMetadata,
     _SharedFrameBufferPool,
+    _iter_readahead_metadata,
     _readahead_process_limit,
 )
 
@@ -94,6 +96,44 @@ def test_shared_frame_pool_reuses_and_trims_idle_buffers(monkeypatch):
         assert pool.allocated_count == 0
     finally:
         pool.close()
+
+
+def test_readahead_metadata_is_available_before_worker_completion():
+    metadata = _SharedFrameMetadata(0, "frame", 1, 1, 1, 1, 1, 1, 1, 1)
+
+    class Queue:
+        def __init__(self):
+            self.messages = iter((("frame", metadata), ("done",)))
+            self.reads = 0
+
+        def get(self):
+            self.reads += 1
+            return next(self.messages)
+
+    queue = Queue()
+    results = _iter_readahead_metadata(queue)
+
+    assert next(results) is metadata
+    assert queue.reads == 1
+    with pytest.raises(StopIteration):
+        next(results)
+
+
+def test_decode_sequential_frames_prepares_stream_before_iteration():
+    decoder = H264Decoder()
+    prepared = False
+
+    def prepare(_indices):
+        nonlocal prepared
+        prepared = True
+        return iter(((0, object()),))
+
+    decoder._decode_sequential_frames = prepare
+
+    frames = decoder.decode_sequential_frames([0])
+
+    assert prepared
+    assert next(frames)[0] == 0
 
 
 def test_readahead_priority_yields_less_as_gop_moves_forward(monkeypatch):

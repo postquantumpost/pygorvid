@@ -273,6 +273,14 @@ impl VideoSampleReader {
             .map(|index| index as u64)
     }
 
+    pub fn sync_sample_indices(&self) -> Vec<usize> {
+        self.samples
+            .iter()
+            .enumerate()
+            .filter_map(|(index, location)| location.is_sync.then_some(index))
+            .collect()
+    }
+
     pub fn sample_at(&mut self, index: usize) -> io::Result<CompressedSample> {
         let location = self
             .samples

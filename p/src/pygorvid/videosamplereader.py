@@ -233,6 +233,22 @@ class VideoSampleReader:
                 return index
         return None
 
+    def is_sync_sample_index(self, sample_index: int) -> bool:
+        if (
+            not isinstance(sample_index, int)
+            or isinstance(sample_index, bool)
+            or not 0 <= sample_index < len(self._samples)
+        ):
+            raise IndexError("sample index is out of range")
+        return self._samples[sample_index].is_sync
+
+    def sync_sample_indices(self) -> tuple[int, ...]:
+        return tuple(
+            index
+            for index, location in enumerate(self._samples)
+            if location.is_sync
+        )
+
     def presentation_sample_index(self, presentation_index: int) -> int:
         if (
             not isinstance(presentation_index, int)

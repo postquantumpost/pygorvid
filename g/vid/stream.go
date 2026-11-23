@@ -145,35 +145,7 @@ func closedGOPs(reader *VideoSampleReader, presentation []presentationSample) ([
 		positions[sample.decodeIndex] = presentationIndex
 	}
 	count := reader.SampleCount()
-	starts := make([]int, 0)
-	nalLengthSize := reader.Configuration().NALLengthSize
-	for index := 0; index < count; index++ {
-		sample, err := reader.SampleAt(uint64(index))
-		if err != nil {
-			return nil, err
-		}
-		if !sample.IsSync {
-			continue
-		}
-		nals, err := SplitH264SampleNALs(sample.Data, nalLengthSize)
-		if err != nil {
-			return nil, err
-		}
-		closed := false
-		for _, nal := range nals {
-			header, err := ParseNALHeader(nal)
-			if err != nil {
-				return nil, err
-			}
-			if header.UnitType == 5 {
-				closed = true
-				break
-			}
-		}
-		if closed {
-			starts = append(starts, index)
-		}
-	}
+	starts := reader.SyncSampleIndices()
 	if len(starts) < 2 {
 		return nil, nil
 	}
@@ -247,25 +219,27 @@ func decodeStreamWithReadahead(
 	pending := make(map[int]chan []streamDecodeResult)
 	var pendingMu sync.Mutex
 	nextJob := 1
-	startJob := func(group int) {
+	startJob := func(group int) error {
 		result := make(chan []streamDecodeResult, 1)
+		ready := make(chan error, 1)
 		pendingMu.Lock()
 		pending[group] = result
 		pendingMu.Unlock()
 		go func() {
 			workerReader, err := OpenVideoSampleReader(input)
 			if err != nil {
-				result <- []streamDecodeResult{{err: err}}
+				ready <- err
 				return
 			}
 			defer workerReader.Close()
 			worker, err := NewVideoDecoder(workerReader)
 			if err != nil {
-				result <- []streamDecodeResult{{err: err}}
+				ready <- err
 				return
 			}
 			worker.SetThreads(1)
 			worker.SetVerbose(verbose)
+			ready <- nil
 			frames := make([]streamDecodeResult, 0, len(groups[group].frames))
 			for _, index := range groups[group].frames {
 				frame, decodeErr := worker.DecodeFrame(uint64(index))
@@ -278,9 +252,12 @@ func decodeStreamWithReadahead(
 			}
 			result <- frames
 		}()
+		return <-ready
 	}
 	for nextJob <= workerLimit {
-		startJob(nextJob)
+		if err := startJob(nextJob); err != nil {
+			return 0, err
+		}
 		nextJob++
 	}
 	foreground, err := NewVideoDecoder(reader)
@@ -318,7 +295,9 @@ func decodeStreamWithReadahead(
 			}
 		}
 		if nextJob < len(groups) {
-			startJob(nextJob)
+			if err := startJob(nextJob); err != nil {
+				return consumed, err
+			}
 			nextJob++
 		}
 	}

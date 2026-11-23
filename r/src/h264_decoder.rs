@@ -949,24 +949,8 @@ impl H264Decoder {
         for (presentation, sample) in order.into_iter().enumerate() {
             presentation_positions[sample] = presentation;
         }
-        let length_size = usize::from(reader.configuration().nal_length_size);
         let sample_count = reader.sample_count();
-        let mut starts = Vec::new();
-        for sample_index in 0..sample_count {
-            let sample = reader
-                .sample_at(sample_index)
-                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?;
-            if !sample.is_sync {
-                continue;
-            }
-            let closed = crate::split_h264_sample_nals(&sample.data, length_size)
-                .map_err(|error| DecodeError::DecodeFailure(error.to_string()))?
-                .iter()
-                .any(|nal| crate::parse_nal_header(nal).is_ok_and(|header| header.unit_type == 5));
-            if closed {
-                starts.push(sample_index);
-            }
-        }
+        let mut starts = reader.sync_sample_indices();
         if starts.len() < 2 {
             return Ok(None);
         }
@@ -1025,7 +1009,7 @@ impl H264Decoder {
                     &groups[group_index],
                     self.threads(),
                     self.verbose,
-                ),
+                )?,
             );
         }
         let mut next_group = worker_limit + 1;
@@ -1058,7 +1042,7 @@ impl H264Decoder {
                         &groups[next_group],
                         self.threads(),
                         self.verbose,
-                    ),
+                    )?,
                 );
                 next_group += 1;
             }
@@ -1131,29 +1115,46 @@ impl H264Decoder {
         frames: &[usize],
         threads: usize,
         verbose: bool,
-    ) -> Receiver<Result<Vec<(usize, crate::Yuv420Frame)>, String>> {
+    ) -> Result<Receiver<Result<Vec<(usize, crate::Yuv420Frame)>, String>>, String> {
         let frames = frames.to_vec();
         let (sender, receiver) = mpsc::channel();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
         thread::spawn(move || {
-            let decoded = (|| {
+            let initialized = (|| {
                 let reader =
                     crate::VideoSampleReader::open(path).map_err(|error| error.to_string())?;
                 let mut decoder = H264Decoder::new(reader);
                 decoder.set_threads(threads);
                 decoder.set_verbose(verbose);
-                frames
-                    .into_iter()
-                    .map(|index| {
-                        decoder
-                            .decode_frame(index as u64)
-                            .map(|frame| (index, frame))
-                            .map_err(|error| format!("decode frame {index}: {error}"))
-                    })
-                    .collect()
+                Ok(decoder)
             })();
+            let mut decoder = match initialized {
+                Ok(decoder) => {
+                    let _ = ready_sender.send(Ok(()));
+                    decoder
+                }
+                Err(error) => {
+                    let error: String = error;
+                    let _ = ready_sender.send(Err(error.clone()));
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
+            let decoded = frames
+                .into_iter()
+                .map(|index| {
+                    decoder
+                        .decode_frame(index as u64)
+                        .map(|frame| (index, frame))
+                        .map_err(|error| format!("decode frame {index}: {error}"))
+                })
+                .collect();
             let _ = sender.send(decoded);
         });
-        receiver
+        ready_receiver
+            .recv()
+            .map_err(|_| "readahead worker ended before startup".to_string())??;
+        Ok(receiver)
     }
 
     fn available_memory_bytes() -> Option<usize> {

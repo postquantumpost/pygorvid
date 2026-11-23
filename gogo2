@@ -55,4 +55,5 @@ set -x
 #./pygorvid --slideshow --readahead --input samples/drone2_320x240.mp4
 #./pygorvid --slideshow --input samples/drone2_320x240.mp4
 #./pygorvid --readall --input samples/drone2_320x240.mp4
-./pygorvid --readall --hash --input samples/drone2_320x240.mp4
+./pygorvid --readall --hash --readahead --input samples/drone2_320x240.mp4
+#./pygorvid --slideshow --readahead --input samples/drone2_320x240.mp4

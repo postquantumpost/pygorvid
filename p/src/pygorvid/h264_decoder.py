@@ -97,6 +97,23 @@ class _SharedFrameMetadata:
     v_length: int
 
 
+def _iter_readahead_metadata(result_queue):
+    while True:
+        kind, *payload = result_queue.get()
+        if kind == "done":
+            return
+        if kind == "error":
+            raise DecoderError(payload[0])
+        if kind != "frame":
+            raise DecoderError("readahead process returned an invalid result")
+        metadata = payload[0]
+        if not isinstance(metadata, _SharedFrameMetadata):
+            raise DecoderError(
+                "readahead process returned invalid frame metadata"
+            )
+        yield metadata
+
+
 class _SharedFrameBufferPool:
     def __init__(self, frame_bytes: int):
         if frame_bytes <= 0:
@@ -286,6 +303,7 @@ def _decode_closed_gop(
                 raise DecoderError(
                     "closed GOP shared frame reservation count does not match"
                 )
+            result_queue.put(("ready",))
             for index, buffer_name in zip(
                 presentation_indices, buffer_names
             ):
@@ -747,23 +765,33 @@ class H264Decoder:
                 self.sample_reader.presentation_sample_indices()
             )
         }
-        closed_starts = []
-        for sample_index in range(sample_count):
-            sample = self.sample_reader.sample_at(sample_index)
-            if not sample.is_sync:
-                continue
-            try:
-                nals = split_h264_sample_nals(
-                    sample.data, self.sample_reader.configuration.nal_length_size
-                )
-                if any(parse_nal_header(nal).unit_type == 5 for nal in nals):
-                    closed_starts.append(sample_index)
-            except NALUnitError as error:
-                raise DecoderError(
-                    f"presentation frame "
-                    f"{presentation_by_sample[sample_index]} "
-                    f"(sample {sample_index}): cannot inspect closed GOP: {error}"
-                ) from error
+        sync_sample_indices = getattr(
+            self.sample_reader, "sync_sample_indices", None
+        )
+        if callable(sync_sample_indices):
+            closed_starts = list(sync_sample_indices())
+        else:
+            closed_starts = []
+            for sample_index in range(sample_count):
+                sample = self.sample_reader.sample_at(sample_index)
+                if not sample.is_sync:
+                    continue
+                try:
+                    nals = split_h264_sample_nals(
+                        sample.data,
+                        self.sample_reader.configuration.nal_length_size,
+                    )
+                    if any(
+                        parse_nal_header(nal).unit_type == 5
+                        for nal in nals
+                    ):
+                        closed_starts.append(sample_index)
+                except NALUnitError as error:
+                    raise DecoderError(
+                        f"presentation frame "
+                        f"{presentation_by_sample[sample_index]} "
+                        f"(sample {sample_index}): cannot inspect closed GOP: {error}"
+                    ) from error
         if not closed_starts:
             return ()
         boundaries = closed_starts.copy()
@@ -809,7 +837,15 @@ class H264Decoder:
             self.threads, frame_bytes, maximum_gop_frames
         )
 
-    def decode_sequential_frames(
+    def decode_sequential_frames(self, frame_indices):
+        return self._decode_sequential_frames(frame_indices)
+
+    def _decode_indexed_frames(self, indices):
+        for index in indices:
+            yield index, self.decode_frame(index)
+            self.discard_cached_frame(index)
+
+    def _decode_sequential_frames(
         self, frame_indices
     ):
         indices = tuple(frame_indices)
@@ -821,24 +857,12 @@ class H264Decoder:
             or indices != expected
             or self.sample_reader is None
         ):
-            for index in indices:
-                yield index, self.decode_frame(index)
-                self.discard_cached_frame(index)
-            return
+            return self._decode_indexed_frames(indices)
 
         groups = self.closed_gop_presentation_indices()
         closed_groups = [position for position, (_, closed) in enumerate(groups) if closed]
         if len(closed_groups) < 2:
-            for index in indices:
-                yield index, self.decode_frame(index)
-                self.discard_cached_frame(index)
-            return
-
-        first_closed_group = closed_groups[0]
-        for group_position in range(first_closed_group):
-            for index in groups[group_position][0]:
-                yield index, self.decode_frame(index)
-                self.discard_cached_frame(index)
+            return self._decode_indexed_frames(indices)
 
         worker_limit = self._read_ahead_worker_limit(groups)
         if self.debug_progress and worker_limit < self.threads - 1:
@@ -849,21 +873,14 @@ class H264Decoder:
                 flush=True,
             )
         if worker_limit == 0:
-            for group_position in closed_groups:
-                for index in groups[group_position][0]:
-                    yield index, self.decode_frame(index)
-                    self.discard_cached_frame(index)
-            return
+            return self._decode_indexed_frames(indices)
 
         path = getattr(self.sample_reader, "path", None)
         if path is None:
-            for group_position in closed_groups:
-                for index in groups[group_position][0]:
-                    yield index, self.decode_frame(index)
-                    self.discard_cached_frame(index)
-            return
+            return self._decode_indexed_frames(indices)
 
         jobs = {}
+        ready_groups = set()
         context = multiprocessing.get_context()
         next_closed_position = 1
 
@@ -910,9 +927,12 @@ class H264Decoder:
             except BaseException:
                 if "buffer_names" in locals():
                     frame_pool.release_many(buffer_names)
+                if "process" in locals() and process.is_alive():
+                    process.terminate()
+                    process.join()
+                result_queue.close()
                 priority_parent.close()
                 priority_child.close()
-                result_queue.close()
                 raise
             priority_child.close()
             jobs[group_position] = (
@@ -934,6 +954,21 @@ class H264Decoder:
                 distance = next_closed_position - current_closed_position
                 start_job(group_position, -distance)
                 next_closed_position += 1
+
+        def wait_for_job_readiness() -> None:
+            for group_position, result_queue in (
+                (group_position, job[2])
+                for group_position, job in jobs.items()
+                if group_position not in ready_groups
+            ):
+                ready_kind, *ready_payload = result_queue.get()
+                if ready_kind == "error":
+                    raise DecoderError(ready_payload[0])
+                if ready_kind != "ready":
+                    raise DecoderError(
+                        "readahead process did not report readiness"
+                    )
+                ready_groups.add(group_position)
 
         def increment_job_priorities() -> None:
             for group_position, job in list(jobs.items()):
@@ -966,19 +1001,30 @@ class H264Decoder:
                 _,
                 buffer_names,
             ) = jobs.pop(group_position)
-            frames = OrderedDict()
+            ready_groups.discard(group_position)
+            expected_indices = groups[group_position][0]
+            seen_indices = set()
             try:
-                while True:
-                    kind, *payload = result_queue.get()
-                    if kind == "done":
-                        break
-                    if kind == "error":
-                        raise DecoderError(payload[0])
-                    if kind != "frame":
-                        raise DecoderError("readahead process returned an invalid result")
-                    metadata = payload[0]
-                    frames[metadata.index] = metadata
+                for metadata in _iter_readahead_metadata(result_queue):
+                    if (
+                        metadata.index not in expected_indices
+                        or metadata.index in seen_indices
+                    ):
+                        raise DecoderError(
+                            f"presentation frame {metadata.index}: "
+                            "readahead result is out of order or duplicated"
+                        )
+                    seen_indices.add(metadata.index)
+                    yield metadata
                 process.join()
+                missing_indices = [
+                    index for index in expected_indices if index not in seen_indices
+                ]
+                if missing_indices:
+                    raise DecoderError(
+                        f"presentation frame {missing_indices[0]}: "
+                        "readahead result is missing"
+                    )
             except BaseException:
                 frame_pool.release_many(buffer_names)
                 raise
@@ -989,38 +1035,11 @@ class H264Decoder:
                 if process.is_alive():
                     process.terminate()
                 process.join()
-            return frames, buffer_names
 
         try:
             fill_jobs(0)
-            for closed_position, group_position in enumerate(closed_groups):
-                group_indices = groups[group_position][0]
-                if closed_position == 0:
-                    for index in group_indices:
-                        frame = self.decode_frame(index)
-                        yield index, frame
-                        self.discard_cached_frame(index)
-                else:
-                    frames, buffer_names = consume_job(group_position)
-                    try:
-                        for index in group_indices:
-                            metadata = frames.pop(index, None)
-                            if metadata is None:
-                                raise DecoderError(
-                                    f"presentation frame {index}: "
-                                    "readahead result is missing"
-                                )
-                            frame = frame_pool.frame(metadata)
-                            try:
-                                yield index, frame
-                            finally:
-                                frame_pool.release(metadata.shared_name)
-                    finally:
-                        frames.clear()
-                        frame_pool.release_many(buffer_names)
-                increment_job_priorities()
-                fill_jobs(closed_position)
-        finally:
+            wait_for_job_readiness()
+        except BaseException:
             for (
                 process,
                 priority_connection,
@@ -1034,6 +1053,79 @@ class H264Decoder:
                     process.terminate()
                 process.join()
                 frame_pool.release_many(buffer_names)
+            raise
+
+        def stream():
+            try:
+                first_closed_group = closed_groups[0]
+                for group_position in range(first_closed_group):
+                    for index in groups[group_position][0]:
+                        yield index, self.decode_frame(index)
+                        self.discard_cached_frame(index)
+                for closed_position, group_position in enumerate(closed_groups):
+                    group_indices = groups[group_position][0]
+                    if closed_position == 0:
+                        for index in group_indices:
+                            frame = self.decode_frame(index)
+                            yield index, frame
+                            self.discard_cached_frame(index)
+                    else:
+                        job = jobs.get(group_position)
+                        if job is None:
+                            raise DecoderError("readahead worker is unavailable")
+                        buffer_names = job[4]
+                        metadata_iterator = None
+                        try:
+                            metadata_iterator = consume_job(group_position)
+                            for index in group_indices:
+                                try:
+                                    metadata = next(metadata_iterator)
+                                except StopIteration as error:
+                                    raise DecoderError(
+                                        f"presentation frame {index}: "
+                                        "readahead result is missing"
+                                    ) from error
+                                if metadata.index != index:
+                                    raise DecoderError(
+                                        f"presentation frame {metadata.index}: "
+                                        "readahead result is out of order"
+                                    )
+                                frame = frame_pool.frame(metadata)
+                                try:
+                                    yield index, frame
+                                finally:
+                                    frame_pool.release(metadata.shared_name)
+                            try:
+                                next(metadata_iterator)
+                            except StopIteration:
+                                pass
+                            else:
+                                raise DecoderError(
+                                    "readahead process returned an unexpected frame"
+                                )
+                        finally:
+                            if metadata_iterator is not None:
+                                metadata_iterator.close()
+                            frame_pool.release_many(buffer_names)
+                    increment_job_priorities()
+                    fill_jobs(closed_position)
+                    wait_for_job_readiness()
+            finally:
+                for (
+                    process,
+                    priority_connection,
+                    result_queue,
+                    _,
+                    buffer_names,
+                ) in jobs.values():
+                    priority_connection.close()
+                    result_queue.close()
+                    if process.is_alive():
+                        process.terminate()
+                    process.join()
+                    frame_pool.release_many(buffer_names)
+
+        return stream()
 
     def _parsed_parameter_sets_by_id(self):
         if self._parsed_parameter_sets is None:

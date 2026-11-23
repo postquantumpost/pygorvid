@@ -372,6 +372,16 @@ func (r *VideoSampleReader) AV1Configuration() *AV1Configuration {
 
 func (r *VideoSampleReader) SampleCount() int { return len(r.samples) }
 
+func (r *VideoSampleReader) SyncSampleIndices() []int {
+	indices := make([]int, 0)
+	for index, sample := range r.samples {
+		if sample.isSync {
+			indices = append(indices, index)
+		}
+	}
+	return indices
+}
+
 // FirstSyncSampleIndex returns the first sync sample in decode order, if one exists.
 func (r *VideoSampleReader) FirstSyncSampleIndex() (int, bool) {
 	for index, sample := range r.samples {
