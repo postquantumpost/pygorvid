@@ -652,6 +652,38 @@ def test_adaptive_reference_marking_mmco5_clears_and_resets():
     assert buffer.references() == ()
 
 
+def test_reference_picture_display_frame_crops_coded_padding():
+    coded = Yuv420Frame(
+        4,
+        6,
+        4,
+        2,
+        2,
+        bytes(range(24)),
+        bytes(range(6)),
+        bytes(range(6, 12)),
+    )
+    reference = ReferencePicture(0, 1, 2)
+    decoder = H264Decoder(
+        SimpleNamespace(sample_count=1), frame_cache_size=0
+    )
+    decoder.reference_picture_buffer.store(
+        reference, coded, display_layout=(4, 4, 0, 2)
+    )
+
+    display = decoder.decode_frame(0)
+
+    assert (display.width, display.height) == (4, 4)
+    assert display.luma_plane_bytes() == bytes(range(8, 24))
+    assert display.u_plane_bytes() == bytes(range(2, 6))
+    assert display.v_plane_bytes() == bytes(range(8, 12))
+    assert len(
+        display.luma_plane_bytes()
+        + display.u_plane_bytes()
+        + display.v_plane_bytes()
+    ) == 24
+
+
 def test_decoder_parses_dependency_slice_headers_without_advancing_reader():
     reader = VideoSampleReader(FIXTURE)
     try:

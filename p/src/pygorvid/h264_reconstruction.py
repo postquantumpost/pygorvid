@@ -1518,6 +1518,51 @@ class PresentationOrderBuffer:
 class DecodedReferencePicture:
     reference: ReferencePicture
     frame: Yuv420Frame
+    display_layout: Optional[tuple[int, int, int, int]] = None
+
+    def display_frame(self) -> Yuv420Frame:
+        display_layout = getattr(self, "display_layout", None)
+        if display_layout is None:
+            return self.frame
+        display_width, display_height, crop_left, crop_top = display_layout
+        chroma_width = display_width // 2
+        chroma_height = display_height // 2
+        y = b"".join(
+            self.frame.y[
+                (crop_top + row) * self.frame.y_stride + crop_left:
+                (crop_top + row) * self.frame.y_stride
+                + crop_left + display_width
+            ]
+            for row in range(display_height)
+        )
+        u = b"".join(
+            self.frame.u[
+                (crop_top // 2 + row) * self.frame.u_stride
+                + crop_left // 2:
+                (crop_top // 2 + row) * self.frame.u_stride
+                + crop_left // 2 + chroma_width
+            ]
+            for row in range(chroma_height)
+        )
+        v = b"".join(
+            self.frame.v[
+                (crop_top // 2 + row) * self.frame.v_stride
+                + crop_left // 2:
+                (crop_top // 2 + row) * self.frame.v_stride
+                + crop_left // 2 + chroma_width
+            ]
+            for row in range(chroma_height)
+        )
+        return Yuv420Frame(
+            display_width,
+            display_height,
+            display_width,
+            chroma_width,
+            chroma_width,
+            y,
+            u,
+            v,
+        )
 
 
 class ReferencePictureBuffer:
@@ -1530,6 +1575,7 @@ class ReferencePictureBuffer:
         reference: ReferencePicture,
         frame: Yuv420Frame,
         motion_field: Optional[dict[int, Sequence[ColocatedMotionFact]]] = None,
+        display_layout: Optional[tuple[int, int, int, int]] = None,
     ) -> None:
         chroma_width = frame.width // 2 + frame.width % 2
         chroma_height = frame.height // 2 + frame.height % 2
@@ -1561,7 +1607,9 @@ class ReferencePictureBuffer:
             u=bytes(frame.u),
             v=bytes(frame.v),
         )
-        self._pictures[reference.identifier] = DecodedReferencePicture(reference, owned_frame)
+        self._pictures[reference.identifier] = DecodedReferencePicture(
+            reference, owned_frame, display_layout
+        )
         self._motion_fields[reference.identifier] = owned_motion_field
 
     def get(self, identifier: int) -> Optional[DecodedReferencePicture]:
@@ -1589,6 +1637,7 @@ class ReferencePictureBuffer:
                 frame_idx,
             ),
             picture.frame,
+            getattr(picture, "display_layout", None),
         )
         return True
 

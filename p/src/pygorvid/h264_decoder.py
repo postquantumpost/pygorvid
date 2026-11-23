@@ -1165,13 +1165,16 @@ class H264Decoder:
         reference: ReferencePicture,
         frame: Yuv420Frame,
         macroblocks: Sequence[CABACSliceMacroblockResult] = (),
+        display_layout: Optional[tuple[int, int, int, int]] = None,
     ) -> None:
         motion_field = {}
         for entry in macroblocks:
             if entry.address in motion_field:
                 raise DecoderError("decoded reference picture repeats a macroblock address")
             motion_field[entry.address] = _colocated_motion_facts(entry.macroblock)
-        self.reference_picture_buffer.store(reference, frame, motion_field)
+        self.reference_picture_buffer.store(
+            reference, frame, motion_field, display_layout
+        )
 
     def queue_presentation(self, picture: PresentationPicture) -> PresentationPicture | None:
         return self.presentation_order_buffer.push(picture)
@@ -2147,7 +2150,7 @@ class H264Decoder:
 
         cached = self.reference_picture_buffer.get(index)
         if cached is not None:
-            frame = cached.frame
+            frame = cached.display_frame()
             try:
                 y_plane = frame.luma_plane_bytes()
                 u_plane = frame.u_plane_bytes()
@@ -2398,6 +2401,12 @@ class H264Decoder:
                     ),
                     coded_frame,
                     tuple(picture_history),
+                    (
+                        sequence_set.width,
+                        sequence_set.height,
+                        sequence_set.frame_crop_left,
+                        sequence_set.frame_crop_top,
+                    ),
                 )
                 if reset_poc_state:
                     if sequence_set.pic_order_cnt_type == 0:
