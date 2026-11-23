@@ -45,6 +45,7 @@ fn run(args: Vec<String>) -> i32 {
         frame,
         prefix,
         threads,
+        threads_readahead,
         read_all,
         hash_frames,
         slideshow,
@@ -141,7 +142,7 @@ fn run(args: Vec<String>) -> i32 {
     let mut status = 0;
     for p in &files {
         if slideshow {
-            match show_slideshow(p, threads, verbose, readahead) {
+            match show_slideshow(p, threads, threads_readahead, verbose, readahead) {
                 Ok(count) => println!("{p}: displayed {count} frames"),
                 Err(error) => {
                     eprintln!("{p}: {error}");
@@ -151,7 +152,14 @@ fn run(args: Vec<String>) -> i32 {
             continue;
         }
         if read_all {
-            match read_all_frames_with_readahead(p, threads, verbose, hash_frames, readahead) {
+            match read_all_frames_with_readahead(
+                p,
+                threads,
+                threads_readahead,
+                verbose,
+                hash_frames,
+                readahead,
+            ) {
                 Ok(count) => println!("{p}: read {count} frames"),
                 Err(error) => {
                     eprintln!("{p}: {error}");
@@ -285,6 +293,7 @@ fn parse_args(
         Option<usize>,
         Option<String>,
         usize,
+        usize,
         bool,
         bool,
         bool,
@@ -301,6 +310,7 @@ fn parse_args(
     let mut frame = None;
     let mut prefix = None;
     let mut threads = pygorvid::default_decoder_threads();
+    let mut threads_readahead = None;
     let mut read_all = false;
     let mut hash_frames = false;
     let mut slideshow = false;
@@ -318,6 +328,12 @@ fn parse_args(
             .filter(|threads| *threads > 0)
             .ok_or_else(|| "--threads must be a positive integer".to_string())
     };
+    let parse_threads_readahead = |value: &str| {
+        value
+            .parse::<usize>()
+            .ok()
+            .ok_or_else(|| "--threads_readahead must be a non-negative integer".to_string())
+    };
     let mut files = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -332,6 +348,8 @@ fn parse_args(
             || arg == "--extractframe"
             || arg == "--prefix"
             || arg == "--threads"
+            || arg == "--threads_readahead"
+            || arg == "--threads-readahead"
         {
             index += 1;
             let value = args
@@ -343,6 +361,9 @@ fn parse_args(
                 "--output" => output = Some(value.clone()),
                 "--prefix" => prefix = Some(value.clone()),
                 "--threads" => threads = parse_threads(value)?,
+                "--threads_readahead" | "--threads-readahead" => {
+                    threads_readahead = Some(parse_threads_readahead(value)?)
+                }
                 _ => {
                     frame = Some(value.parse::<usize>().map_err(|_| {
                         "--extractframe must be a non-negative integer".to_string()
@@ -381,6 +402,10 @@ fn parse_args(
             prefix = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("--threads=") {
             threads = parse_threads(value)?;
+        } else if let Some(value) = arg.strip_prefix("--threads_readahead=") {
+            threads_readahead = Some(parse_threads_readahead(value)?);
+        } else if let Some(value) = arg.strip_prefix("--threads-readahead=") {
+            threads_readahead = Some(parse_threads_readahead(value)?);
         } else if arg.starts_with('-') {
             return Err(format!("unknown option: {arg}"));
         } else {
@@ -394,6 +419,7 @@ fn parse_args(
         frame,
         prefix,
         threads,
+        threads_readahead.unwrap_or_else(|| pygorvid::default_readahead_threads(threads)),
         read_all,
         hash_frames,
         slideshow,
@@ -406,11 +432,11 @@ fn parse_args(
 
 fn print_usage() {
     eprintln!("       vidprobe --generate OUTPUT.mp4");
-    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--readahead true|false] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--threads_readahead N] [--readahead true|false] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
 }
 
 #[cfg(not(feature = "slideshow"))]
-fn show_slideshow(_: &str, _: usize, _: bool, _: bool) -> Result<usize, String> {
+fn show_slideshow(_: &str, _: usize, _: usize, _: bool, _: bool) -> Result<usize, String> {
     Err(
         "optional slideshow build feature was not included; rebuild with --features slideshow"
             .into(),
@@ -421,21 +447,24 @@ fn show_slideshow(_: &str, _: usize, _: bool, _: bool) -> Result<usize, String> 
 fn show_slideshow(
     input: &str,
     threads: usize,
+    threads_readahead: usize,
     verbose: bool,
     readahead: bool,
 ) -> Result<usize, String> {
-    slideshow::show(input, threads, verbose, readahead)
+    slideshow::show(input, threads, threads_readahead, verbose, readahead)
 }
 
 fn read_all_frames_with_readahead(
     input: &str,
     threads: usize,
+    threads_readahead: usize,
     verbose: bool,
     hash_frames: bool,
     readahead: bool,
 ) -> Result<usize, String> {
     let mut decoder = pygorvid::VideoDecoder::open(input).map_err(|error| error.to_string())?;
     decoder.set_threads(threads);
+    decoder.set_threads_readahead(threads_readahead);
     decoder.set_verbose(verbose);
     let mut consume = |decoded: pygorvid::DecodedVideoFrame| {
         if hash_frames {
@@ -467,7 +496,14 @@ fn read_all_frames(
     verbose: bool,
     hash_frames: bool,
 ) -> Result<usize, String> {
-    read_all_frames_with_readahead(input, threads, verbose, hash_frames, false)
+    read_all_frames_with_readahead(
+        input,
+        threads,
+        pygorvid::default_readahead_threads(threads),
+        verbose,
+        hash_frames,
+        false,
+    )
 }
 
 fn sha256_planes(planes: &[&[u8]]) -> String {
@@ -689,7 +725,7 @@ mod tests {
     #[cfg(not(feature = "slideshow"))]
     #[test]
     fn slideshow_disabled_reports_missing_feature() {
-        assert!(show_slideshow("unused", 1, false, false)
+        assert!(show_slideshow("unused", 1, 0, false, false)
             .unwrap_err()
             .contains("optional slideshow build feature was not included"));
     }
@@ -701,7 +737,7 @@ mod tests {
         let input =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/decoder-smoke-16x16.mp4");
         assert_eq!(
-            show_slideshow(input.to_str().unwrap(), 1, false, false).unwrap(),
+            show_slideshow(input.to_str().unwrap(), 1, 0, false, false).unwrap(),
             3
         );
     }
@@ -925,7 +961,8 @@ mod tests {
         fs::write(&input, payload).unwrap();
         let sequential = read_all_frames(input.to_str().unwrap(), 2, false, false).unwrap();
         let readahead =
-            read_all_frames_with_readahead(input.to_str().unwrap(), 2, false, false, true).unwrap();
+            read_all_frames_with_readahead(input.to_str().unwrap(), 2, 1, false, false, true)
+                .unwrap();
         assert_eq!(readahead, sequential);
         assert_eq!(
             run(vec![
@@ -999,6 +1036,7 @@ mod tests {
         let args = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
         let parsed = parse_args(&args(&["--threads", "3", "a.mp4"])).unwrap();
         assert_eq!(parsed.4, 3);
+        assert_eq!(parsed.5, 2);
         assert_eq!(parse_args(&args(&["--threads=5", "a.mp4"])).unwrap().4, 5);
         assert_eq!(
             parse_args(&args(&["a.mp4"])).unwrap().4,
@@ -1006,20 +1044,33 @@ mod tests {
         );
         assert!(parse_args(&args(&["--threads", "0", "a.mp4"])).is_err());
         assert!(parse_args(&args(&["--threads=x", "a.mp4"])).is_err());
-        assert!(!parse_args(&args(&["a.mp4"])).unwrap().9);
-        assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().9);
-        assert!(parse_args(&args(&["--hash", "a.mp4"])).unwrap().6);
-        assert!(parse_args(&args(&["a.mp4"])).unwrap().8);
+        assert_eq!(
+            parse_args(&args(&[
+                "--threads",
+                "9",
+                "--threads_readahead",
+                "0",
+                "a.mp4"
+            ]))
+            .unwrap()
+            .5,
+            0
+        );
+        assert!(parse_args(&args(&["--threads_readahead", "-1", "a.mp4"])).is_err());
+        assert!(!parse_args(&args(&["a.mp4"])).unwrap().10);
+        assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().10);
+        assert!(parse_args(&args(&["--hash", "a.mp4"])).unwrap().7);
+        assert!(parse_args(&args(&["a.mp4"])).unwrap().9);
         assert!(
             parse_args(&args(&["--readahead", "true", "a.mp4"]))
                 .unwrap()
-                .8
+                .9
         );
         assert!(parse_args(&args(&["--readahead", "invalid", "a.mp4"])).is_err());
         assert!(
             !parse_args(&args(&["--readahead", "false", "a.mp4"]))
                 .unwrap()
-                .8
+                .9
         );
     }
 

@@ -43,7 +43,12 @@ from .h264_slice import (
 from .h264_sps import SPSInfo, SPSParseError, parse_sps
 from .h264_weighted_prediction import InterWeighting
 from .videosamplereader import VideoSampleReader
-from .codec import DecoderError, VideoCodec, default_decoder_threads
+from .codec import (
+    DecoderError,
+    VideoCodec,
+    default_decoder_threads,
+    default_readahead_threads,
+)
 
 
 class DecoderReferenceMismatch(DecoderError):
@@ -343,12 +348,12 @@ def _available_memory_bytes() -> Optional[int]:
 
 
 def _readahead_process_limit(
-    threads: int,
+    threads_readahead: int,
     frame_bytes: int,
     maximum_gop_frames: int,
     available_memory_bytes: Optional[int] = None,
 ) -> int:
-    requested = max(0, threads - 1)
+    requested = max(0, threads_readahead - 1)
     if requested == 0:
         return 0
     if available_memory_bytes is None:
@@ -637,6 +642,7 @@ class H264Decoder:
         checkpoint_path: Optional[str | Path] = None,
         checkpoint_dir: Optional[str | Path] = None,
         threads: Optional[int] = None,
+        threads_readahead: Optional[int] = None,
         frame_cache_size: int = 8,
         readahead: bool = True,
         decode_yield_callback: Optional[Callable[[], None]] = None,
@@ -648,6 +654,19 @@ class H264Decoder:
         ):
             raise ValueError("decoder thread count must be a positive integer")
         self.threads = default_decoder_threads() if threads is None else threads
+        if threads_readahead is not None and (
+            isinstance(threads_readahead, bool)
+            or not isinstance(threads_readahead, int)
+            or threads_readahead < 0
+        ):
+            raise ValueError(
+                "decoder readahead thread count must be a non-negative integer"
+            )
+        self.threads_readahead = (
+            default_readahead_threads(self.threads)
+            if threads_readahead is None
+            else threads_readahead
+        )
         if not isinstance(readahead, bool):
             raise ValueError("decoder readahead must be a boolean")
         if decode_yield_callback is not None and not callable(decode_yield_callback):
@@ -834,7 +853,7 @@ class H264Decoder:
             default=0,
         )
         return _readahead_process_limit(
-            self.threads, frame_bytes, maximum_gop_frames
+            self.threads_readahead, frame_bytes, maximum_gop_frames
         )
 
     def decode_sequential_frames(self, frame_indices):
@@ -865,9 +884,10 @@ class H264Decoder:
             return self._decode_indexed_frames(indices)
 
         worker_limit = self._read_ahead_worker_limit(groups)
-        if self.debug_progress and worker_limit < self.threads - 1:
+        requested_workers = max(0, self.threads_readahead - 1)
+        if self.debug_progress and worker_limit < requested_workers:
             print(
-                f"Readahead workers reduced from {self.threads - 1} "
+                f"Readahead workers reduced from {requested_workers} "
                 f"to {worker_limit} to fit decoded frame cache memory",
                 file=sys.stderr,
                 flush=True,

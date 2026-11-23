@@ -431,8 +431,11 @@ consumed in presentation order. Python uses an individual shared-memory
 frame-buffer pool for each process-to-process frame transfer. Each GOP reserves
 all buffers it needs before its process starts; consumed buffers return to the
 pool and idle buffers are freed when memory becomes low. Python uses at most
-`--threads - 1` readahead processes and reduces the lookahead count when the
+`--threads_readahead - 1` readahead processes and reduces the lookahead count when the
 estimated decoded-frame cache would not fit in half of the available memory.
+`--threads_readahead` defaults to the integer floor of 80% of `--threads`,
+including when `--threads` is supplied on the command line. A value of zero
+disables future GOP workers.
 Files without multiple closed GOPs use normal sequential decoding. Go and
 Rust transfer owned frame buffers through in-process channels, while C++
 transfers completed GOP frame values through futures; these native paths do not
@@ -517,8 +520,9 @@ all four language implementations. The C, Go, and Rust decoders are also checked
 with one and four threads.
 
 `--threads N` sets the requested decoder worker count in all four implementations
-and defaults to the number of available processors. With `--readahead true`, up to
-`N - 1` closed GOPs run ahead while the current GOP retains foreground
+and defaults to the number of available processors. `--threads_readahead M`
+sets the readahead thread budget and defaults to `floor(N * 0.8)`. With
+`--readahead true`, up to `M - 1` closed GOPs run ahead while the current GOP retains foreground
 processing. The lookahead count is reduced when a whole-GOP frame cache cannot
 fit in half of the available memory. With `--readahead false`, Python and C++
 reserve the thread count for parallel decoder work. Go and Rust also use it for

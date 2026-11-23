@@ -29,6 +29,10 @@ def default_decoder_threads() -> int:
     return max(1, os.cpu_count() or 1)
 
 
+def default_readahead_threads(threads: int) -> int:
+    return threads * 4 // 5
+
+
 def read_codec_configuration(entry, timescale):
     if entry.header.type == "avc1":
         from .h264_mp4 import read_sample_configuration

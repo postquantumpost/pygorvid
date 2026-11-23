@@ -23,10 +23,12 @@ type StreamFrame struct {
 // VideoStreamDecoder decodes a video file and emits frames in presentation order.
 // Readahead, when enabled, decodes independent future closed GOPs concurrently.
 type VideoStreamDecoder struct {
-	input     string
-	threads   int
-	verbose   bool
-	readahead bool
+	input               string
+	threads             int
+	threadsReadahead    int
+	threadsReadaheadSet bool
+	verbose             bool
+	readahead           bool
 }
 
 func NewVideoStreamDecoder(input string) *VideoStreamDecoder {
@@ -40,6 +42,23 @@ func (decoder *VideoStreamDecoder) SetThreads(threads int) {
 		threads = DefaultDecoderThreads()
 	}
 	decoder.threads = threads
+}
+
+func (decoder *VideoStreamDecoder) SetThreadsReadahead(threads int) {
+	if threads < 0 {
+		threads = DefaultReadaheadThreads(decoder.threads)
+		decoder.threadsReadaheadSet = false
+	} else {
+		decoder.threadsReadaheadSet = true
+	}
+	decoder.threadsReadahead = threads
+}
+
+func (decoder *VideoStreamDecoder) ThreadsReadahead() int {
+	if !decoder.threadsReadaheadSet {
+		return DefaultReadaheadThreads(decoder.threads)
+	}
+	return decoder.threadsReadahead
 }
 
 func (decoder *VideoStreamDecoder) SetVerbose(verbose bool) {
@@ -85,7 +104,8 @@ func (decoder *VideoStreamDecoder) Decode(consume func(StreamFrame) error) (int,
 		return 0, err
 	}
 	return decodeStreamWithReadahead(
-		decoder.input, reader, groups, decoder.threads, decoder.verbose, emit,
+		decoder.input, reader, groups, decoder.threads,
+		decoder.ThreadsReadahead(), decoder.verbose, emit,
 	)
 }
 
@@ -209,12 +229,15 @@ func decodeStreamSequential(
 
 func decodeStreamWithReadahead(
 	input string, reader *VideoSampleReader, groups []closedGOP,
-	threads int, verbose bool, consume func(streamDecodeResult) error,
+	threads, threadsReadahead int, verbose bool,
+	consume func(streamDecodeResult) error,
 ) (int, error) {
-	if len(groups) < 2 || threads < 2 {
+	if len(groups) < 2 || threadsReadahead < 2 {
 		return decodeStreamSequential(reader, threads, verbose, consume)
 	}
-	workerLimit := memoryWorkerLimit(reader, groups, min(threads-1, len(groups)-1))
+	workerLimit := memoryWorkerLimit(
+		reader, groups, min(threadsReadahead-1, len(groups)-1),
+	)
 	if workerLimit == 0 {
 		return decodeStreamSequential(reader, threads, verbose, consume)
 	}

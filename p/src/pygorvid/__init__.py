@@ -69,6 +69,7 @@ from .decoder import (
     DependencySlice,
     H264Decoder,
     default_decoder_threads,
+    default_readahead_threads,
 )
 from .mp4file import Mp4File
 from .mp4writer import Mp4Metadata, Mp4Writer
@@ -328,6 +329,7 @@ __all__ = [
     "DependencySlice",
     "H264Decoder",
     "default_decoder_threads",
+    "default_readahead_threads",
     "NALHeader",
     "NALUnitError",
     "ebsp_to_rbsp",

@@ -50,8 +50,9 @@ def test_b_decoder_smoke_64x64():
 
 
 def test_h264_decoder_accepts_reserved_threads_argument():
-    decoder = H264Decoder(threads=2)
+    decoder = H264Decoder(threads=2, threads_readahead=1)
     assert decoder.threads == 2
+    assert decoder.threads_readahead == 1
 
 
 def test_b_skip_8x8_inference_matches_reference_in_long_b_sequence():
@@ -64,13 +65,23 @@ def test_b_skip_8x8_inference_matches_reference_in_long_b_sequence():
 
 def test_h264_decoder_defaults_threads_to_available_processors(monkeypatch):
     monkeypatch.setattr("pygorvid.codec.os.cpu_count", lambda: 12)
-    assert H264Decoder().threads == 12
+    decoder = H264Decoder()
+    assert decoder.threads == 12
+    assert decoder.threads_readahead == 9
+
+
+def test_h264_decoder_defaults_readahead_threads_from_explicit_threads():
+    assert H264Decoder(threads=9).threads_readahead == 7
+    assert H264Decoder(threads=1).threads_readahead == 0
+    with pytest.raises(ValueError):
+        H264Decoder(threads_readahead=-1)
 
 
 def test_readahead_process_limit_reserves_frame_cache_memory():
     assert _readahead_process_limit(8, 100, 10, 10_000) == 5
     assert _readahead_process_limit(8, 100, 10, 1_500) == 0
     assert _readahead_process_limit(1, 100, 10, 0) == 0
+    assert _readahead_process_limit(0, 100, 10, 0) == 0
 
 
 def test_shared_frame_pool_reuses_and_trims_idle_buffers(monkeypatch):

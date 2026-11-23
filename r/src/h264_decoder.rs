@@ -903,6 +903,7 @@ pub struct H264Decoder {
     frame_cache_size: usize,
     // Zero selects default_decoder_threads().
     threads: usize,
+    threads_readahead: Option<usize>,
     verbose: bool,
 }
 
@@ -929,12 +930,13 @@ impl Default for H264Decoder {
             decoded_frame_order: VecDeque::new(),
             frame_cache_size: 8,
             threads: 0,
+            threads_readahead: None,
             verbose: false,
         }
     }
 }
 
-pub use crate::codec::default_decoder_threads;
+pub use crate::codec::{default_decoder_threads, default_readahead_threads};
 
 impl H264Decoder {
     pub fn closed_gop_presentation_indices(
@@ -994,7 +996,10 @@ impl H264Decoder {
             Some(path) => path,
             None => return self.stream_frames_sequentially(consume),
         };
-        let requested_workers = self.threads().saturating_sub(1).min(groups.len() - 1);
+        let requested_workers = self
+            .threads_readahead()
+            .saturating_sub(1)
+            .min(groups.len() - 1);
         let worker_limit = self.memory_worker_limit(&groups, requested_workers);
         if worker_limit == 0 {
             return self.stream_frames_sequentially(consume);
@@ -1108,6 +1113,11 @@ impl H264Decoder {
     /// Sets the number of decoder threads; zero selects `default_decoder_threads()`.
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads;
+    }
+
+    /// Sets the readahead thread budget; zero disables future GOP workers.
+    pub fn set_threads_readahead(&mut self, threads: usize) {
+        self.threads_readahead = Some(threads);
     }
 
     fn spawn_h264_gop(
@@ -1236,6 +1246,11 @@ impl H264Decoder {
             self.threads
         }
     }
+
+    pub fn threads_readahead(&self) -> usize {
+        self.threads_readahead
+            .unwrap_or_else(|| default_readahead_threads(self.threads()))
+    }
 }
 
 impl H264Decoder {
@@ -1284,6 +1299,7 @@ impl H264Decoder {
             decoded_frame_order: VecDeque::new(),
             frame_cache_size: 8,
             threads: 0,
+            threads_readahead: None,
             verbose: false,
         }
     }
@@ -1350,6 +1366,7 @@ impl H264Decoder {
             decoded_frame_order: VecDeque::new(),
             frame_cache_size: 8,
             threads: 0,
+            threads_readahead: None,
             verbose: false,
         }
     }

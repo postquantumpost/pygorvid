@@ -35,6 +35,16 @@ int main() {
     assert(readahead_count == sequential_count);
     assert(readahead_indices == sequential_indices);
 
+    std::vector<std::size_t> no_readahead_indices;
+    const auto no_readahead_count = decoder.decode(
+        {2, true, std::nullopt, 0},
+        [&](pygorvid::DecodedVideoFrame&& frame) {
+            no_readahead_indices.push_back(frame.presentation_index);
+            return true;
+        });
+    assert(no_readahead_count == sequential_count);
+    assert(no_readahead_indices == sequential_indices);
+
     auto selected = decoder.decode_frame(sequential_indices.back(), 2);
     assert(selected.presentation_index == sequential_indices.back());
     assert(selected.frame.luma.size() == 256);

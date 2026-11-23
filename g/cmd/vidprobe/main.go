@@ -65,6 +65,15 @@ func run(args []string) int {
 	flags.Var(boolValue{value: &readahead}, "readahead", "decode upcoming closed GOPs ahead in order (true or false)")
 	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
+	threadsReadahead := 0
+	flags.IntVar(
+		&threadsReadahead, "threads_readahead", 0,
+		"readahead thread budget (default: floor(--threads * 0.8))",
+	)
+	flags.IntVar(
+		&threadsReadahead, "threads-readahead", 0,
+		"readahead thread budget (default: floor(--threads * 0.8))",
+	)
 	if err := flags.Parse(flagsFirst(args)); err != nil {
 		return 2
 	}
@@ -76,6 +85,7 @@ func run(args []string) int {
 	inputSet := false
 	generateSet := false
 	outputSet := false
+	threadsReadaheadSet := false
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "extractframe":
@@ -86,8 +96,16 @@ func run(args []string) int {
 			generateSet = true
 		case "output":
 			outputSet = true
+		case "threads_readahead", "threads-readahead":
+			threadsReadaheadSet = true
 		}
 	})
+	if !threadsReadaheadSet {
+		threadsReadahead = vid.DefaultReadaheadThreads(*threads)
+	} else if threadsReadahead < 0 {
+		fmt.Fprintln(os.Stderr, "--threads_readahead must be a non-negative integer")
+		return 2
+	}
 	paths := flags.Args()
 	if inputSet {
 		paths = append([]string{*input}, paths...)
@@ -173,7 +191,9 @@ func run(args []string) int {
 	status := 0
 	for _, p := range paths {
 		if *slideshow {
-			count, err := showSlideshow(p, *threads, *verbose, readahead)
+			count, err := showSlideshowConfigured(
+				p, *threads, threadsReadahead, *verbose, readahead,
+			)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -183,7 +203,9 @@ func run(args []string) int {
 			continue
 		}
 		if *readAll {
-			count, err := readAllFrames(p, *threads, *verbose, *hashFrames, readahead)
+			count, err := readAllFramesConfigured(
+				p, *threads, threadsReadahead, *verbose, *hashFrames, readahead,
+			)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -244,7 +266,7 @@ func flagsFirst(args []string) []string {
 			paths = append(paths, args[i:]...)
 			break
 		}
-		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" || arg == "--generate" || arg == "--readahead" {
+		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" || arg == "--threads_readahead" || arg == "--threads-readahead" || arg == "--generate" || arg == "--readahead" {
 			options = append(options, arg)
 			if i+1 < len(args) {
 				i++
@@ -263,14 +285,24 @@ func flagsFirst(args []string) []string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "       vidprobe --generate OUTPUT.mp4")
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--readahead true|false] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--threads_readahead N] [--readahead true|false] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
 func readAllFrames(input string, threads int, verbose, hashFrames bool, readaheadOption ...bool) (int, error) {
+	return readAllFramesConfigured(
+		input, threads, vid.DefaultReadaheadThreads(threads),
+		verbose, hashFrames, len(readaheadOption) == 0 || readaheadOption[0],
+	)
+}
+
+func readAllFramesConfigured(
+	input string, threads, threadsReadahead int, verbose, hashFrames, readahead bool,
+) (int, error) {
 	decoder := vid.NewVideoStreamDecoder(input)
 	decoder.SetThreads(threads)
+	decoder.SetThreadsReadahead(threadsReadahead)
 	decoder.SetVerbose(verbose)
-	decoder.SetReadahead(len(readaheadOption) == 0 || readaheadOption[0])
+	decoder.SetReadahead(readahead)
 	consume := func(result vid.StreamFrame) error {
 		if !hashFrames {
 			return nil

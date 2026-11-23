@@ -177,6 +177,26 @@ func TestRunRejectsNonPositiveThreads(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsAndDefaultsThreadsReadahead(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
+	if status := run([]string{
+		"--readall", "--threads", "9", "--threads_readahead", "0", path,
+	}); status != 0 {
+		t.Fatalf("read-all with --threads_readahead status = %d; want 0", status)
+	}
+	if got := vid.DefaultReadaheadThreads(9); got != 7 {
+		t.Fatalf("DefaultReadaheadThreads(9) = %d; want 7", got)
+	}
+}
+
+func TestRunRejectsNegativeThreadsReadahead(t *testing.T) {
+	if status := run([]string{
+		"--threads_readahead", "-1", "input.mp4",
+	}); status != 2 {
+		t.Fatalf("run(--threads_readahead -1) = %d; want 2", status)
+	}
+}
+
 func TestRunAcceptsReadaheadOption(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "samples", "decoder-smoke-16x16.mp4")
 	if status := run([]string{"--readall", "--readahead", "true", path}); status != 0 {
@@ -363,8 +383,12 @@ func TestVerboseExtractionReportsProgressOnlyWhenEnabled(t *testing.T) {
 }
 
 func TestFlagsFirstKeepsThreadsValue(t *testing.T) {
-	got := flagsFirst([]string{"input.mp4", "--threads", "3"})
-	want := []string{"--threads", "3", "input.mp4"}
+	got := flagsFirst([]string{
+		"input.mp4", "--threads", "3", "--threads_readahead", "2",
+	})
+	want := []string{
+		"--threads", "3", "--threads_readahead", "2", "input.mp4",
+	}
 	for i := range want {
 		if len(got) != len(want) || got[i] != want[i] {
 			t.Fatalf("flagsFirst() = %v; want %v", got, want)

@@ -128,8 +128,12 @@ fn decoder_threads_default_to_available_processors() {
     let expected = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     assert_eq!(decoder.threads(), expected);
     assert_eq!(pygorvid::default_decoder_threads(), expected);
+    assert_eq!(decoder.threads_readahead(), expected * 4 / 5);
     decoder.set_threads(3);
     assert_eq!(decoder.threads(), 3);
+    assert_eq!(decoder.threads_readahead(), 2);
+    decoder.set_threads_readahead(0);
+    assert_eq!(decoder.threads_readahead(), 0);
     decoder.set_threads(0);
     assert_eq!(decoder.threads(), expected);
 }

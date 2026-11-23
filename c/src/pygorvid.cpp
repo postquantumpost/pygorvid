@@ -2015,14 +2015,16 @@ std::size_t decode_sequential(
 
 std::size_t decode_readahead(
     const std::string& input_path, std::size_t threads,
+    std::size_t threads_readahead,
     const DecoderConsumer& consumer) {
     auto ranges = closed_gop_ranges(input_path);
-    if (ranges.size() < 2 || threads < 2) {
+    if (ranges.size() < 2 || threads_readahead < 2) {
         return decode_sequential(input_path, threads, std::nullopt, consumer);
     }
     VideoSampleReader reader;
     if (!reader.open(input_path)) throw std::runtime_error(reader.error_info());
-    auto worker_limit = std::min<std::size_t>(threads - 1, ranges.size() - 1);
+    auto worker_limit = std::min<std::size_t>(
+        threads_readahead - 1, ranges.size() - 1);
     std::size_t maximum_gop_frames = 0;
     for (const auto& range : ranges) {
         maximum_gop_frames = std::max(maximum_gop_frames,
@@ -2115,6 +2117,9 @@ std::size_t VideoDecoder::decode(
     }
     const auto presentation = reader.presentation_sample_indices();
     const auto timescale = reader.timescale();
+    const auto threads = options.threads == 0
+        ? std::max<std::size_t>(1, std::thread::hardware_concurrency())
+        : options.threads;
     bool stopped = false;
     std::size_t emitted = 0;
     const DecoderConsumer emit = [&](std::size_t index, Yuv420Frame&& frame) {
@@ -2130,12 +2135,16 @@ std::size_t VideoDecoder::decode(
     };
     try {
         if (options.presentation_frame) {
-            (void)decode_sequential(path_, options.threads,
+            (void)decode_sequential(path_, threads,
                                     options.presentation_frame, emit);
         } else if (options.readahead) {
-            (void)decode_readahead(path_, options.threads, emit);
+            const auto threads_readahead =
+                options.threads_readahead.value_or(
+                    threads / 5 * 4 + threads % 5 * 4 / 5);
+            (void)decode_readahead(
+                path_, threads, threads_readahead, emit);
         } else {
-            (void)decode_sequential(path_, options.threads, std::nullopt, emit);
+            (void)decode_sequential(path_, threads, std::nullopt, emit);
         }
     } catch (const DecodeStopped&) {
     }

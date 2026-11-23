@@ -20,6 +20,7 @@ struct VideoDecodeOptions {
     std::size_t threads = 0;
     bool readahead = true;
     std::optional<std::size_t> presentation_frame;
+    std::optional<std::size_t> threads_readahead;
 };
 
 class VideoDecoder {

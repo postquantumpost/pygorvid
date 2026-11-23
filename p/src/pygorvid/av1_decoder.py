@@ -7,7 +7,7 @@ from .codec_frame import Yuv420Frame
 class AV1Decoder:
     def __init__(
         self, sample_reader=None, *, threads=None, debug_progress=False,
-        readahead=True,
+        readahead=True, threads_readahead=None,
     ):
         self.sample_reader = sample_reader
 

@@ -5,9 +5,15 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from .colorconv import PixelConverter
-from .codec import DecoderError, create_decoder, default_decoder_threads
+from .codec import (
+    DecoderError,
+    create_decoder,
+    default_decoder_threads,
+    default_readahead_threads,
+)
 from .jpegencoder import JPEGEncoder
 from .h264encoder import H264Encoder
 from .mp4writer import Mp4Metadata, Mp4Writer
@@ -110,11 +116,13 @@ def _extract_frame(
 def _read_all_frames(
     input_path: str, threads: int = 1, verbose: bool = False,
     hash_frames: bool = False, readahead: bool = True,
+    threads_readahead: Optional[int] = None,
 ) -> int:
     reader = VideoSampleReader(input_path)
     try:
         decoder_options = {
             "threads": threads,
+            "threads_readahead": threads_readahead,
             "debug_progress": verbose,
         }
         decoder_options["readahead"] = readahead
@@ -141,7 +149,7 @@ def _read_all_frames(
 
 def _slideshow(
     input_path: str, threads: int = 1, verbose: bool = False,
-    readahead: bool = True,
+    readahead: bool = True, threads_readahead: Optional[int] = None,
 ) -> int:
     from .slideshow import SlideshowWindow
 
@@ -151,6 +159,7 @@ def _slideshow(
         try:
             decoder_options = {
                 "threads": threads,
+                "threads_readahead": threads_readahead,
                 "debug_progress": verbose,
             }
             decoder_options["readahead"] = readahead
@@ -227,10 +236,19 @@ def main(argv=None) -> int:
         "--threads",
         type=_positive_int,
         default=default_decoder_threads(),
-        help="number of decoder threads (currently reserved for future parallel decoding)",
+        help="number of decoder threads",
+    )
+    parser.add_argument(
+        "--threads_readahead",
+        "--threads-readahead",
+        dest="threads_readahead",
+        type=_nonnegative_int,
+        help="readahead thread budget (default: floor(--threads * 0.8))",
     )
     parser.add_argument("files", nargs="*")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.threads_readahead is None:
+        args.threads_readahead = default_readahead_threads(args.threads)
     files = ([args.input] if args.input is not None else []) + args.files
     if args.generate is not None:
         if files or args.readall or args.hash or args.slideshow or args.extractframe is not None or args.output is not None:
@@ -301,7 +319,8 @@ def main(argv=None) -> int:
             from .slideshow import SlideshowError
             try:
                 count = _slideshow(
-                    path, args.threads, args.verbose, args.readahead
+                    path, args.threads, args.verbose, args.readahead,
+                    args.threads_readahead
                 )
             except (OSError, ValueError, DecoderError, Mp4FormatError, SlideshowError) as error:
                 print(f"{path}: {error}", file=sys.stderr)
@@ -312,7 +331,8 @@ def main(argv=None) -> int:
         if args.readall:
             try:
                 count = _read_all_frames(
-                    path, args.threads, args.verbose, args.hash, args.readahead
+                    path, args.threads, args.verbose, args.hash, args.readahead,
+                    args.threads_readahead
                 )
             except (OSError, ValueError, DecoderError, Mp4FormatError) as error:
                 print(f"{path}: {error}", file=sys.stderr)

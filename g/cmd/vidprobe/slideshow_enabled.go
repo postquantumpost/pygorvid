@@ -30,6 +30,15 @@ func sdlWaitTimeout(remaining time.Duration) int {
 }
 
 func showSlideshow(input string, threads int, verbose bool, readaheadOption ...bool) (int, error) {
+	return showSlideshowConfigured(
+		input, threads, vid.DefaultReadaheadThreads(threads), verbose,
+		len(readaheadOption) == 0 || readaheadOption[0],
+	)
+}
+
+func showSlideshowConfigured(
+	input string, threads, threadsReadahead int, verbose, readahead bool,
+) (int, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := sdl.InitSubSystem(sdl.INIT_VIDEO); err != nil {
@@ -134,8 +143,9 @@ func showSlideshow(input string, threads int, verbose bool, readaheadOption ...b
 	}
 	decoder := vid.NewVideoStreamDecoder(input)
 	decoder.SetThreads(threads)
+	decoder.SetThreadsReadahead(threadsReadahead)
 	decoder.SetVerbose(verbose)
-	decoder.SetReadahead(len(readaheadOption) == 0 || readaheadOption[0])
+	decoder.SetReadahead(readahead)
 	count, err := decoder.Decode(consume)
 	if err != nil {
 		if errors.Is(err, errSlideshowClosed) {

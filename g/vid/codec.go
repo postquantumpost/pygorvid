@@ -29,6 +29,10 @@ func (err *CodecError) Error() string { return err.Message }
 
 func DefaultDecoderThreads() int { return max(1, runtime.NumCPU()) }
 
+func DefaultReadaheadThreads(threads int) int {
+	return threads/5*4 + threads%5*4/5
+}
+
 type CodecConfiguration struct {
 	Codec VideoCodec
 	AVC   *AVCConfiguration

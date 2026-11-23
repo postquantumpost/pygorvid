@@ -58,6 +58,10 @@ pub fn default_decoder_threads() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
+pub fn default_readahead_threads(threads: usize) -> usize {
+    (threads / 5) * 4 + (threads % 5) * 4 / 5
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodecErrorCode {
     NotImplemented,
@@ -135,6 +139,12 @@ impl VideoDecoder {
     pub fn set_threads(&mut self, threads: usize) {
         if let Self::H264(decoder) = self {
             decoder.set_threads(threads);
+        }
+    }
+
+    pub fn set_threads_readahead(&mut self, threads: usize) {
+        if let Self::H264(decoder) = self {
+            decoder.set_threads_readahead(threads);
         }
     }
 

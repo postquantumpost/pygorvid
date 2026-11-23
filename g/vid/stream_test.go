@@ -12,6 +12,9 @@ func TestVideoStreamDecoderEmitsPresentationOrder(t *testing.T) {
 	path := filepath.Join("..", "..", "samples", "decoder-smoke-16x16.mp4")
 	decoder := NewVideoStreamDecoder(path)
 	decoder.SetThreads(1)
+	if decoder.ThreadsReadahead() != 0 {
+		t.Fatal("single-thread default unexpectedly enabled readahead workers")
+	}
 	indices := make([]int, 0)
 	previousPTS := int64(-1)
 	count, err := decoder.Decode(func(frame StreamFrame) error {
@@ -33,6 +36,19 @@ func TestVideoStreamDecoderEmitsPresentationOrder(t *testing.T) {
 	}
 	if want := []int{0, 1, 2}; !reflect.DeepEqual(indices, want) {
 		t.Fatalf("frame indices = %v; want %v", indices, want)
+	}
+}
+
+func TestVideoStreamDecoderReadaheadThreadDefaultAndOverride(t *testing.T) {
+	decoder := NewVideoStreamDecoder("")
+	decoder.SetThreads(9)
+	if got := decoder.ThreadsReadahead(); got != 7 {
+		t.Fatalf("ThreadsReadahead() = %d; want 7", got)
+	}
+	decoder.SetThreadsReadahead(0)
+	decoder.SetThreads(20)
+	if got := decoder.ThreadsReadahead(); got != 0 {
+		t.Fatalf("explicit ThreadsReadahead() = %d; want 0", got)
 	}
 }
 

@@ -68,8 +68,8 @@ pub use cabac::{
     CABAC_CONTEXT_COUNT,
 };
 pub use codec::{
-    default_decoder_threads, CodecConfiguration, CodecError, CodecErrorCode, VideoCodec,
-    VideoDecoder,
+    default_decoder_threads, default_readahead_threads, CodecConfiguration, CodecError,
+    CodecErrorCode, VideoCodec, VideoDecoder,
 };
 pub use codec_frame::{DecodedVideoFrame, Yuv420Frame};
 pub use decoder::{DecodeError, DependencySlice, H264Decoder};

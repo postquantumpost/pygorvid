@@ -12,9 +12,16 @@ fn sdl_wait_timeout(remaining: Duration) -> u32 {
         .max(1) as u32
 }
 
-pub fn show(input: &str, threads: usize, verbose: bool, readahead: bool) -> Result<usize, String> {
+pub fn show(
+    input: &str,
+    threads: usize,
+    threads_readahead: usize,
+    verbose: bool,
+    readahead: bool,
+) -> Result<usize, String> {
     let mut decoder = pygorvid::VideoDecoder::open(input).map_err(|e| e.to_string())?;
     decoder.set_threads(threads);
+    decoder.set_threads_readahead(threads_readahead);
     decoder.set_verbose(verbose);
     let sdl = sdl2::init().map_err(|e| format!("initialize SDL2: {e}"))?;
     let video = sdl

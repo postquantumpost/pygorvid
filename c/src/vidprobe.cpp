@@ -43,11 +43,12 @@ struct Options {
     bool readahead = true;
     std::size_t threads = std::max<std::size_t>(
         1, std::thread::hardware_concurrency());
+    std::optional<std::size_t> threads_readahead;
 };
 
 void usage() {
     std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
-    std::cerr << "usage: vidprobe [--threads N] [--readahead true|false] [--hash] [--slideshow | --readall | "
+    std::cerr << "usage: vidprobe [--threads N] [--threads_readahead N] [--readahead true|false] [--hash] [--slideshow | --readall | "
                  "--extractframe INDEX --output IMAGE] [--prefix TEXT] "
                  "[--input FILE] FILE...\n";
 }
@@ -74,6 +75,21 @@ std::size_t parse_thread_count(const std::string& value) {
     const auto parsed = std::stoull(value, &parsed_characters);
     if (parsed_characters != value.size() || parsed == 0) {
         throw std::invalid_argument("--threads requires a positive integer");
+    }
+    return parsed;
+}
+
+std::size_t parse_readahead_thread_count(const std::string& value) {
+    if (value.empty() || value.front() == '-') {
+        throw std::invalid_argument(
+            "--threads_readahead requires a non-negative integer");
+    }
+
+    std::size_t parsed_characters = 0;
+    const auto parsed = std::stoull(value, &parsed_characters);
+    if (parsed_characters != value.size()) {
+        throw std::invalid_argument(
+            "--threads_readahead requires a non-negative integer");
     }
     return parsed;
 }
@@ -298,6 +314,20 @@ Options parse_options(const std::vector<std::string>& args) {
             options.threads = parse_thread_count(args[index]);
         } else if (arg.rfind("--threads=", 0) == 0) {
             options.threads = parse_thread_count(arg.substr(10));
+        } else if (arg == "--threads_readahead" ||
+                   arg == "--threads-readahead") {
+            if (++index == args.size()) {
+                throw std::invalid_argument(
+                    "--threads_readahead requires a non-negative integer");
+            }
+            options.threads_readahead =
+                parse_readahead_thread_count(args[index]);
+        } else if (arg.rfind("--threads_readahead=", 0) == 0) {
+            options.threads_readahead =
+                parse_readahead_thread_count(arg.substr(20));
+        } else if (arg.rfind("--threads-readahead=", 0) == 0) {
+            options.threads_readahead =
+                parse_readahead_thread_count(arg.substr(19));
         } else if (!arg.empty() && arg.front() == '-') {
             throw std::invalid_argument("unknown option: " + arg);
         } else {
@@ -503,7 +533,8 @@ int run(const std::vector<std::string>& args) {
                 std::size_t displayed_count = 0;
                 pygorvid::VideoDecoder decoder(path);
                 (void)decoder.decode(
-                    {options.threads, options.readahead, std::nullopt},
+                    {options.threads, options.readahead, std::nullopt,
+                     options.threads_readahead},
                     [&](pygorvid::DecodedVideoFrame&& frame) {
                         if (!window.wait(deadline)) return false;
                         window.show(frame.frame);
@@ -529,7 +560,8 @@ int run(const std::vector<std::string>& args) {
             try {
                 pygorvid::VideoDecoder decoder(path);
                 const auto decoded_count = decoder.decode(
-                    {options.threads, options.readahead, std::nullopt},
+                    {options.threads, options.readahead, std::nullopt,
+                     options.threads_readahead},
                     [&](pygorvid::DecodedVideoFrame&& frame) {
                         if (options.hash_frames) {
                             std::cout << path << ": frame "

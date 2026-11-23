@@ -113,8 +113,10 @@ digest. `--readall` is mutually
 exclusive with `--extractframe` and `--output`. Add `--verbose` to print frame
 decode progress; the default output is limited to per-file results. `--threads`
 accepts a positive worker count and defaults to the number of available
-processors. Python decoding currently runs synchronously regardless of that
-value.
+processors. `--threads_readahead` accepts a non-negative thread budget and
+defaults to `floor(--threads * 0.8)`. When readahead is enabled, up to
+`--threads_readahead - 1` future closed GOPs are decoded concurrently; zero
+disables future GOP workers.
 
 Only the implemented progressive, 8-bit 4:2:0 CABAC H.264 subset is supported.
 Unsupported streams fail explicitly. Version 1.0 does not imply full H.264 support.

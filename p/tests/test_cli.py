@@ -66,6 +66,7 @@ def test_readahead_is_forwarded_to_python_decoder(monkeypatch):
     class FakeDecoder:
         def __init__(self, reader, **options):
             assert options["readahead"] is True
+            assert options["threads_readahead"] == 0
 
         frame_cache_size = 0
 
@@ -74,7 +75,9 @@ def test_readahead_is_forwarded_to_python_decoder(monkeypatch):
 
     monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
     monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
-    assert cli._read_all_frames("fake.mp4", readahead=True) == 0
+    assert cli._read_all_frames(
+        "fake.mp4", readahead=True, threads_readahead=0
+    ) == 0
 
 
 def test_readahead_false_is_forwarded_to_python_decoder(monkeypatch):
@@ -92,13 +95,16 @@ def test_readahead_false_is_forwarded_to_python_decoder(monkeypatch):
     class FakeDecoder:
         def __init__(self, reader, **options):
             assert options["readahead"] is False
+            assert options["threads_readahead"] == 3
 
         def decode_sequential_frames(self, indices):
             return iter(())
 
     monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
     monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
-    assert cli._read_all_frames("fake.mp4", readahead=False) == 0
+    assert cli._read_all_frames(
+        "fake.mp4", readahead=False, threads_readahead=3
+    ) == 0
 
 
 def test_readahead_ignores_file_without_multiple_closed_gops(capsys):
@@ -423,6 +429,49 @@ def test_threads_option_is_accepted(tmp_path):
 def test_threads_option_rejects_non_positive_counts(threads):
     with pytest.raises(SystemExit) as error:
         main([str(FIXTURE), "--threads", threads])
+    assert error.value.code == 2
+
+
+def test_threads_readahead_defaults_from_threads_and_accepts_zero(
+    monkeypatch
+):
+    from pygorvid import cli
+
+    received = []
+
+    class FakeReader:
+        def __init__(self, path):
+            pass
+
+        sample_count = 0
+
+        def close(self):
+            pass
+
+    class FakeDecoder:
+        def __init__(self, reader, **options):
+            received.append(options["threads_readahead"])
+
+        def decode_sequential_frames(self, indices):
+            return iter(())
+
+    monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
+    monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
+    assert cli.main(["--readall", "--threads", "9", "fake.mp4"]) == 0
+    assert cli.main([
+        "--readall", "--threads", "9", "--threads_readahead", "0", "fake.mp4",
+    ]) == 0
+    assert received == [7, 0]
+
+
+@pytest.mark.parametrize("threads_readahead", ("-1", "x"))
+def test_threads_readahead_option_rejects_invalid_counts(
+    threads_readahead
+):
+    with pytest.raises(SystemExit) as error:
+        main([
+            str(FIXTURE), "--threads_readahead", threads_readahead,
+        ])
     assert error.value.code == 2
 
 
