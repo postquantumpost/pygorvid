@@ -52,6 +52,14 @@ def test_h264_decoder_accepts_reserved_threads_argument():
     assert decoder.threads == 2
 
 
+def test_b_skip_8x8_inference_matches_reference_in_long_b_sequence():
+    reader = VideoSampleReader(ROOT / "samples" / "drone2_320x240.mp4")
+    frame = H264Decoder(reader, threads=1).decode_frame(2308)
+    assert hashlib.sha256(bytes(frame.y) + bytes(frame.u) + bytes(frame.v)).hexdigest() == (
+        "563957f9716ef149db6928a06f32c32575863af7a4204571426b9854b91b176e"
+    )
+
+
 def test_h264_decoder_defaults_threads_to_available_processors(monkeypatch):
     monkeypatch.setattr("pygorvid.codec.os.cpu_count", lambda: 12)
     assert H264Decoder().threads == 12

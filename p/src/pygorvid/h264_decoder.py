@@ -443,9 +443,17 @@ def _colocated_motion_facts(macroblock_result):
                 ColocatedMotionFact(decoded.reference_index, MotionVector(*decoded.motion_vector))
             )
         elif isinstance(decoded, CABACBDirectMacroblockResult):
-            list_index = 0 if decoded.prediction_flags[0] else 1
-            reference_index = decoded.reference_indices[list_index]
-            vector = decoded.motion_vectors[list_index]
+            if decoded.block_prediction_flags:
+                flags = decoded.block_prediction_flags[cell]
+                references = decoded.block_reference_indices[cell]
+                vectors = decoded.block_motion_vectors[cell]
+            else:
+                flags = decoded.prediction_flags
+                references = decoded.reference_indices
+                vectors = decoded.motion_vectors
+            list_index = 0 if flags[0] else 1
+            reference_index = references[list_index]
+            vector = vectors[list_index]
             facts.append(ColocatedMotionFact(reference_index, MotionVector(*vector)))
         elif isinstance(decoded, CABACInterMacroblockResult):
             partition = next(
@@ -538,10 +546,18 @@ def _picture_deblocking_macroblock(
         if isinstance(decoded, CABACPSkipMacroblockResult):
             sources = ((0, decoded.reference_index, decoded.motion_vector),)
         elif isinstance(decoded, CABACBDirectMacroblockResult):
+            if decoded.block_prediction_flags:
+                flags = decoded.block_prediction_flags[cell]
+                references = decoded.block_reference_indices[cell]
+                vectors = decoded.block_motion_vectors[cell]
+            else:
+                flags = decoded.prediction_flags
+                references = decoded.reference_indices
+                vectors = decoded.motion_vectors
             sources = tuple(
-                (list_index, decoded.reference_indices[list_index], decoded.motion_vectors[list_index])
+                (list_index, references[list_index], vectors[list_index])
                 for list_index in range(2)
-                if decoded.prediction_flags[list_index]
+                if flags[list_index]
             )
         elif isinstance(decoded, CABACInterMacroblockResult):
             partition = next(
@@ -1928,6 +1944,7 @@ class H264Decoder:
                     ),
                     colocated_motion_field=colocated_facts,
                     current_picture_order_count=current_poc,
+                    direct_8x8_inference=sequence_set.direct_8x8_inference,
                 )
             return CABACPBMacroblockLayerInput(
                 inter_input=inter_input,

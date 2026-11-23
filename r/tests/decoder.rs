@@ -237,6 +237,28 @@ fn streaming_decoder_batches_future_closed_gops_without_reordering() {
 }
 
 #[test]
+fn b_direct_8x8_inference_matches_reference_in_long_b_sequence() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples/drone2_320x240.mp4");
+    let mut decoder = H264Decoder::new(VideoSampleReader::open(fixture).unwrap());
+    decoder.set_threads(1);
+    for (presentation_index, expected_hash) in [
+        (76, 0xba098f5c_8a65a70f),
+        (550, 0xc2c1686f_afffa42f),
+        (2308, 0x52200af6_f8f4d2a7),
+        (2353, 0x5eae1ca2_3128ab42),
+    ] {
+        let frame = decoder.decode_frame(presentation_index).unwrap();
+        let mut hash = 0xcbf29ce484222325_u64;
+        for plane in [&frame.y, &frame.u, &frame.v] {
+            for sample in plane {
+                hash = (hash ^ u64::from(*sample)).wrapping_mul(0x100000001b3);
+            }
+        }
+        assert_eq!(hash, expected_hash, "frame {presentation_index}");
+    }
+}
+
+#[test]
 fn h264_decoder_checkpoint_auto_saves_and_restores_cached_frames() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples");
     let checkpoint_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(

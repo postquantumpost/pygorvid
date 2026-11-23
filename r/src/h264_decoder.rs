@@ -368,15 +368,35 @@ fn picture_deblocking_macroblock(
                 CabacPBMacroblockPrediction::BSkip(macroblock) => (
                     current_qpy,
                     false,
-                    vec![(
-                        0,
-                        0,
-                        16,
-                        16,
-                        macroblock.prediction_flags,
-                        macroblock.reference_indices,
-                        macroblock.motion_vectors,
-                    )],
+                    if let (Some(references), Some(vectors), Some(flags)) = (
+                        macroblock.block_reference_indices,
+                        macroblock.block_motion_vectors,
+                        macroblock.block_prediction_flags,
+                    ) {
+                        (0..16)
+                            .map(|cell| {
+                                (
+                                    (cell % 4) * 4,
+                                    (cell / 4) * 4,
+                                    4,
+                                    4,
+                                    flags[cell],
+                                    references[cell],
+                                    vectors[cell],
+                                )
+                            })
+                            .collect()
+                    } else {
+                        vec![(
+                            0,
+                            0,
+                            16,
+                            16,
+                            macroblock.prediction_flags,
+                            macroblock.reference_indices,
+                            macroblock.motion_vectors,
+                        )]
+                    },
                     false,
                     None,
                 ),
@@ -805,18 +825,32 @@ fn colocated_motion_facts(
             }
             crate::CabacPBMacroblockPrediction::BSkip(decoded) => {
                 facts.fill(inactive);
-                for fact in &mut facts {
-                    let list_index = if decoded.prediction_flags[0] {
+                for (cell, fact) in facts.iter_mut().enumerate() {
+                    let (references, vectors, flags) =
+                        if let (Some(references), Some(vectors), Some(flags)) = (
+                            decoded.block_reference_indices,
+                            decoded.block_motion_vectors,
+                            decoded.block_prediction_flags,
+                        ) {
+                            (references[cell], vectors[cell], flags[cell])
+                        } else {
+                            (
+                                decoded.reference_indices,
+                                decoded.motion_vectors,
+                                decoded.prediction_flags,
+                            )
+                        };
+                    let list_index = if flags[0] {
                         Some(0)
-                    } else if decoded.prediction_flags[1] {
+                    } else if flags[1] {
                         Some(1)
                     } else {
                         None
                     };
                     if let Some(list_index) = list_index {
                         *fact = crate::ColocatedMotionFact {
-                            reference_index: decoded.reference_indices[list_index],
-                            motion_vector: decoded.motion_vectors[list_index],
+                            reference_index: references[list_index],
+                            motion_vector: vectors[list_index],
                         };
                     }
                 }
@@ -2549,6 +2583,7 @@ impl H264Decoder {
                 colocated_motion_vector: colocated_top_left.motion_vector,
                 colocated_motion_field: Some(colocated_facts),
                 current_picture_order_count: current_poc,
+                direct_8x8_inference: sps.direct_8x8_inference,
             })
         } else {
             None

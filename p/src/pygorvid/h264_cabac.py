@@ -93,6 +93,7 @@ class CABACBDirectMacroblockInput:
     colocated_motion_field: tuple[object, ...] = ()
     current_picture_order_count: int = 0
     weighting: InterWeighting = InterWeighting()
+    direct_8x8_inference: bool = True
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,11 @@ class CABACBDirectMacroblockResult:
     luma: tuple[int, ...]
     cb: tuple[int, ...]
     cr: tuple[int, ...]
+    block_reference_indices: tuple[tuple[int, int], ...] = ()
+    block_motion_vectors: tuple[
+        tuple[tuple[int, int], tuple[int, int]], ...
+    ] = ()
+    block_prediction_flags: tuple[tuple[bool, bool], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -768,11 +774,16 @@ def derive_cabac_inter_macroblock_neighbor_state_from_history(
             motion_differences = ((0, 0), (0, 0))
             skipped = True
         elif isinstance(decoded, CABACBDirectMacroblockResult):
-            prediction_flags = decoded.prediction_flags
-            reference_indices = decoded.reference_indices
-            motion_vectors = decoded.motion_vectors
+            if decoded.block_prediction_flags:
+                block = (local_y // 4) * 4 + local_x // 4
+                prediction_flags = decoded.block_prediction_flags[block]
+                reference_indices = decoded.block_reference_indices[block]
+                motion_vectors = decoded.block_motion_vectors[block]
+            else:
+                prediction_flags = decoded.prediction_flags
+                reference_indices = decoded.reference_indices
+                motion_vectors = decoded.motion_vectors
             motion_differences = ((0, 0), (0, 0))
-            skipped = True
         elif isinstance(decoded, CABACInterMacroblockResult):
             group = (local_y // 8) * 2 + local_x // 8
             skipped = skipped or (b_slice and (
@@ -1794,6 +1805,109 @@ class CABACArithmeticDecoder:
         dimensions = {(frame.width, frame.height) for frame in reference_frames}
         if len(dimensions) != 1 or any(frame.width <= 0 or frame.height <= 0 for frame in reference_frames):
             raise CABACError("B_Direct reference picture dimensions do not match")
+
+        if input.direct_spatial and input.direct_8x8_inference:
+            neighbors = CABACInterPartitionNeighbors(
+                list0=CABACInterListNeighbors(
+                    left_candidate=input.left_l0_candidate,
+                    top_candidate=input.top_l0_candidate,
+                    top_right_candidate=input.top_right_l0_candidate,
+                    top_left_candidate=input.top_left_l0_candidate,
+                ),
+                list1=CABACInterListNeighbors(
+                    left_candidate=input.left_l1_candidate,
+                    top_candidate=input.top_l1_candidate,
+                    top_right_candidate=input.top_right_l1_candidate,
+                    top_left_candidate=input.top_left_l1_candidate,
+                ),
+            )
+            luma = [0] * 256
+            cb = [0] * 64
+            cr = [0] * 64
+            block_references = [[-1, -1] for _ in range(16)]
+            block_vectors = [((0, 0), (0, 0)) for _ in range(16)]
+            block_flags = [(False, False) for _ in range(16)]
+            first = None
+            for partition_y in (0, 8):
+                for partition_x in (0, 8):
+                    prediction = _derive_spatial_b_direct_partition(
+                        input,
+                        neighbors,
+                        partition_x,
+                        partition_y,
+                        True,
+                    )
+                    if first is None:
+                        first = prediction
+                    selected = tuple(
+                        references[prediction.reference_indices[list_index]].frame
+                        if prediction.prediction_flags[list_index]
+                        else None
+                        for list_index, references in enumerate((list0, list1))
+                    )
+                    weights = input.weighting.select(
+                        prediction.reference_indices,
+                        (
+                            list0[prediction.reference_indices[0]]
+                            if prediction.prediction_flags[0]
+                            else None,
+                            list1[prediction.reference_indices[1]]
+                            if prediction.prediction_flags[1]
+                            else None,
+                        ),
+                    )
+                    part_luma, part_cb, part_cr = _run_reconstruction_job(
+                        "bdirect",
+                        selected,
+                        (
+                            prediction.motion_vectors,
+                            input.macroblock_x,
+                            input.macroblock_y,
+                            weights,
+                        ),
+                        getattr(self, "_timeout_check", None),
+                    )
+                    for row in range(8):
+                        source_y = partition_y + row
+                        for column in range(8):
+                            source_x = partition_x + column
+                            luma[source_y * 16 + source_x] = (
+                                part_luma[source_y * 16 + source_x]
+                            )
+                    for row in range(4):
+                        source_y = partition_y // 2 + row
+                        for column in range(4):
+                            source_x = partition_x // 2 + column
+                            index = source_y * 8 + source_x
+                            cb[index] = part_cb[index]
+                            cr[index] = part_cr[index]
+                    for block_y in range(partition_y // 4, partition_y // 4 + 2):
+                        for block_x in range(partition_x // 4, partition_x // 4 + 2):
+                            block = block_y * 4 + block_x
+                            block_references[block] = list(
+                                prediction.reference_indices
+                            )
+                            block_vectors[block] = tuple(
+                                prediction.motion_vectors
+                            )
+                            block_flags[block] = tuple(
+                                prediction.prediction_flags
+                            )
+            if first is None:
+                raise CABACError("B_Direct 8x8 prediction is incomplete")
+            builder.place_macroblock(address, luma, cb, cr)
+            return CABACBDirectMacroblockResult(
+                skipped,
+                first.reference_indices,
+                first.motion_vectors,
+                first.prediction_flags,
+                tuple(luma),
+                tuple(cb),
+                tuple(cr),
+                tuple(tuple(value) for value in block_references),
+                tuple(block_vectors),
+                tuple(block_flags),
+            )
 
         def candidate_index(candidate) -> int:
             if candidate is None:

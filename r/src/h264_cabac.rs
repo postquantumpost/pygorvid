@@ -220,6 +220,7 @@ pub struct CabacBDirectMacroblockInput {
     pub colocated_motion_vector: crate::MotionVector,
     pub colocated_motion_field: Option<[crate::ColocatedMotionFact; 16]>,
     pub current_picture_order_count: i64,
+    pub direct_8x8_inference: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,6 +232,9 @@ pub struct CabacBDirectMacroblockResult {
     pub luma: [u8; 256],
     pub cb: [u8; 64],
     pub cr: [u8; 64],
+    pub block_reference_indices: Option<[[i32; 2]; 16]>,
+    pub block_motion_vectors: Option<[[crate::MotionVector; 2]; 16]>,
+    pub block_prediction_flags: Option<[[bool; 2]; 16]>,
 }
 
 impl Default for CabacBDirectMacroblockResult {
@@ -243,6 +247,9 @@ impl Default for CabacBDirectMacroblockResult {
             luma: [0; 256],
             cb: [0; 64],
             cr: [0; 64],
+            block_reference_indices: None,
+            block_motion_vectors: None,
+            block_prediction_flags: None,
         }
     }
 }
@@ -834,12 +841,33 @@ fn cabac_history_partition_fact(
                         [decoded.motion_vector, crate::MotionVector::default()],
                         [crate::MotionVector::default(); 2],
                     ),
-                    CabacPBMacroblockPrediction::BSkip(decoded) => (
-                        decoded.prediction_flags,
-                        decoded.reference_indices,
-                        decoded.motion_vectors,
-                        [crate::MotionVector::default(); 2],
-                    ),
+                    CabacPBMacroblockPrediction::BSkip(decoded) => {
+                        let (flags, reference_indices, motion_vectors) =
+                            if let (Some(reference_indices), Some(motion_vectors), Some(flags)) = (
+                                decoded.block_reference_indices,
+                                decoded.block_motion_vectors,
+                                decoded.block_prediction_flags,
+                            ) {
+                                let block = (sample_y / 4) * 4 + sample_x / 4;
+                                (
+                                    flags[block],
+                                    reference_indices[block],
+                                    motion_vectors[block],
+                                )
+                            } else {
+                                (
+                                    decoded.prediction_flags,
+                                    decoded.reference_indices,
+                                    decoded.motion_vectors,
+                                )
+                            };
+                        (
+                            flags,
+                            reference_indices,
+                            motion_vectors,
+                            [crate::MotionVector::default(); 2],
+                        )
+                    }
                     CabacPBMacroblockPrediction::Inter(decoded) => {
                         let group = (sample_y / 8) * 2 + sample_x / 8;
                         skipped |= b_slice
@@ -1002,12 +1030,24 @@ fn cabac_resolved_inter_partition_neighbors(
     input: &CabacInterMacroblockInput,
     specifications: &[CabacInterPartitionSpec],
     partition_index: usize,
+    whole_macroblock_direct: bool,
     prediction_flags: &[[bool; 2]],
     reference_indices: &[[i32; 2]],
     motion_vectors: &[[crate::MotionVector; 2]],
     motion_vector_differences: &[[crate::MotionVector; 2]],
 ) -> CabacInterPartitionNeighbors {
-    let specification = specifications[partition_index];
+    let specification = if whole_macroblock_direct {
+        CabacInterPartitionSpec {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+            prediction_flags: [true, true],
+            direct: true,
+        }
+    } else {
+        specifications[partition_index]
+    };
     let base_index = if input.partition_neighbors.len() == 16 {
         (specification.y / 4) * 4 + specification.x / 4
     } else {
@@ -1167,6 +1207,7 @@ fn cabac_spatial_b_direct_prediction(
             luma: [0; 256],
             cb: [0; 64],
             cr: [0; 64],
+            ..CabacBDirectMacroblockResult::default()
         });
     }
     let list_neighbors = [neighbors.list0, neighbors.list1];
@@ -1183,6 +1224,17 @@ fn cabac_spatial_b_direct_prediction(
             left.max(right)
         }
     };
+    let mut colocated_index = (partition_y / 4) * 4 + partition_x / 4;
+    if direct_8x8_inference {
+        let macroblock_partition_index = (partition_y / 8) * 2 + partition_x / 8;
+        colocated_index = LUMA4X4_BLOCK_SCAN_TO_RASTER[5 * macroblock_partition_index];
+    }
+    let colocated_fact = input
+        .colocated_motion_field
+        .map(|field| field[colocated_index]);
+    let colocated_reference_index = colocated_fact
+        .map(|fact| fact.reference_index)
+        .unwrap_or(input.colocated_reference_index);
     let mut reference_indices = [0_i32; 2];
     for list_index in 0..2 {
         let state = list_neighbors[list_index];
@@ -1195,17 +1247,6 @@ fn cabac_spatial_b_direct_prediction(
     if direct_zero {
         reference_indices = [0; 2];
     }
-    let mut colocated_index = (partition_y / 4) * 4 + partition_x / 4;
-    if direct_8x8_inference {
-        let macroblock_partition_index = (partition_y / 8) * 2 + partition_x / 8;
-        colocated_index = LUMA4X4_BLOCK_SCAN_TO_RASTER[5 * macroblock_partition_index];
-    }
-    let colocated_fact = input
-        .colocated_motion_field
-        .map(|field| field[colocated_index]);
-    let colocated_reference_index = colocated_fact
-        .map(|fact| fact.reference_index)
-        .unwrap_or(input.colocated_reference_index);
     let colocated_motion_vector = colocated_fact
         .map(|fact| fact.motion_vector)
         .unwrap_or(input.colocated_motion_vector);
@@ -1303,6 +1344,7 @@ fn cabac_inter_partition_specs(
     slice_type: u8,
     macroblock_type: u8,
     sub_types: &[u8],
+    direct_8x8_inference: bool,
 ) -> io::Result<Vec<CabacInterPartitionSpec>> {
     let mut output = Vec::new();
     if matches!(slice_type % 5, 0 | 3) {
@@ -1346,14 +1388,21 @@ fn cabac_inter_partition_specs(
         }
     } else {
         match macroblock_type {
-            0 => output.push(CabacInterPartitionSpec {
-                x: 0,
-                y: 0,
-                width: 16,
-                height: 16,
-                prediction_flags: [true, true],
-                direct: true,
-            }),
+            0 => {
+                let step = if direct_8x8_inference { 8 } else { 16 };
+                for y in (0..16).step_by(step) {
+                    for x in (0..16).step_by(step) {
+                        output.push(CabacInterPartitionSpec {
+                            x,
+                            y,
+                            width: step,
+                            height: step,
+                            prediction_flags: [true, true],
+                            direct: true,
+                        });
+                    }
+                }
+            }
             1..=3 => output.push(CabacInterPartitionSpec {
                 x: 0,
                 y: 0,
@@ -2862,6 +2911,127 @@ impl<'a> CabacArithmeticDecoder<'a> {
             return Err(invalid(
                 "B_Direct reference picture dimensions do not match",
             ));
+        }
+
+        if input.direct_spatial && input.direct_8x8_inference {
+            let neighbors = CabacInterPartitionNeighbors {
+                list0: CabacInterListNeighbors {
+                    left_candidate: input.left_l0_candidate,
+                    top_candidate: input.top_l0_candidate,
+                    top_right_candidate: input.top_right_l0_candidate,
+                    top_left_candidate: input.top_left_l0_candidate,
+                    ..CabacInterListNeighbors::default()
+                },
+                list1: CabacInterListNeighbors {
+                    left_candidate: input.left_l1_candidate,
+                    top_candidate: input.top_l1_candidate,
+                    top_right_candidate: input.top_right_l1_candidate,
+                    top_left_candidate: input.top_left_l1_candidate,
+                    ..CabacInterListNeighbors::default()
+                },
+                direct_prediction: None,
+            };
+            let mut luma = [0_u8; 256];
+            let mut cb = [0_u8; 64];
+            let mut cr = [0_u8; 64];
+            let mut block_reference_indices = [[-1_i32; 2]; 16];
+            let mut block_motion_vectors = [[crate::MotionVector::default(); 2]; 16];
+            let mut block_prediction_flags = [[false; 2]; 16];
+            let mut first = None;
+            for partition_y in (0..16).step_by(8) {
+                for partition_x in (0..16).step_by(8) {
+                    let prediction = cabac_spatial_b_direct_prediction(
+                        input,
+                        neighbors,
+                        partition_x,
+                        partition_y,
+                        true,
+                    )?;
+                    if first.is_none() {
+                        first = Some((
+                            prediction.reference_indices,
+                            prediction.motion_vectors,
+                            prediction.prediction_flags,
+                        ));
+                    }
+                    let mut references = [None, None];
+                    for list_index in 0..2 {
+                        if prediction.prediction_flags[list_index] {
+                            let list = if list_index == 0 {
+                                &input.list0_references
+                            } else {
+                                &input.list1_references
+                            };
+                            let index = usize::try_from(prediction.reference_indices[list_index])
+                                .map_err(|_| {
+                                invalid("B_Direct selected reference index is unavailable")
+                            })?;
+                            let reference = list.get(index).ok_or_else(|| {
+                                invalid("B_Direct selected reference index is unavailable")
+                            })?;
+                            references[list_index] = Some((
+                                reference.frame.clone(),
+                                prediction.motion_vectors[list_index],
+                            ));
+                        }
+                    }
+                    let weights = input.weighting.select(
+                        prediction.reference_indices,
+                        [
+                            prediction.prediction_flags[0].then(|| {
+                                &input.list0_references[prediction.reference_indices[0] as usize]
+                            }),
+                            prediction.prediction_flags[1].then(|| {
+                                &input.list1_references[prediction.reference_indices[1] as usize]
+                            }),
+                        ],
+                    )?;
+                    let (part_luma, part_cb, part_cr) = b_direct_samples(
+                        &references,
+                        input.macroblock_x,
+                        input.macroblock_y,
+                        weights,
+                    )?;
+                    for row in 0..8 {
+                        for column in 0..8 {
+                            let y = partition_y + row;
+                            let x = partition_x + column;
+                            luma[y * 16 + x] = part_luma[y * 16 + x];
+                        }
+                    }
+                    for row in 0..4 {
+                        for column in 0..4 {
+                            let index = (partition_y / 2 + row) * 8 + partition_x / 2 + column;
+                            cb[index] = part_cb[index];
+                            cr[index] = part_cr[index];
+                        }
+                    }
+                    for block_y in partition_y / 4..partition_y / 4 + 2 {
+                        for block_x in partition_x / 4..partition_x / 4 + 2 {
+                            let block = block_y * 4 + block_x;
+                            block_reference_indices[block] = prediction.reference_indices;
+                            block_motion_vectors[block] = prediction.motion_vectors;
+                            block_prediction_flags[block] = prediction.prediction_flags;
+                        }
+                    }
+                }
+            }
+            let (reference_indices, motion_vectors, prediction_flags) =
+                first.ok_or_else(|| invalid("B_Direct 8x8 prediction is incomplete"))?;
+            builder.place_macroblock(address, &luma, &cb, &cr)?;
+            return Ok(CabacBDirectMacroblockResult {
+                skipped,
+                reference_indices,
+                motion_vectors,
+                prediction_flags,
+                luma,
+                cb,
+                cr,
+                block_reference_indices: Some(block_reference_indices),
+                block_motion_vectors: Some(block_motion_vectors),
+                block_prediction_flags: Some(block_prediction_flags),
+                ..CabacBDirectMacroblockResult::default()
+            });
         }
 
         let mut reference_indices = [-1_i32; 2];
@@ -4725,8 +4895,14 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 sub_types.push(trial.decode_sub_mb_type(input.slice_type, &mut trial_contexts)?);
             }
         }
-        let specifications =
-            cabac_inter_partition_specs(input.slice_type, macroblock_type, &sub_types)?;
+        let direct_8x8_inference =
+            residual_input.is_some_and(|residual| residual.direct_8x8_inference_flag);
+        let specifications = cabac_inter_partition_specs(
+            input.slice_type,
+            macroblock_type,
+            &sub_types,
+            direct_8x8_inference,
+        )?;
         if input.partition_neighbors.len() != specifications.len()
             && input.partition_neighbors.len() != 16
         {
@@ -4812,10 +4988,16 @@ impl<'a> CabacArithmeticDecoder<'a> {
             }
             let direct_input = direct_input
                 .ok_or_else(|| invalid("direct inter partition metadata is required"))?;
+            let neighbor_partition_index = if macroblock_type == 0 {
+                0
+            } else {
+                partition_index
+            };
             let neighbors = cabac_resolved_inter_partition_neighbors(
                 &input,
                 &specifications,
-                partition_index,
+                neighbor_partition_index,
+                macroblock_type == 0,
                 &prediction_flags,
                 &reference_indices,
                 &motion_vectors,
@@ -4848,6 +5030,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     &input,
                     &specifications,
                     first_index,
+                    false,
                     &prediction_flags,
                     &reference_indices,
                     &motion_vectors,
@@ -4902,6 +5085,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     &input,
                     &specifications,
                     partition_index,
+                    false,
                     &prediction_flags,
                     &reference_indices,
                     &motion_vectors,
