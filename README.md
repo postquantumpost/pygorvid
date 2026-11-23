@@ -425,7 +425,7 @@ vidprobe --readall --threads 4 first.mp4 second.mp4
 Each successful input reports its decoded frame count. A decode failure reports
 the zero-based frame index, continues with subsequent inputs, and produces exit
 status 1. `--readall` cannot be combined with `--extractframe` or `--output`.
-Add `--readahead` to `--readall` or `--slideshow` to let Python decode future
+Set `--readahead true` (the default) to let Python decode future
 closed GOPs in separate processes while frames from the current GOP are
 consumed in presentation order. Python uses an individual shared-memory
 frame-buffer pool for each process-to-process frame transfer. Each GOP reserves
@@ -455,7 +455,7 @@ four implementations; different digests indicate that decoded frame pixels
 differ. `--hash` requires either `--readall` or `--extractframe`.
 
 To display decoded frames in presentation order, run
-`vidprobe --slideshow [--readahead] --input input.mp4`. The window closes
+`vidprobe --slideshow [--readahead true|false] --input input.mp4`. The window closes
 after the last frame; closing it early stops that input. Subsequent inputs are
 handled in order. Frame durations are respected when decoding is fast enough;
 slow decoding reduces the display rate. Audio is not played. This mode cannot be
@@ -517,10 +517,10 @@ all four language implementations. The C, Go, and Rust decoders are also checked
 with one and four threads.
 
 `--threads N` sets the requested decoder worker count in all four implementations
-and defaults to the number of available processors. With `--readahead`, up to
+and defaults to the number of available processors. With `--readahead true`, up to
 `N - 1` closed GOPs run ahead while the current GOP retains foreground
 processing. The lookahead count is reduced when a whole-GOP frame cache cannot
-fit in half of the available memory. Without `--readahead`, Python and C++
+fit in half of the available memory. With `--readahead false`, Python and C++
 reserve the thread count for parallel decoder work. Go and Rust also use it for
 macroblock reconstruction and deblocking.
 `--verbose` enables decoder progress and diagnostic output; without it, the tool

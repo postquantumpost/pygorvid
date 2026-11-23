@@ -304,7 +304,12 @@ fn parse_args(
     let mut read_all = false;
     let mut hash_frames = false;
     let mut slideshow = false;
-    let mut readahead = false;
+    let mut readahead = true;
+    let parse_readahead = |value: &str| match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err("--readahead must be true or false".to_string()),
+    };
     let mut verbose = false;
     let parse_threads = |value: &str| {
         value
@@ -351,7 +356,13 @@ fn parse_args(
         } else if arg == "--slideshow" {
             slideshow = true;
         } else if arg == "--readahead" {
-            readahead = true;
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| "--readahead requires true or false".to_string())?;
+            readahead = parse_readahead(value)?;
+        } else if let Some(value) = arg.strip_prefix("--readahead=") {
+            readahead = parse_readahead(value)?;
         } else if arg == "--verbose" {
             verbose = true;
         } else if let Some(value) = arg.strip_prefix("--input=") {
@@ -395,7 +406,7 @@ fn parse_args(
 
 fn print_usage() {
     eprintln!("       vidprobe --generate OUTPUT.mp4");
-    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--readahead] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
+    eprintln!("usage: vidprobe [--input FILE] [--threads N] [--readahead true|false] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...");
 }
 
 #[cfg(not(feature = "slideshow"))]
@@ -920,6 +931,7 @@ mod tests {
             run(vec![
                 "--readall".into(),
                 "--readahead".into(),
+                "true".into(),
                 "--threads".into(),
                 "4".into(),
                 input.display().to_string(),
@@ -997,7 +1009,18 @@ mod tests {
         assert!(!parse_args(&args(&["a.mp4"])).unwrap().9);
         assert!(parse_args(&args(&["--verbose", "a.mp4"])).unwrap().9);
         assert!(parse_args(&args(&["--hash", "a.mp4"])).unwrap().6);
-        assert!(parse_args(&args(&["--readahead", "a.mp4"])).unwrap().8);
+        assert!(parse_args(&args(&["a.mp4"])).unwrap().8);
+        assert!(
+            parse_args(&args(&["--readahead", "true", "a.mp4"]))
+                .unwrap()
+                .8
+        );
+        assert!(parse_args(&args(&["--readahead", "invalid", "a.mp4"])).is_err());
+        assert!(
+            !parse_args(&args(&["--readahead", "false", "a.mp4"]))
+                .unwrap()
+                .8
+        );
     }
 
     #[test]

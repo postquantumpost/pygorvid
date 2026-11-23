@@ -45,7 +45,7 @@ def test_readahead_matches_sequential_closed_gop_decoding(
     assert main(["--readall", "--hash", "--threads", "2", str(video)]) == 0
     sequential = capsys.readouterr().out
     assert main([
-        "--readall", "--hash", "--readahead", "--threads", "2", str(video),
+        "--readall", "--hash", "--readahead", "true", "--threads", "2", str(video),
     ]) == 0
     readahead = capsys.readouterr().out
     assert readahead == sequential
@@ -77,11 +77,35 @@ def test_readahead_is_forwarded_to_python_decoder(monkeypatch):
     assert cli._read_all_frames("fake.mp4", readahead=True) == 0
 
 
+def test_readahead_false_is_forwarded_to_python_decoder(monkeypatch):
+    from pygorvid import cli
+
+    class FakeReader:
+        sample_count = 0
+
+        def __init__(self, path):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeDecoder:
+        def __init__(self, reader, **options):
+            assert options["readahead"] is False
+
+        def decode_sequential_frames(self, indices):
+            return iter(())
+
+    monkeypatch.setattr(cli, "VideoSampleReader", FakeReader)
+    monkeypatch.setattr(cli, "create_decoder", FakeDecoder)
+    assert cli._read_all_frames("fake.mp4", readahead=False) == 0
+
+
 def test_readahead_ignores_file_without_multiple_closed_gops(capsys):
     assert main(["--readall", "--hash", str(FIXTURE)]) == 0
     sequential = capsys.readouterr().out
     assert main([
-        "--readall", "--hash", "--readahead", "--threads", "3", str(FIXTURE),
+        "--readall", "--hash", "--readahead", "true", "--threads", "3", str(FIXTURE),
     ]) == 0
     assert capsys.readouterr().out == sequential
 

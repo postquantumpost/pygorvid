@@ -18,7 +18,7 @@ struct DecodedVideoFrame {
 
 struct VideoDecodeOptions {
     std::size_t threads = 0;
-    bool readahead = false;
+    bool readahead = true;
     std::optional<std::size_t> presentation_frame;
 };
 

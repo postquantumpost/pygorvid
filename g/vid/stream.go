@@ -30,7 +30,9 @@ type VideoStreamDecoder struct {
 }
 
 func NewVideoStreamDecoder(input string) *VideoStreamDecoder {
-	return &VideoStreamDecoder{input: input, threads: DefaultDecoderThreads()}
+	return &VideoStreamDecoder{
+		input: input, threads: DefaultDecoderThreads(), readahead: true,
+	}
 }
 
 func (decoder *VideoStreamDecoder) SetThreads(threads int) {

@@ -638,7 +638,7 @@ class H264Decoder:
         checkpoint_dir: Optional[str | Path] = None,
         threads: Optional[int] = None,
         frame_cache_size: int = 8,
-        readahead: bool = False,
+        readahead: bool = True,
         decode_yield_callback: Optional[Callable[[], None]] = None,
     ):
         if threads is not None and (

@@ -18,6 +18,15 @@ from .videosamplereader import VideoSampleReader
 from .vidfile import openfile
 
 
+def _boolean(value: str) -> bool:
+    normalized = value.lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise argparse.ArgumentTypeError("must be true or false")
+
+
 def _generation_metadata() -> Mp4Metadata:
     return Mp4Metadata(
         title="Title", artist="Artist", album="Album", publisher="Publisher",
@@ -100,7 +109,7 @@ def _extract_frame(
 
 def _read_all_frames(
     input_path: str, threads: int = 1, verbose: bool = False,
-    hash_frames: bool = False, readahead: bool = False,
+    hash_frames: bool = False, readahead: bool = True,
 ) -> int:
     reader = VideoSampleReader(input_path)
     try:
@@ -108,8 +117,7 @@ def _read_all_frames(
             "threads": threads,
             "debug_progress": verbose,
         }
-        if readahead:
-            decoder_options["readahead"] = True
+        decoder_options["readahead"] = readahead
         decoder = create_decoder(reader, **decoder_options)
         for index, frame in decoder.decode_sequential_frames(
             range(reader.sample_count)
@@ -133,7 +141,7 @@ def _read_all_frames(
 
 def _slideshow(
     input_path: str, threads: int = 1, verbose: bool = False,
-    readahead: bool = False,
+    readahead: bool = True,
 ) -> int:
     from .slideshow import SlideshowWindow
 
@@ -145,8 +153,7 @@ def _slideshow(
                 "threads": threads,
                 "debug_progress": verbose,
             }
-            if readahead:
-                decoder_options["readahead"] = True
+            decoder_options["readahead"] = readahead
             decoder = create_decoder(reader, **decoder_options)
             if reader.configuration is None:
                 raise Mp4FormatError("video configuration is unavailable")
@@ -201,7 +208,13 @@ def main(argv=None) -> int:
     parser.add_argument("--output", help="output image path (.png or .jpg)")
     parser.add_argument("--prefix", help="prefix prepended to the output filename")
     parser.add_argument("--readall", action="store_true", help="decode all video frames without writing images")
-    parser.add_argument("--readahead", action="store_true", help="decode upcoming closed GOPs ahead in order (Python)")
+    parser.add_argument(
+        "--readahead",
+        type=_boolean,
+        default=True,
+        metavar="true|false",
+        help="decode upcoming closed GOPs ahead in order (default: true)",
+    )
     parser.add_argument("--hash", action="store_true", help="print SHA-256 hashes for frames decoded by --readall or --extractframe")
     parser.add_argument("--slideshow", action="store_true", help="display decoded frames in an SDL2 window")
     parser.add_argument("--verbose", action="store_true", help="print decoder progress and debug information")

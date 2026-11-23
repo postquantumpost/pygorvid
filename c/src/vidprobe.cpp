@@ -40,14 +40,14 @@ struct Options {
     bool read_all = false;
     bool hash_frames = false;
     bool slideshow = false;
-    bool readahead = false;
+    bool readahead = true;
     std::size_t threads = std::max<std::size_t>(
         1, std::thread::hardware_concurrency());
 };
 
 void usage() {
     std::cerr << "       vidprobe --generate OUTPUT.mp4\n";
-    std::cerr << "usage: vidprobe [--threads N] [--readahead] [--hash] [--slideshow | --readall | "
+    std::cerr << "usage: vidprobe [--threads N] [--readahead true|false] [--hash] [--slideshow | --readall | "
                  "--extractframe INDEX --output IMAGE] [--prefix TEXT] "
                  "[--input FILE] FILE...\n";
 }
@@ -69,12 +69,19 @@ std::size_t parse_thread_count(const std::string& value) {
     if (value.empty() || value.front() == '-') {
         throw std::invalid_argument("--threads requires a positive integer");
     }
+
     std::size_t parsed_characters = 0;
     const auto parsed = std::stoull(value, &parsed_characters);
     if (parsed_characters != value.size() || parsed == 0) {
         throw std::invalid_argument("--threads requires a positive integer");
     }
     return parsed;
+}
+
+bool parse_boolean(const std::string& option, const std::string& value) {
+    if (value == "true") return true;
+    if (value == "false") return false;
+    throw std::invalid_argument(option + " requires true or false");
 }
 
 std::string prefixed_output_path(const std::string& output_path,
@@ -276,7 +283,14 @@ Options parse_options(const std::vector<std::string>& args) {
         } else if (arg == "--slideshow") {
             options.slideshow = true;
         } else if (arg == "--readahead") {
-            options.readahead = true;
+            if (++index == args.size()) {
+                throw std::invalid_argument("--readahead requires true or false");
+            }
+            options.readahead =
+                parse_boolean("--readahead", args[index]);
+        } else if (arg.rfind("--readahead=", 0) == 0) {
+            options.readahead =
+                parse_boolean("--readahead", arg.substr(12));
         } else if (arg == "--threads") {
             if (++index == args.size()) {
                 throw std::invalid_argument("--threads requires a positive integer");

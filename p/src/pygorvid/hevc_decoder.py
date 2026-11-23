@@ -9,7 +9,7 @@ from .codec_frame import Yuv420Frame
 class HEVCDecoder:
     def __init__(
         self, sample_reader=None, *, threads=None, debug_progress=False,
-        readahead=False,
+        readahead=True,
     ):
         self.sample_reader = sample_reader
         self.licensed = os.environ.get("HEVC_IS_LICENSED") == "true"

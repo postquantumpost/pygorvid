@@ -17,6 +17,26 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+type boolValue struct {
+	value *bool
+}
+
+func (value boolValue) String() string {
+	return fmt.Sprint(*value.value)
+}
+
+func (value boolValue) Set(raw string) error {
+	switch strings.ToLower(raw) {
+	case "true":
+		*value.value = true
+	case "false":
+		*value.value = false
+	default:
+		return errors.New("must be true or false")
+	}
+	return nil
+}
+
 func generationMetadata() vid.Mp4Metadata {
 	return vid.Mp4Metadata{
 		Title: "Title", Artist: "Artist", Album: "Album", Publisher: "Publisher",
@@ -41,7 +61,8 @@ func run(args []string) int {
 	hashFrames := flags.Bool("hash", false, "print SHA-256 hashes for frames decoded by --readall or --extractframe")
 	slideshow := flags.Bool("slideshow", false, "display decoded frames in a window")
 	verbose := flags.Bool("verbose", false, "print decoder progress and debug information")
-	readahead := flags.Bool("readahead", false, "decode upcoming closed GOPs ahead in order")
+	readahead := true
+	flags.Var(boolValue{value: &readahead}, "readahead", "decode upcoming closed GOPs ahead in order (true or false)")
 	prefix := flags.String("prefix", "", "prefix prepended to the output filename")
 	threads := flags.Int("threads", vid.DefaultDecoderThreads(), "number of decoder threads")
 	if err := flags.Parse(flagsFirst(args)); err != nil {
@@ -152,7 +173,7 @@ func run(args []string) int {
 	status := 0
 	for _, p := range paths {
 		if *slideshow {
-			count, err := showSlideshow(p, *threads, *verbose, *readahead)
+			count, err := showSlideshow(p, *threads, *verbose, readahead)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -162,7 +183,7 @@ func run(args []string) int {
 			continue
 		}
 		if *readAll {
-			count, err := readAllFrames(p, *threads, *verbose, *hashFrames, *readahead)
+			count, err := readAllFrames(p, *threads, *verbose, *hashFrames, readahead)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", p, err)
 				status = 1
@@ -223,7 +244,7 @@ func flagsFirst(args []string) []string {
 			paths = append(paths, args[i:]...)
 			break
 		}
-		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" || arg == "--generate" {
+		if arg == "--input" || arg == "--output" || arg == "--extractframe" || arg == "--prefix" || arg == "--threads" || arg == "--generate" || arg == "--readahead" {
 			options = append(options, arg)
 			if i+1 < len(args) {
 				i++
@@ -242,14 +263,14 @@ func flagsFirst(args []string) []string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "       vidprobe --generate OUTPUT.mp4")
-	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--readahead] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
+	fmt.Fprintln(os.Stderr, "usage: vidprobe [--input FILE] [--threads N] [--readahead true|false] [--verbose] [--hash] [--slideshow | --readall | --extractframe INDEX --output IMAGE [--prefix TEXT]] FILE...")
 }
 
 func readAllFrames(input string, threads int, verbose, hashFrames bool, readaheadOption ...bool) (int, error) {
 	decoder := vid.NewVideoStreamDecoder(input)
 	decoder.SetThreads(threads)
 	decoder.SetVerbose(verbose)
-	decoder.SetReadahead(len(readaheadOption) != 0 && readaheadOption[0])
+	decoder.SetReadahead(len(readaheadOption) == 0 || readaheadOption[0])
 	consume := func(result vid.StreamFrame) error {
 		if !hashFrames {
 			return nil

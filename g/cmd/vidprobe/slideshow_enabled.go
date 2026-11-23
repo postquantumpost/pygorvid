@@ -135,7 +135,7 @@ func showSlideshow(input string, threads int, verbose bool, readaheadOption ...b
 	decoder := vid.NewVideoStreamDecoder(input)
 	decoder.SetThreads(threads)
 	decoder.SetVerbose(verbose)
-	decoder.SetReadahead(len(readaheadOption) != 0 && readaheadOption[0])
+	decoder.SetReadahead(len(readaheadOption) == 0 || readaheadOption[0])
 	count, err := decoder.Decode(consume)
 	if err != nil {
 		if errors.Is(err, errSlideshowClosed) {
