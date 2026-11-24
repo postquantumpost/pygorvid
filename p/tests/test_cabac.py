@@ -1914,6 +1914,89 @@ def test_inter_macroblock_decodes_b8x8_direct_subtypes_from_slice_input():
     assert result.cb == (66,) * 64 and result.cr == (66,) * 64
 
 
+def test_inter_macroblock_reconstructs_b_direct_16x16_per_8x8_inference():
+    from pygorvid.reconstruction import ColocatedMotionFact
+
+    slice_contexts = initialize_slice_contexts(1, 0, 26)
+    encoder_contexts = [
+        _model(model._state_index, model._value_mps)
+        for model in slice_contexts
+    ]
+    encoder = _TestEncoder()
+    symbols, encode_mb_type = _inter_mb_type_symbols(1, 0)
+    encode_mb_type(encoder, encoder_contexts, symbols[0])
+
+    samples = bytes(column for _ in range(16) for column in range(16))
+    frame = Yuv420Frame(16, 16, 16, 8, 8, samples, bytes(64), bytes(64))
+    reference = CABACBReferencePicture(frame, 0)
+    candidate = MotionVectorCandidate(0, MotionVector(4, 0))
+    neighbors = CABACInterPartitionNeighbors(
+        list0=CABACInterListNeighbors(
+            left_candidate=candidate,
+            top_candidate=candidate,
+            top_right_candidate=candidate,
+            top_left_candidate=candidate,
+        ),
+        list1=CABACInterListNeighbors(
+            left_candidate=candidate,
+            top_candidate=candidate,
+            top_right_candidate=candidate,
+            top_left_candidate=candidate,
+        ),
+    )
+    colocated = [
+        ColocatedMotionFact(0, MotionVector(4, 0)) for _ in range(16)
+    ]
+    colocated[0] = ColocatedMotionFact(0, MotionVector(0, 0))
+    direct_input = CABACBDirectMacroblockInput(
+        slice_type=1,
+        direct_spatial=True,
+        list0_references=(reference,),
+        list1_references=(reference,),
+        colocated_motion_field=tuple(colocated),
+        direct_8x8_inference=True,
+    )
+    input = CABACInterMacroblockInput(
+        slice_type=1,
+        macroblock_x=0,
+        macroblock_y=0,
+        left_available=False,
+        top_available=False,
+        reference_lists=((reference,), (reference,)),
+        partition_neighbors=(
+            neighbors,
+            *(CABACInterPartitionNeighbors() for _ in range(15)),
+        ),
+    )
+    decoder_contexts = [
+        _model(model._state_index, model._value_mps)
+        for model in slice_contexts
+    ]
+
+    result = CABACArithmeticDecoder(encoder.data())._decode_inter_macroblock(
+        input,
+        None,
+        decoder_contexts,
+        Yuv420FrameBuilder(1, 1),
+        0,
+        direct_input,
+    )
+
+    assert [
+        (part.x, part.y, part.width, part.height, part.motion_vectors)
+        for part in result.partitions
+    ] == [
+        (0, 0, 8, 8, ((0, 0), (0, 0))),
+        (8, 0, 8, 8, ((4, 0), (4, 0))),
+        (0, 8, 8, 8, ((4, 0), (4, 0))),
+        (8, 8, 8, 8, ((4, 0), (4, 0))),
+    ]
+    assert result.luma[:8] == tuple(range(8))
+    assert result.luma[8:16] == (*range(9, 16), 15)
+    assert result.luma[16:24] == tuple(range(8))
+    assert result.luma[24:32] == (*range(9, 16), 15)
+
+
 def test_spatial_b_direct_uses_colocated_motion_for_each_inferred_8x8_region():
     from pygorvid.cabac import _derive_spatial_b_direct_partition
     from pygorvid.reconstruction import ColocatedMotionFact

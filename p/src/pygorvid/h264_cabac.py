@@ -3705,6 +3705,80 @@ class CABACArithmeticDecoder:
                 )
             )
 
+        if (
+            is_b_slice
+            and macroblock_type == 0
+            and direct_input is not None
+            and (
+                residual_input.direct_8x8_inference_flag
+                if residual_input is not None
+                else direct_input.direct_8x8_inference
+            )
+        ):
+            job_frames = []
+            job_partitions = []
+            direct_partition_results = []
+            neighbors = neighbors_for_partition(0)
+            for y in (0, 8):
+                for x in (0, 8):
+                    prediction = _derive_spatial_b_direct_partition(
+                        direct_input, neighbors, x, y, True
+                    )
+                    selected = []
+                    for list_index, active in enumerate(
+                        prediction.prediction_flags
+                    ):
+                        if not active:
+                            selected.append(None)
+                            continue
+                        reference = input.reference_lists[list_index][
+                            prediction.reference_indices[list_index]
+                        ].frame
+                        if not any(
+                            reference is frame for frame in job_frames
+                        ):
+                            job_frames.append(reference)
+                        frame_index = next(
+                            index
+                            for index, frame in enumerate(job_frames)
+                            if frame is reference
+                        )
+                        selected.append((
+                            frame_index,
+                            prediction.motion_vectors[list_index],
+                        ))
+                    weights = input.weighting.select(
+                        prediction.reference_indices,
+                        (
+                            input.reference_lists[0][
+                                prediction.reference_indices[0]
+                            ]
+                            if prediction.prediction_flags[0]
+                            else None,
+                            input.reference_lists[1][
+                                prediction.reference_indices[1]
+                            ]
+                            if prediction.prediction_flags[1]
+                            else None,
+                        ),
+                    )
+                    job_partitions.append(
+                        (x, y, 8, 8, tuple(selected), weights)
+                    )
+                    direct_partition_results.append(
+                        CABACInterMacroblockPartition(
+                            x,
+                            y,
+                            8,
+                            8,
+                            tuple(prediction.prediction_flags),
+                            tuple(prediction.reference_indices),
+                            tuple(prediction.motion_vectors),
+                            ((0, 0), (0, 0)),
+                        )
+                    )
+            partition_results = direct_partition_results
+
         residual = _InterResidual()
         residual_result = (0, 0, False, 0, 26, (), (False, False), ((False,) * 4, (False,) * 4), (False,) * 4)
         if residual_input is not None:
