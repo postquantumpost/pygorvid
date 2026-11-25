@@ -1810,7 +1810,7 @@ func TestReconstructLumaIntra4x4MacroblockDispatchesAndPlacesScanBlocks(t *testi
 }
 
 func TestDeriveChromaQPCMatchesTable815(t *testing.T) {
-	qpcForQPI := [22]int{29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39}
+	qpcForQPI := [22]int{29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39}
 	for qpy := 0; qpy <= 51; qpy++ {
 		want := qpy
 		if qpy >= 30 {

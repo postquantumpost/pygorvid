@@ -1742,7 +1742,7 @@ var inverseScale4x4Factors = [6][3]int64{
 
 var chromaQPCFromQPI = [22]uint8{
 	29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
-	36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+	36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39,
 }
 
 var inverseScale8x8Factors = [6][6]int64{

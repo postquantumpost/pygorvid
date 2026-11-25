@@ -3,10 +3,14 @@ set -x
 
 for f in samples/*.mp4
 do
-    ./pygorvid --readall --hash --input $f
-    for l in c r g p
-    do
+    if [ -f "${f}.e0c" ];then
+        echo already did ${f}
+    else
+        ./pygorvid --readall --hash --input $f
         sum e0?
-        mv "e0${l}" "${f}.e0${l}"
-    done
+        for l in c r g p
+        do
+            mv "e0${l}" "${f}.e0${l}"
+        done
+    fi
 done

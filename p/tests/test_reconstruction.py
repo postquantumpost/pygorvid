@@ -1586,7 +1586,7 @@ def test_inverse_scale_luma4x4_qp_vectors(qpy, expected):
 def test_derive_chroma_qpc_matches_table_8_15():
     qpc_from_qpi = (
         29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
-        36, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+        36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39,
     )
     for qpy in range(52):
         expected = qpy if qpy < 30 else qpc_from_qpi[qpy - 30]
