@@ -435,7 +435,9 @@ pool and idle buffers are freed when memory becomes low. Python uses at most
 estimated decoded-frame cache would not fit in half of the available memory.
 `--threads_readahead` defaults to the integer floor of 80% of `--threads`,
 including when `--threads` is supplied on the command line. A value of zero
-disables future GOP workers.
+disables future GOP workers. During readahead, the budget counts the foreground
+GOP plus future GOPs, and each active GOP uses one decoder thread; `--threads`
+is not multiplied by the number of GOP workers.
 Files without multiple closed GOPs use normal sequential decoding. Go and
 Rust transfer owned frame buffers through in-process channels, while C++
 transfers completed GOP frame values through futures; these native paths do not
@@ -523,7 +525,8 @@ with one and four threads.
 and defaults to the number of available processors. `--threads_readahead M`
 sets the readahead thread budget and defaults to `floor(N * 0.8)`. With
 `--readahead true`, up to `M - 1` closed GOPs run ahead while the current GOP retains foreground
-processing. The lookahead count is reduced when a whole-GOP frame cache cannot
+processing. Each active GOP uses one decoder thread, so the budget is not
+multiplied by `N`. The lookahead count is reduced when a whole-GOP frame cache cannot
 fit in half of the available memory. With `--readahead false`, Python and C++
 reserve the thread count for parallel decoder work. Go and Rust also use it for
 macroblock reconstruction and deblocking.

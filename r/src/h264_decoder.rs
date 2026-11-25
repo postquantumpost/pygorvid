@@ -1009,20 +1009,20 @@ impl H264Decoder {
         for group_index in 1..=worker_limit {
             jobs.insert(
                 group_index,
-                Self::spawn_h264_gop(
-                    path.clone(),
-                    &groups[group_index],
-                    self.threads(),
-                    self.verbose,
-                )?,
+                Self::spawn_h264_gop(path.clone(), &groups[group_index], self.verbose)?,
             );
         }
         let mut next_group = worker_limit + 1;
         let mut consumed = 0;
+        let reader =
+            crate::VideoSampleReader::open(path.clone()).map_err(|error| error.to_string())?;
+        let mut foreground = H264Decoder::new(reader);
+        foreground.set_threads(1);
+        foreground.set_verbose(self.verbose);
         for (group_index, frames) in groups.iter().enumerate() {
             if group_index == 0 {
                 for &index in frames {
-                    let frame = self
+                    let frame = foreground
                         .decode_frame(index as u64)
                         .map_err(|error| format!("decode frame {index}: {error}"))?;
                     consume(self.decoded_video_frame(index, frame)?)?;
@@ -1042,12 +1042,7 @@ impl H264Decoder {
             if group_index > 0 && next_group < groups.len() {
                 jobs.insert(
                     next_group,
-                    Self::spawn_h264_gop(
-                        path.clone(),
-                        &groups[next_group],
-                        self.threads(),
-                        self.verbose,
-                    )?,
+                    Self::spawn_h264_gop(path.clone(), &groups[next_group], self.verbose)?,
                 );
                 next_group += 1;
             }
@@ -1123,7 +1118,6 @@ impl H264Decoder {
     fn spawn_h264_gop(
         path: PathBuf,
         frames: &[usize],
-        threads: usize,
         verbose: bool,
     ) -> Result<Receiver<Result<Vec<(usize, crate::Yuv420Frame)>, String>>, String> {
         let frames = frames.to_vec();
@@ -1134,7 +1128,7 @@ impl H264Decoder {
                 let reader =
                     crate::VideoSampleReader::open(path).map_err(|error| error.to_string())?;
                 let mut decoder = H264Decoder::new(reader);
-                decoder.set_threads(threads);
+                decoder.set_threads(1);
                 decoder.set_verbose(verbose);
                 Ok(decoder)
             })();

@@ -23,6 +23,8 @@ struct VideoDecodeOptions {
     std::optional<std::size_t> threads_readahead;
 };
 
+std::size_t default_readahead_threads(std::size_t threads);
+
 class VideoDecoder {
 public:
     explicit VideoDecoder(std::string path);

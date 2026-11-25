@@ -6,6 +6,7 @@
 #include "pygorvid/png.hpp"
 #include "pygorvid/video_samples.hpp"
 #include "pygorvid/av1.hpp"
+#include "pygorvid/decoder.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2513,6 +2514,11 @@ void test_video_sample_reader() {
 } // namespace
 
 int main() {
+    assert(pygorvid::default_readahead_threads(0) == 0);
+    assert(pygorvid::default_readahead_threads(1) == 0);
+    assert(pygorvid::default_readahead_threads(3) == 2);
+    assert(pygorvid::default_readahead_threads(9) == 7);
+    assert(pygorvid::default_readahead_threads(10) == 8);
     test_cabac_arithmetic_engine();
     test_h264_nal_utilities();
     test_h264_parameter_sets();

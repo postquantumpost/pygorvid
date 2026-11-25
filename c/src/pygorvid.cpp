@@ -1954,8 +1954,7 @@ std::vector<std::pair<std::size_t, std::size_t>> closed_gop_ranges(
 }
 
 std::vector<DecodedFrame> decode_gop_range(
-    const std::string& input_path, std::size_t threads,
-    std::size_t start, std::size_t end,
+    const std::string& input_path, std::size_t start, std::size_t end,
     std::promise<void>* started = nullptr) {
     if (started) {
         VideoSampleReader reader;
@@ -1972,8 +1971,7 @@ std::vector<DecodedFrame> decode_gop_range(
         [&frames](std::size_t index, pygorvid::Yuv420Frame&& frame) {
             frames.emplace_back(index, std::move(frame));
         };
-    (void)decode_video(
-        input_path, std::nullopt, threads, start, end, consumer);
+    (void)decode_video(input_path, std::nullopt, 1, start, end, consumer);
     std::sort(frames.begin(), frames.end(),
               [](const auto& left, const auto& right) {
                   return left.first < right.first;
@@ -2063,8 +2061,7 @@ std::size_t decode_readahead(
         auto started = std::make_shared<std::promise<void>>();
         auto ready = started->get_future();
         jobs.emplace(group, std::async(std::launch::async, [&, group, started] {
-            return decode_gop_range(input_path, threads,
-                                    ranges[group].first,
+            return decode_gop_range(input_path, ranges[group].first,
                                     ranges[group].second, started.get());
         }));
         ready.get();
@@ -2090,7 +2087,7 @@ std::size_t decode_readahead(
                 [&](std::size_t index, Yuv420Frame&& frame) {
                     receive(index, std::move(frame));
                 };
-            (void)decode_video(input_path, std::nullopt, threads,
+            (void)decode_video(input_path, std::nullopt, 1,
                                ranges[group].first, ranges[group].second,
                                forward);
         } else {
@@ -2106,6 +2103,10 @@ std::size_t decode_readahead(
 }
 
 } // namespace
+
+std::size_t default_readahead_threads(std::size_t threads) {
+    return threads / 5 * 4 + threads % 5 * 4 / 5;
+}
 
 VideoDecoder::VideoDecoder(std::string path) : path_(std::move(path)) {}
 
@@ -2143,7 +2144,7 @@ std::size_t VideoDecoder::decode(
         } else if (options.readahead) {
             const auto threads_readahead =
                 options.threads_readahead.value_or(
-                    threads / 5 * 4 + threads % 5 * 4 / 5);
+                    default_readahead_threads(threads));
             (void)decode_readahead(
                 path_, threads, threads_readahead, emit);
         } else {

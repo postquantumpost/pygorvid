@@ -286,7 +286,6 @@ def _pack_frame_into_shared_memory(
 def _decode_closed_gop(
     path: str,
     presentation_indices: Sequence[int],
-    threads: int,
     debug_progress: bool,
     priority: int,
     priority_connection,
@@ -299,7 +298,7 @@ def _decode_closed_gop(
         try:
             decoder = H264Decoder(
                 reader,
-                threads=threads,
+                threads=1,
                 debug_progress=debug_progress,
                 decode_yield_callback=priority_control.yield_for_priority,
             )
@@ -935,7 +934,6 @@ class H264Decoder:
                     args=(
                         str(path),
                         groups[group_position][0],
-                        self.threads,
                         self.debug_progress,
                         priority,
                         priority_child,
@@ -1076,6 +1074,8 @@ class H264Decoder:
             raise
 
         def stream():
+            configured_threads = self.threads
+            self.threads = 1
             try:
                 first_closed_group = closed_groups[0]
                 for group_position in range(first_closed_group):
@@ -1131,6 +1131,7 @@ class H264Decoder:
                     fill_jobs(closed_position)
                     wait_for_job_readiness()
             finally:
+                self.threads = configured_threads
                 for (
                     process,
                     priority_connection,
