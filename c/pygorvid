@@ -2,6 +2,6 @@
 set -ex
 #./tmp/cmake-debug/vidprobe "$@"
 
-cmake -S c -B tmp/cmake-release -DCMAKE_BUILD_TYPE=Release -DPYGORVID_SLIDESHOW="${PYGORVID_SLIDESHOW:-ON}"
-cmake --build tmp/cmake-release
+cmake -S c -B tmp/cmake-release -DCMAKE_BUILD_TYPE=Release -DPYGORVID_SLIDESHOW="${PYGORVID_SLIDESHOW:-ON}" 1>&2 
+cmake --build tmp/cmake-release 1>&2 
 ./tmp/cmake-release/vidprobe "$@"

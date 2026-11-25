@@ -46,7 +46,7 @@ set -x
 #diff e0g ew1_good_hashes
 
 #./pygorvid --slideshow --input samples/samp3.mp4
-#./pygorvid --slideshow --input samples/ew1.mp4
+./pygorvid --slideshow --input samples/ew1.mp4
 #./pygorvid --slideshow --readahead --input samples/samp3.mp4
 #./pygorvid --slideshow --readahead --input samples/ew1.mp4
 
@@ -57,4 +57,4 @@ set -x
 #./pygorvid --readall --input samples/drone2_320x240.mp4
 #./pygorvid --slideshow --readahead --input samples/drone2_320x240.mp4
 #./pygorvid --readall --hash --readahead --input samples/drone2_320x240.mp4
-./pygorvid --readall --hash --input samples/drone1_320x240.mp4
+#./pygorvid --readall --hash --input samples/drone1_320x240.mp4

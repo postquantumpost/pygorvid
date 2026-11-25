@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -x
+
+for f in samples/*.mp4
+do
+    ./pygorvid --readall --hash --input $f
+    for l in c r g p
+    do
+        sum e0?
+        mv "e0${l}" "${f}.e0${l}"
+    done
+done

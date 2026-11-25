@@ -1339,7 +1339,7 @@ std::size_t decode_video(
     std::vector<std::uint32_t> reference_frame_nums;
     std::vector<std::optional<std::uint32_t>>
         reference_long_term_frame_idxs;
-    std::vector<std::int64_t> reference_picture_order;
+    std::vector<std::int64_t> reference_picture_order_counts;
     std::int64_t previous_poc_msb = 0;
     std::int64_t previous_poc_lsb = 0;
     std::uint32_t previous_poc_frame_num = 0;
@@ -1501,7 +1501,7 @@ std::size_t decode_video(
             reference_frames.clear();
             reference_frame_nums.clear();
             reference_long_term_frame_idxs.clear();
-            reference_picture_order.clear();
+            reference_picture_order_counts.clear();
             maximum_long_term_frame_idx =
                 idr_header->long_term_reference
                     ? std::optional<std::uint32_t>{0}
@@ -1545,9 +1545,11 @@ std::size_t decode_video(
                  ++index) {
                 if (reference_long_term_frame_idxs[index]) {
                     long_term.push_back(index);
-                } else if (reference_picture_order[index] < sample.pts_ticks) {
+                } else if (reference_picture_order_counts[index] <
+                           current_picture_order_count) {
                     before.push_back(index);
-                } else if (reference_picture_order[index] == sample.pts_ticks) {
+                } else if (reference_picture_order_counts[index] ==
+                           current_picture_order_count) {
                     equal.push_back(index);
                 } else {
                     after.push_back(index);
@@ -1555,13 +1557,13 @@ std::size_t decode_video(
             }
             std::sort(before.begin(), before.end(),
                       [&](std::size_t left, std::size_t right) {
-                          return reference_picture_order[left] >
-                                 reference_picture_order[right];
+                          return reference_picture_order_counts[left] >
+                                 reference_picture_order_counts[right];
                       });
             std::sort(after.begin(), after.end(),
                       [&](std::size_t left, std::size_t right) {
-                          return reference_picture_order[left] <
-                                 reference_picture_order[right];
+                          return reference_picture_order_counts[left] <
+                                 reference_picture_order_counts[right];
                       });
             std::sort(long_term.begin(), long_term.end(),
                       [&](std::size_t left, std::size_t right) {
@@ -1740,8 +1742,8 @@ std::size_t decode_video(
                     reference_long_term_frame_idxs.erase(
                         reference_long_term_frame_idxs.begin() +
                         static_cast<std::ptrdiff_t>(index));
-                    reference_picture_order.erase(
-                        reference_picture_order.begin() +
+                    reference_picture_order_counts.erase(
+                        reference_picture_order_counts.begin() +
                         static_cast<std::ptrdiff_t>(index));
                 };
                 const auto short_term_index =
@@ -1844,7 +1846,7 @@ std::size_t decode_video(
                         reference_frames.clear();
                         reference_frame_nums.clear();
                         reference_long_term_frame_idxs.clear();
-                        reference_picture_order.clear();
+                        reference_picture_order_counts.clear();
                         maximum_long_term_frame_idx.reset();
                         stored_frame_num = 0;
                         current_long_term_frame_idx.reset();
@@ -1904,8 +1906,8 @@ std::size_t decode_video(
                     reference_long_term_frame_idxs.erase(
                         reference_long_term_frame_idxs.begin() +
                         static_cast<std::ptrdiff_t>(*oldest_index));
-                    reference_picture_order.erase(
-                        reference_picture_order.begin() +
+                    reference_picture_order_counts.erase(
+                        reference_picture_order_counts.begin() +
                         static_cast<std::ptrdiff_t>(*oldest_index));
                 }
             }
@@ -1915,7 +1917,8 @@ std::size_t decode_video(
             reference_frame_nums.push_back(stored_frame_num);
             reference_long_term_frame_idxs.push_back(
                 current_long_term_frame_idx);
-            reference_picture_order.push_back(sample.pts_ticks);
+            reference_picture_order_counts.push_back(
+                current_picture_order_count);
         }
     }
     if (decoded_count == 0) {
@@ -2154,7 +2157,7 @@ std::size_t VideoDecoder::decode(
 DecodedVideoFrame VideoDecoder::decode_frame(
     std::size_t presentation_index, std::size_t threads) const {
     std::optional<DecodedVideoFrame> result;
-    decode(VideoDecodeOptions{threads, false, presentation_index},
+    decode(VideoDecodeOptions{threads, false, presentation_index, std::nullopt},
            [&](DecodedVideoFrame&& frame) {
                result.emplace(std::move(frame));
                return false;

@@ -551,6 +551,7 @@ void deblock_p_inter_frame(
 void deblock_idr_intra_frame(
     Yuv420Frame& frame, std::uint32_t macroblock_width,
     std::uint32_t macroblock_height, const std::vector<std::int32_t>& qpy,
+    const std::vector<bool>& transform_8x8,
     const std::vector<std::size_t>& slice_ids,
     const std::vector<std::uint8_t>& disable_idc,
     const std::vector<std::int64_t>& alpha_offsets,
@@ -616,10 +617,12 @@ void deblock_idr_intra_frame(
         }
         if (idc != 1) {
             for (const auto edge : {4U, 8U, 12U}) {
-                for (std::uint32_t segment = 0; segment < 4; ++segment) {
-                    filter_edge(mb_x * 16 + edge,
-                                mb_y * 16 + segment * 4, true, 4, 3,
-                                qpy[mb_address], qpy[mb_address], mb_address);
+                if (edge == 8 || !transform_8x8[mb_address]) {
+                    for (std::uint32_t segment = 0; segment < 4; ++segment) {
+                        filter_edge(mb_x * 16 + edge,
+                                    mb_y * 16 + segment * 4, true, 4, 3,
+                                    qpy[mb_address], qpy[mb_address], mb_address);
+                    }
                 }
                 if (edge == 8) {
                     filter_deblocking_edge(
@@ -667,10 +670,12 @@ void deblock_idr_intra_frame(
         }
         if (idc != 1) {
             for (const auto edge : {4U, 8U, 12U}) {
-                for (std::uint32_t segment = 0; segment < 4; ++segment) {
-                    filter_edge(mb_x * 16 + segment * 4,
-                                mb_y * 16 + edge, false, 4, 3,
-                                qpy[mb_address], qpy[mb_address], mb_address);
+                if (edge == 8 || !transform_8x8[mb_address]) {
+                    for (std::uint32_t segment = 0; segment < 4; ++segment) {
+                        filter_edge(mb_x * 16 + segment * 4,
+                                    mb_y * 16 + edge, false, 4, 3,
+                                    qpy[mb_address], qpy[mb_address], mb_address);
+                    }
                 }
                 if (edge == 8) {
                     filter_deblocking_edge(
@@ -3390,7 +3395,8 @@ Yuv420Frame decode_idr_i_frame_impl(
     }
     deblock_idr_intra_frame(
         frame, macroblock_width, macroblock_height, macroblock_qpy,
-        macroblock_slice_ids, macroblock_disable_idc,
+        macroblock_transform_8x8, macroblock_slice_ids,
+        macroblock_disable_idc,
         macroblock_alpha_offsets, macroblock_beta_offsets, pps, threads);
     return crop_decoded_frame(std::move(frame), sps);
 }
