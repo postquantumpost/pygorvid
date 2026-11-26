@@ -9,6 +9,7 @@ add_library(pygorvid STATIC
     src/pygorvid.cpp
     src/h264.cpp
     src/h264_pcm.cpp
+    src/h264_utils.cpp
     src/h264_encoder.cpp
     src/h264_annexb.cpp
     src/mp4_writer.cpp

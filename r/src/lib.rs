@@ -17,6 +17,8 @@ mod h264_annexb;
 mod h264_cavlc;
 mod h264_cavlc_syntax;
 mod h264_mp4;
+#[path = "h264_utils.rs"]
+mod h264_utils;
 mod h264encoder;
 mod hevc_decoder;
 mod hevc_mp4;

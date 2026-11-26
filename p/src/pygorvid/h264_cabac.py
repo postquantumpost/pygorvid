@@ -1737,13 +1737,14 @@ class CABACArithmeticDecoder:
         self._commit_slice_trial(trial, contexts, trial_contexts)
         return result
 
-    def _reconstruct_b_direct_macroblock(
-        self,
+    @staticmethod
+    def _validate_b_direct_macroblock_input(
         input: CABACBDirectMacroblockInput,
         builder,
-        address: int,
-        skipped: bool,
-    ) -> CABACBDirectMacroblockResult:
+    ) -> tuple[
+        tuple[CABACBReferencePicture, ...],
+        tuple[CABACBReferencePicture, ...],
+    ]:
         if not isinstance(input, CABACBDirectMacroblockInput) or input.slice_type % 5 != 1:
             raise CABACError("B_Direct requires a B-slice macroblock input")
         if builder is None:
@@ -1778,11 +1779,7 @@ class CABACArithmeticDecoder:
         ):
             raise CABACError("B_Direct macroblock metadata is invalid")
 
-        from .h264_reconstruction import (
-            MotionVectorCandidate,
-            Yuv420Frame,
-            predict_motion_vector,
-        )
+        from .h264_reconstruction import Yuv420Frame
 
         list0 = input.list0_references
         list1 = input.list1_references
@@ -1803,111 +1800,19 @@ class CABACArithmeticDecoder:
             raise CABACError("B_Direct reference lists are invalid or empty")
         reference_frames = [reference.frame for reference in (*list0, *list1)]
         dimensions = {(frame.width, frame.height) for frame in reference_frames}
-        if len(dimensions) != 1 or any(frame.width <= 0 or frame.height <= 0 for frame in reference_frames):
+        if len(dimensions) != 1 or any(
+            frame.width <= 0 or frame.height <= 0 for frame in reference_frames
+        ):
             raise CABACError("B_Direct reference picture dimensions do not match")
+        return list0, list1
 
-        if input.direct_spatial and input.direct_8x8_inference:
-            neighbors = CABACInterPartitionNeighbors(
-                list0=CABACInterListNeighbors(
-                    left_candidate=input.left_l0_candidate,
-                    top_candidate=input.top_l0_candidate,
-                    top_right_candidate=input.top_right_l0_candidate,
-                    top_left_candidate=input.top_left_l0_candidate,
-                ),
-                list1=CABACInterListNeighbors(
-                    left_candidate=input.left_l1_candidate,
-                    top_candidate=input.top_l1_candidate,
-                    top_right_candidate=input.top_right_l1_candidate,
-                    top_left_candidate=input.top_left_l1_candidate,
-                ),
-            )
-            luma = [0] * 256
-            cb = [0] * 64
-            cr = [0] * 64
-            block_references = [[-1, -1] for _ in range(16)]
-            block_vectors = [((0, 0), (0, 0)) for _ in range(16)]
-            block_flags = [(False, False) for _ in range(16)]
-            first = None
-            for partition_y in (0, 8):
-                for partition_x in (0, 8):
-                    prediction = _derive_spatial_b_direct_partition(
-                        input,
-                        neighbors,
-                        partition_x,
-                        partition_y,
-                        True,
-                    )
-                    if first is None:
-                        first = prediction
-                    selected = tuple(
-                        references[prediction.reference_indices[list_index]].frame
-                        if prediction.prediction_flags[list_index]
-                        else None
-                        for list_index, references in enumerate((list0, list1))
-                    )
-                    weights = input.weighting.select(
-                        prediction.reference_indices,
-                        (
-                            list0[prediction.reference_indices[0]]
-                            if prediction.prediction_flags[0]
-                            else None,
-                            list1[prediction.reference_indices[1]]
-                            if prediction.prediction_flags[1]
-                            else None,
-                        ),
-                    )
-                    part_luma, part_cb, part_cr = _run_reconstruction_job(
-                        "bdirect",
-                        selected,
-                        (
-                            prediction.motion_vectors,
-                            input.macroblock_x,
-                            input.macroblock_y,
-                            weights,
-                        ),
-                        getattr(self, "_timeout_check", None),
-                    )
-                    for row in range(8):
-                        source_y = partition_y + row
-                        for column in range(8):
-                            source_x = partition_x + column
-                            luma[source_y * 16 + source_x] = (
-                                part_luma[source_y * 16 + source_x]
-                            )
-                    for row in range(4):
-                        source_y = partition_y // 2 + row
-                        for column in range(4):
-                            source_x = partition_x // 2 + column
-                            index = source_y * 8 + source_x
-                            cb[index] = part_cb[index]
-                            cr[index] = part_cr[index]
-                    for block_y in range(partition_y // 4, partition_y // 4 + 2):
-                        for block_x in range(partition_x // 4, partition_x // 4 + 2):
-                            block = block_y * 4 + block_x
-                            block_references[block] = list(
-                                prediction.reference_indices
-                            )
-                            block_vectors[block] = tuple(
-                                prediction.motion_vectors
-                            )
-                            block_flags[block] = tuple(
-                                prediction.prediction_flags
-                            )
-            if first is None:
-                raise CABACError("B_Direct 8x8 prediction is incomplete")
-            builder.place_macroblock(address, luma, cb, cr)
-            return CABACBDirectMacroblockResult(
-                skipped,
-                first.reference_indices,
-                first.motion_vectors,
-                first.prediction_flags,
-                tuple(luma),
-                tuple(cb),
-                tuple(cr),
-                tuple(tuple(value) for value in block_references),
-                tuple(block_vectors),
-                tuple(block_flags),
-            )
+    @staticmethod
+    def _derive_b_direct_macroblock_prediction(
+        input: CABACBDirectMacroblockInput,
+        list0: tuple[CABACBReferencePicture, ...],
+        list1: tuple[CABACBReferencePicture, ...],
+    ) -> tuple[tuple[int, int], tuple[tuple[int, int], tuple[int, int]]]:
+        from .h264_reconstruction import MotionVectorCandidate, predict_motion_vector
 
         def candidate_index(candidate) -> int:
             if candidate is None:
@@ -1960,47 +1865,180 @@ class CABACArithmeticDecoder:
                     raise CABACError("B_Direct spatial reference index is unavailable")
                 left, top, top_right = candidates
                 predicted = predict_motion_vector(
-                    ref_index, left, top, top_right, input.top_left_l0_candidate
+                    ref_index, left, top, top_right,
+                    input.top_left_l0_candidate
                     if len(vectors) == 0
                     else input.top_left_l1_candidate,
                 )
                 vectors.append((predicted.x, predicted.y))
-            motion_vectors = (vectors[0], vectors[1])
-        else:
-            col_index = input.colocated_reference_index
-            if col_index < 0:
-                ref_index_l0 = 0
-                colocated_motion = (0, 0)
-            else:
-                col_poc = input.colocated_reference_picture_order_count
-                matching_indices = [
-                    index
-                    for index, reference in enumerate(list0)
-                    if reference.picture_order_count == col_poc
-                ]
-                if not matching_indices:
-                    raise CABACError("B_Direct co-located reference picture is unavailable in list0")
-                ref_index_l0 = matching_indices[0]
-                colocated_motion = input.colocated_motion_vector
-            ref0, ref1 = list0[ref_index_l0], list1[0]
-            td = max(-128, min(127, ref1.picture_order_count - ref0.picture_order_count))
-            if ref0.long_term or td == 0:
-                motion_l0 = colocated_motion
-                motion_l1 = (0, 0)
-            else:
-                tb = max(
-                    -128,
-                    min(127, input.current_picture_order_count - ref0.picture_order_count),
-                )
-                tx = int((16384 + abs(int(td / 2))) / td)
-                scale = max(-1024, min(1023, (tb * tx + 32) >> 6))
-                motion_l0 = tuple((scale * value + 128) >> 8 for value in colocated_motion)
-                motion_l1 = tuple(
-                    value - col_value for value, col_value in zip(motion_l0, colocated_motion)
-                )
-            reference_indices = (ref_index_l0, 0)
-            motion_vectors = (motion_l0, motion_l1)
+            return reference_indices, (vectors[0], vectors[1])
 
+        col_index = input.colocated_reference_index
+        if col_index < 0:
+            ref_index_l0 = 0
+            colocated_motion = (0, 0)
+        else:
+            matching_indices = [
+                index
+                for index, reference in enumerate(list0)
+                if reference.picture_order_count
+                == input.colocated_reference_picture_order_count
+            ]
+            if not matching_indices:
+                raise CABACError(
+                    "B_Direct co-located reference picture is unavailable in list0"
+                )
+            ref_index_l0 = matching_indices[0]
+            colocated_motion = input.colocated_motion_vector
+        ref0, ref1 = list0[ref_index_l0], list1[0]
+        td = max(-128, min(127, ref1.picture_order_count - ref0.picture_order_count))
+        if ref0.long_term or td == 0:
+            motion_l0 = colocated_motion
+            motion_l1 = (0, 0)
+        else:
+            tb = max(
+                -128,
+                min(127, input.current_picture_order_count - ref0.picture_order_count),
+            )
+            tx = int((16384 + abs(int(td / 2))) / td)
+            scale = max(-1024, min(1023, (tb * tx + 32) >> 6))
+            motion_l0 = tuple(
+                (scale * value + 128) >> 8 for value in colocated_motion
+            )
+            motion_l1 = tuple(
+                value - col_value
+                for value, col_value in zip(motion_l0, colocated_motion)
+            )
+        return (ref_index_l0, 0), (motion_l0, motion_l1)
+
+    def _reconstruct_b_direct_8x8_macroblock(
+        self,
+        input: CABACBDirectMacroblockInput,
+        builder,
+        address: int,
+        skipped: bool,
+        list0: tuple[CABACBReferencePicture, ...],
+        list1: tuple[CABACBReferencePicture, ...],
+    ) -> CABACBDirectMacroblockResult:
+        neighbors = CABACInterPartitionNeighbors(
+            list0=CABACInterListNeighbors(
+                left_candidate=input.left_l0_candidate,
+                top_candidate=input.top_l0_candidate,
+                top_right_candidate=input.top_right_l0_candidate,
+                top_left_candidate=input.top_left_l0_candidate,
+            ),
+            list1=CABACInterListNeighbors(
+                left_candidate=input.left_l1_candidate,
+                top_candidate=input.top_l1_candidate,
+                top_right_candidate=input.top_right_l1_candidate,
+                top_left_candidate=input.top_left_l1_candidate,
+            ),
+        )
+        luma = [0] * 256
+        cb = [0] * 64
+        cr = [0] * 64
+        block_references = [[-1, -1] for _ in range(16)]
+        block_vectors = [((0, 0), (0, 0)) for _ in range(16)]
+        block_flags = [(False, False) for _ in range(16)]
+        first = None
+        for partition_y in (0, 8):
+            for partition_x in (0, 8):
+                prediction = _derive_spatial_b_direct_partition(
+                    input,
+                    neighbors,
+                    partition_x,
+                    partition_y,
+                    True,
+                )
+                if first is None:
+                    first = prediction
+                selected = tuple(
+                    references[prediction.reference_indices[list_index]].frame
+                    if prediction.prediction_flags[list_index]
+                    else None
+                    for list_index, references in enumerate((list0, list1))
+                )
+                weights = input.weighting.select(
+                    prediction.reference_indices,
+                    (
+                        list0[prediction.reference_indices[0]]
+                        if prediction.prediction_flags[0]
+                        else None,
+                        list1[prediction.reference_indices[1]]
+                        if prediction.prediction_flags[1]
+                        else None,
+                    ),
+                )
+                part_luma, part_cb, part_cr = _run_reconstruction_job(
+                    "bdirect",
+                    selected,
+                    (
+                        prediction.motion_vectors,
+                        input.macroblock_x,
+                        input.macroblock_y,
+                        weights,
+                    ),
+                    getattr(self, "_timeout_check", None),
+                )
+                for row in range(8):
+                    source_y = partition_y + row
+                    for column in range(8):
+                        source_x = partition_x + column
+                        luma[source_y * 16 + source_x] = (
+                            part_luma[source_y * 16 + source_x]
+                        )
+                for row in range(4):
+                    source_y = partition_y // 2 + row
+                    for column in range(4):
+                        source_x = partition_x // 2 + column
+                        index = source_y * 8 + source_x
+                        cb[index] = part_cb[index]
+                        cr[index] = part_cr[index]
+                for block_y in range(partition_y // 4, partition_y // 4 + 2):
+                    for block_x in range(partition_x // 4, partition_x // 4 + 2):
+                        block = block_y * 4 + block_x
+                        block_references[block] = list(
+                            prediction.reference_indices
+                        )
+                        block_vectors[block] = tuple(
+                            prediction.motion_vectors
+                        )
+                        block_flags[block] = tuple(
+                            prediction.prediction_flags
+                        )
+        if first is None:
+            raise CABACError("B_Direct 8x8 prediction is incomplete")
+        builder.place_macroblock(address, luma, cb, cr)
+        return CABACBDirectMacroblockResult(
+            skipped,
+            first.reference_indices,
+            first.motion_vectors,
+            first.prediction_flags,
+            tuple(luma),
+            tuple(cb),
+            tuple(cr),
+            tuple(tuple(value) for value in block_references),
+            tuple(block_vectors),
+            tuple(block_flags),
+        )
+
+    def _reconstruct_b_direct_macroblock(
+        self,
+        input: CABACBDirectMacroblockInput,
+        builder,
+        address: int,
+        skipped: bool,
+    ) -> CABACBDirectMacroblockResult:
+        list0, list1 = self._validate_b_direct_macroblock_input(input, builder)
+
+        if input.direct_spatial and input.direct_8x8_inference:
+            return self._reconstruct_b_direct_8x8_macroblock(
+                input, builder, address, skipped, list0, list1
+            )
+
+        reference_indices, motion_vectors = self._derive_b_direct_macroblock_prediction(
+            input, list0, list1
+        )
         prediction_flags = tuple(index >= 0 for index in reference_indices)
         selected = []
         for enabled, ref_index, references in zip(
@@ -2300,7 +2338,7 @@ class CABACArithmeticDecoder:
         from .h264_reconstruction import (
             LumaIntra8x8Block,
             inverse_scale_luma8x8,
-            inverse_transform_luma8x8,
+            reconstruct_luma8x8_residual,
             reconstruct_luma_intra8x8_macroblock,
         )
 
@@ -2344,8 +2382,9 @@ class CABACArithmeticDecoder:
                 raster_levels = [0] * 64
                 for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
                     raster_levels[raster_index] = scan_levels[scan_index]
-                scaled = inverse_scale_luma8x8(raster_levels, scaling_list, qpy)
-                residuals[block_index] = inverse_transform_luma8x8(scaled)
+                residuals[block_index] = reconstruct_luma8x8_residual(
+                    raster_levels, scaling_list, qpy
+                )
             reconstructed_blocks.append(
                 LumaIntra8x8Block(
                     mode=modes[block_index],
@@ -2389,9 +2428,8 @@ class CABACArithmeticDecoder:
         if not isinstance(top_edge, CABACIntra16x16EdgeState) or not isinstance(left_edge, CABACIntra16x16EdgeState):
             raise CABACError("I16x16 edge state is invalid")
         from .h264_reconstruction import (
-            inverse_scale_luma4x4,
-            inverse_transform_luma4x4,
             reconstruct_intra16x16_luma_dc,
+            reconstruct_luma4x4_ac_residual,
             reconstruct_luma_intra16x16_macroblock,
         )
 
@@ -2445,14 +2483,12 @@ class CABACArithmeticDecoder:
                 if coded:
                     ac_levels = decoded_levels[:15]
 
-            if cbp_luma & (1 << cbp_index) and coded_flags[block_index]:
-                raster_levels = place_luma4x4_scan_levels([0, *ac_levels])
-                raster_levels[0] = 0
-                coefficients = inverse_scale_luma4x4(raster_levels, scaling_list, qpy)
-            else:
-                coefficients = inverse_scale_luma4x4([0] * 16, scaling_list, qpy)
-            coefficients[0] = dc_levels[raster_index]
-            block_residual = inverse_transform_luma4x4(coefficients)
+            block_residual = reconstruct_luma4x4_ac_residual(
+                    place_luma4x4_scan_levels([0, *ac_levels]),
+                    dc_levels[raster_index],
+                    scaling_list,
+                    qpy,
+            )
             for row in range(4):
                 destination = (block_y * 4 + row) * 16 + block_x * 4
                 residual[destination : destination + 4] = block_residual[row * 4 : row * 4 + 4]
@@ -2520,13 +2556,15 @@ class CABACArithmeticDecoder:
             raise CABACError("chroma coded-block edge state is invalid")
 
         from .h264_reconstruction import (
-            assemble_chroma420_residual_macroblock,
             derive_chroma_qpc,
             inverse_scale_chroma_dc2x2,
             inverse_transform_chroma_dc2x2,
             predict_chroma_intra8x8,
             reconstruct_chroma420_macroblock,
-            reconstruct_chroma4x4_residual,
+        )
+        from .h264_utils import (
+            block_position_2x2,
+            reconstruct_chroma_component_residual,
         )
 
         trial, trial_contexts = self._slice_trial(contexts)
@@ -2566,10 +2604,10 @@ class CABACArithmeticDecoder:
         for component in range(2):
             qpc = qpc_values[component]
             dc_samples = component_dc_samples[component]
-            residual_blocks = []
+            ac_blocks = []
             ac_flags = [False] * 4
             for block_index in range(4):
-                block_x, block_y = block_index % 2, block_index // 2
+                block_x, block_y = block_position_2x2(block_index)
                 ac_levels = [0] * 15
                 if coded_block_pattern_chroma == 2:
                     for is_left, edge in (
@@ -2601,14 +2639,14 @@ class CABACArithmeticDecoder:
                     ac_flags[block_index] = ac_coded
                     if ac_coded:
                         ac_levels = decoded_levels[:15]
-                residual_blocks.append(
-                    reconstruct_chroma4x4_residual(
-                        dc_samples[block_index], ac_levels,
-                        scaling_lists[component], qpc,
-                    )
-                )
+                ac_blocks.append(ac_levels)
 
-            residual = assemble_chroma420_residual_macroblock(residual_blocks)
+            residual = reconstruct_chroma_component_residual(
+                dc_samples,
+                ac_blocks,
+                scaling_lists[component],
+                qpc,
+            )
             reference = references[component]
             prediction = predict_chroma_intra8x8(
                 mode,
@@ -2640,6 +2678,247 @@ class CABACArithmeticDecoder:
     ) -> CABACIIntraMacroblockResult:
         return self._decode_i_intra_macroblock_with_type(
             input, contexts, builder, address, None
+        )
+
+    def _decode_i_pcm_macroblock(
+        self,
+        builder,
+        address: int,
+        mb_type: int,
+        qpy: int,
+    ) -> CABACIIntraMacroblockResult:
+        while self._bits._bit_offset % 8:
+            if self._bits.read_bit():
+                raise CABACError("I_PCM alignment bit is not zero")
+        try:
+            y_block = bytes(self._bits.read_bits(8) for _ in range(256))
+            cb_block = bytes(self._bits.read_bits(8) for _ in range(64))
+            cr_block = bytes(self._bits.read_bits(8) for _ in range(64))
+            offset = self._bits.read_bits(9) if self._cavlc is None else 0
+        except BitstreamError as error:
+            raise CABACError(f"truncated I_PCM macroblock: {error}") from error
+        if offset >= 510:
+            raise CABACError("I_PCM CABAC offset is outside the arithmetic range")
+        builder.place_macroblock(address, y_block, cb_block, cr_block)
+        self._code_range = 510
+        self._code_offset = offset
+        self._terminated = False
+        return CABACIIntraMacroblockResult(
+            macroblock_type=mb_type,
+            coded_block_pattern_luma=0,
+            coded_block_pattern_chroma=0,
+            transform_size_8x8=False,
+            intra16x16_luma_mode=0,
+            chroma_prediction_mode=0,
+            luma_4x4_modes=(),
+            luma_8x8_modes=(),
+            qp_delta=0,
+            qpy=qpy,
+            luma=tuple(y_block),
+            cb=tuple(cb_block),
+            cr=tuple(cr_block),
+            luma_4x4_coded_block_flags=(),
+            chroma_dc_coded=(False, False),
+            chroma_ac_coded_flags=((False,) * 4, (False,) * 4),
+        )
+
+    def _decode_i_non_pcm_macroblock(
+        self,
+        input: CABACIIntraMacroblockInput,
+        trial_contexts: list[CABACContextModel],
+        builder,
+        address: int,
+        mb_type: int,
+        qpy: int,
+    ) -> CABACIIntraMacroblockResult:
+        from .h264_reconstruction import (
+            LumaIntra4x4Block,
+            LumaIntra8x8Block,
+            reconstruct_luma_intra4x4_macroblock,
+            reconstruct_luma_intra8x8_macroblock,
+        )
+
+        cbp_luma = 0
+        cbp_chroma = 0
+        transform_8x8 = False
+        modes_4x4: list[int] = []
+        modes_8x8: list[int] = []
+        chroma_mode = 0
+        intra16x16_luma_mode = 0
+        if mb_type == 0:
+            if input.transform_8x8_mode_enabled:
+                transform_8x8 = self.decode_transform_size_8x8_flag(
+                    trial_contexts[399:402],
+                    input.left_has_8x8_transform,
+                    input.top_has_8x8_transform,
+                )
+            mode_contexts = trial_contexts[68:70]
+            if transform_8x8:
+                for block_index in range(4):
+                    block_x, block_y = block_index % 2, block_index // 2
+                    left_available, top_available = input.left_mode_available, input.top_mode_available
+                    left_mode, top_mode = input.left_modes_8x8[block_y], input.top_modes_8x8[block_x]
+                    if block_x:
+                        left_available, left_mode = True, modes_8x8[block_index - 1]
+                    if block_y:
+                        top_available, top_mode = True, modes_8x8[block_index - 2]
+                    predicted_mode = min(left_mode, top_mode) if left_available and top_available else 2
+                    modes_8x8.append(self.decode_intra4x4_pred_mode(predicted_mode, mode_contexts))
+            else:
+                modes_4x4 = self.decode_intra4x4_pred_modes(
+                    mode_contexts,
+                    input.top_modes_4x4,
+                    input.left_modes_4x4,
+                    input.top_mode_available,
+                    input.left_mode_available,
+                )
+            chroma_mode = self.decode_intra_chroma_pred_mode(
+                trial_contexts[64:68],
+                input.chroma_left_mode_nonzero,
+                input.chroma_top_mode_nonzero,
+            )
+            cbp_luma = self.decode_luma_coded_block_pattern(
+                input.left_luma_cbp, input.top_luma_cbp, trial_contexts[73:77]
+            )
+            cbp_chroma = self.decode_chroma_coded_block_pattern(
+                input.left_chroma_cbp, input.top_chroma_cbp, trial_contexts[77:85]
+            )
+        else:
+            cbp_luma = 15 if mb_type >= 13 else 0
+            cbp_chroma = ((mb_type - 1) // 4) % 3
+            intra16x16_luma_mode = (mb_type - 1) % 4
+            chroma_mode = self.decode_intra_chroma_pred_mode(
+                trial_contexts[64:68],
+                input.chroma_left_mode_nonzero,
+                input.chroma_top_mode_nonzero,
+            )
+
+        qp_delta = 0
+        if cbp_luma or cbp_chroma or mb_type != 0:
+            qp_delta = self.decode_mb_qp_delta(trial_contexts[60:64], input.previous_qp_delta)
+            qpy = (qpy + qp_delta + 52) % 52
+
+        luma_samples: Sequence[int]
+        luma_coded_flags: tuple[bool, ...] = ()
+        luma_dc_coded = False
+        luma_ac_coded_flags: tuple[bool, ...] = ()
+        luma_8x8_coded_flags = [False] * 4
+        luma_8x8_nonzero = [False] * 4
+        if mb_type == 0 and transform_8x8:
+            if len(input.luma_8x8_blocks) != 4:
+                raise CABACError("Intra_8x8 macroblock requires four gathered blocks")
+            residuals = [[0] * 64 for _ in range(4)]
+            blocks = []
+            for block_index, block in enumerate(input.luma_8x8_blocks):
+                if cbp_luma & (1 << block_index):
+                    luma_8x8_coded_flags[block_index] = True
+                    levels = self.decode_luma8x8_residual_block(trial_contexts)
+                    luma_8x8_nonzero[block_index] = any(levels)
+                    raster = [0] * 64
+                    for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
+                        raster[raster_index] = levels[scan_index]
+                    from .h264_reconstruction import reconstruct_luma8x8_residual
+
+                    residuals[block_index] = reconstruct_luma8x8_residual(
+                        raster, input.luma_8x8_scaling_list, qpy
+                    )
+                blocks.append(
+                    LumaIntra8x8Block(
+                        modes_8x8[block_index], residuals[block_index],
+                        top=block.top, left=block.left, top_left=block.top_left,
+                        references_filtered=block.references_filtered,
+                    )
+                )
+            luma_samples = reconstruct_luma_intra8x8_macroblock(blocks)
+        elif mb_type == 0:
+            if len(input.luma_4x4_blocks) != 16:
+                raise CABACError("Intra_4x4 macroblock requires sixteen gathered blocks")
+            coded_flags = [False] * 16
+            blocks = []
+            for block_index, block in enumerate(input.luma_4x4_blocks):
+                raster_index = _LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index]
+                block_x, block_y = raster_index % 4, raster_index // 4
+                residual = [0] * 16
+                if cbp_luma & (1 << ((block_y // 2) * 2 + block_x // 2)):
+                    cond_left = _intra4x4_luma_cond_term(
+                        block_index, block_x, block_y, True, coded_flags, input.luma_4x4_left_edge
+                    )
+                    cond_top = _intra4x4_luma_cond_term(
+                        block_index, block_x, block_y, False, coded_flags, input.luma_4x4_top_edge
+                    )
+                    levels, coded = self.decode_residual_block(2, cond_left, cond_top, trial_contexts)
+                    coded_flags[block_index] = coded
+                    if coded:
+                        from .h264_reconstruction import reconstruct_luma4x4_residual
+
+                        residual = reconstruct_luma4x4_residual(
+                            place_luma4x4_scan_levels(levels), input.luma_4x4_scaling_list, qpy
+                        )
+                blocks.append(
+                    LumaIntra4x4Block(
+                        modes_4x4[block_index], residual,
+                        top=block.top, left=block.left, top_left=block.top_left,
+                    )
+                )
+            luma_samples = reconstruct_luma_intra4x4_macroblock(blocks)
+            luma_coded_flags = tuple(coded_flags)
+        else:
+            luma_top = input.intra16x16_top if input.intra16x16_top_available else None
+            luma_left = input.intra16x16_left if input.intra16x16_left_available else None
+            luma_result = self.decode_intra16x16_luma_macroblock(
+                mb_type,
+                trial_contexts,
+                qpy,
+                input.luma_4x4_scaling_list,
+                luma_top,
+                luma_left,
+                input.intra16x16_top_left,
+                input.intra16x16_top_left_available,
+                input.luma_16x16_top_edge,
+                input.luma_16x16_left_edge,
+            )
+            luma_samples = luma_result.samples
+            luma_dc_coded = luma_result.dc_coded
+            luma_ac_coded_flags = luma_result.ac_coded_block_flags
+
+        chroma_result = self.decode_intra_chroma420_macroblock(
+            trial_contexts,
+            chroma_mode,
+            True,
+            mb_type if mb_type != 0 else 0,
+            mb_type != 0,
+            input.chroma_left_mode_nonzero,
+            input.chroma_top_mode_nonzero,
+            cbp_chroma,
+            qpy,
+            input.chroma_qp_index_offsets,
+            input.chroma_scaling_lists,
+            input.chroma_references,
+            input.chroma_left_edges,
+            input.chroma_top_edges,
+        )
+        builder.place_macroblock(address, luma_samples, chroma_result.cb, chroma_result.cr)
+        return CABACIIntraMacroblockResult(
+            macroblock_type=mb_type,
+            coded_block_pattern_luma=cbp_luma,
+            coded_block_pattern_chroma=cbp_chroma,
+            transform_size_8x8=transform_8x8,
+            intra16x16_luma_mode=intra16x16_luma_mode,
+            chroma_prediction_mode=chroma_mode,
+            luma_4x4_modes=tuple(modes_4x4),
+            luma_8x8_modes=tuple(modes_8x8),
+            qp_delta=qp_delta,
+            qpy=qpy,
+            luma=tuple(luma_samples),
+            cb=chroma_result.cb,
+            cr=chroma_result.cr,
+            luma_4x4_coded_block_flags=luma_coded_flags,
+            chroma_dc_coded=chroma_result.dc_coded,
+            chroma_ac_coded_flags=chroma_result.ac_coded_block_flags,
+            luma_dc_coded=luma_dc_coded,
+            luma_ac_coded_block_flags=luma_ac_coded_flags,
+            luma_8x8_coded_block_flags=tuple(luma_8x8_coded_flags),
+            luma_8x8_nonzero=tuple(luma_8x8_nonzero),
         )
 
     def _decode_i_intra_macroblock_with_type(
@@ -2674,235 +2953,16 @@ class CABACArithmeticDecoder:
             raise CABACError("predecoded intra mb_type is outside [0,25]")
         else:
             mb_type = predecoded_type
-        qpy = input.previous_qpy
         if mb_type == 25:
-            while trial._bits._bit_offset % 8:
-                if trial._bits.read_bit():
-                    raise CABACError("I_PCM alignment bit is not zero")
-            try:
-                y_block = bytes(trial._bits.read_bits(8) for _ in range(256))
-                cb_block = bytes(trial._bits.read_bits(8) for _ in range(64))
-                cr_block = bytes(trial._bits.read_bits(8) for _ in range(64))
-                offset = trial._bits.read_bits(9) if trial._cavlc is None else 0
-            except BitstreamError as error:
-                raise CABACError(f"truncated I_PCM macroblock: {error}") from error
-            if offset >= 510:
-                raise CABACError("I_PCM CABAC offset is outside the arithmetic range")
-            builder.place_macroblock(address, y_block, cb_block, cr_block)
-            trial._code_range = 510
-            trial._code_offset = offset
-            trial._terminated = False
-            self._commit_slice_trial(trial, contexts, trial_contexts)
-            return CABACIIntraMacroblockResult(
-                macroblock_type=mb_type,
-                coded_block_pattern_luma=0,
-                coded_block_pattern_chroma=0,
-                transform_size_8x8=False,
-                intra16x16_luma_mode=0,
-                chroma_prediction_mode=0,
-                luma_4x4_modes=(),
-                luma_8x8_modes=(),
-                qp_delta=0,
-                qpy=qpy,
-                luma=tuple(y_block),
-                cb=tuple(cb_block),
-                cr=tuple(cr_block),
-                luma_4x4_coded_block_flags=(),
-                chroma_dc_coded=(False, False),
-                chroma_ac_coded_flags=((False,) * 4, (False,) * 4),
-            )
-
-        from .h264_reconstruction import (
-            LumaIntra4x4Block,
-            LumaIntra8x8Block,
-            reconstruct_luma_intra4x4_macroblock,
-            reconstruct_luma_intra8x8_macroblock,
-        )
-
-        cbp_luma = 0
-        cbp_chroma = 0
-        transform_8x8 = False
-        modes_4x4: list[int] = []
-        modes_8x8: list[int] = []
-        chroma_mode = 0
-        intra16x16_luma_mode = 0
-        if mb_type == 0:
-            if input.transform_8x8_mode_enabled:
-                transform_8x8 = trial.decode_transform_size_8x8_flag(
-                    trial_contexts[399:402],
-                    input.left_has_8x8_transform,
-                    input.top_has_8x8_transform,
-                )
-            mode_contexts = trial_contexts[68:70]
-            if transform_8x8:
-                for block_index in range(4):
-                    block_x, block_y = block_index % 2, block_index // 2
-                    left_available, top_available = input.left_mode_available, input.top_mode_available
-                    left_mode, top_mode = input.left_modes_8x8[block_y], input.top_modes_8x8[block_x]
-                    if block_x:
-                        left_available, left_mode = True, modes_8x8[block_index - 1]
-                    if block_y:
-                        top_available, top_mode = True, modes_8x8[block_index - 2]
-                    predicted_mode = min(left_mode, top_mode) if left_available and top_available else 2
-                    modes_8x8.append(trial.decode_intra4x4_pred_mode(predicted_mode, mode_contexts))
-            else:
-                modes_4x4 = trial.decode_intra4x4_pred_modes(
-                    mode_contexts,
-                    input.top_modes_4x4,
-                    input.left_modes_4x4,
-                    input.top_mode_available,
-                    input.left_mode_available,
-                )
-            chroma_mode = trial.decode_intra_chroma_pred_mode(
-                trial_contexts[64:68],
-                input.chroma_left_mode_nonzero,
-                input.chroma_top_mode_nonzero,
-            )
-            cbp_luma = trial.decode_luma_coded_block_pattern(
-                input.left_luma_cbp, input.top_luma_cbp, trial_contexts[73:77]
-            )
-            cbp_chroma = trial.decode_chroma_coded_block_pattern(
-                input.left_chroma_cbp, input.top_chroma_cbp, trial_contexts[77:85]
+            result = trial._decode_i_pcm_macroblock(
+                builder, address, mb_type, input.previous_qpy
             )
         else:
-            cbp_luma = 15 if mb_type >= 13 else 0
-            cbp_chroma = ((mb_type - 1) // 4) % 3
-            intra16x16_luma_mode = (mb_type - 1) % 4
-            chroma_mode = trial.decode_intra_chroma_pred_mode(
-                trial_contexts[64:68],
-                input.chroma_left_mode_nonzero,
-                input.chroma_top_mode_nonzero,
+            result = trial._decode_i_non_pcm_macroblock(
+                input, trial_contexts, builder, address, mb_type, input.previous_qpy
             )
-
-        qp_delta = 0
-        if cbp_luma or cbp_chroma or mb_type != 0:
-            qp_delta = trial.decode_mb_qp_delta(trial_contexts[60:64], input.previous_qp_delta)
-            qpy = (qpy + qp_delta + 52) % 52
-
-        luma_samples: Sequence[int]
-        luma_coded_flags: tuple[bool, ...] = ()
-        luma_dc_coded = False
-        luma_ac_coded_flags: tuple[bool, ...] = ()
-        luma_8x8_coded_flags = [False] * 4
-        luma_8x8_nonzero = [False] * 4
-        if mb_type == 0 and transform_8x8:
-            if len(input.luma_8x8_blocks) != 4:
-                raise CABACError("Intra_8x8 macroblock requires four gathered blocks")
-            residuals = [[0] * 64 for _ in range(4)]
-            blocks = []
-            for block_index, block in enumerate(input.luma_8x8_blocks):
-                if cbp_luma & (1 << block_index):
-                    luma_8x8_coded_flags[block_index] = True
-                    levels = trial.decode_luma8x8_residual_block(trial_contexts)
-                    luma_8x8_nonzero[block_index] = any(levels)
-                    raster = [0] * 64
-                    for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
-                        raster[raster_index] = levels[scan_index]
-                    from .h264_reconstruction import inverse_scale_luma8x8, inverse_transform_luma8x8
-
-                    residuals[block_index] = inverse_transform_luma8x8(
-                        inverse_scale_luma8x8(raster, input.luma_8x8_scaling_list, qpy)
-                    )
-                blocks.append(
-                    LumaIntra8x8Block(
-                        modes_8x8[block_index], residuals[block_index],
-                        top=block.top, left=block.left, top_left=block.top_left,
-                        references_filtered=block.references_filtered,
-                    )
-                )
-            luma_samples = reconstruct_luma_intra8x8_macroblock(blocks)
-        elif mb_type == 0:
-            if len(input.luma_4x4_blocks) != 16:
-                raise CABACError("Intra_4x4 macroblock requires sixteen gathered blocks")
-            coded_flags = [False] * 16
-            blocks = []
-            for block_index, block in enumerate(input.luma_4x4_blocks):
-                raster_index = _LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index]
-                block_x, block_y = raster_index % 4, raster_index // 4
-                residual = [0] * 16
-                if cbp_luma & (1 << ((block_y // 2) * 2 + block_x // 2)):
-                    cond_left = _intra4x4_luma_cond_term(
-                        block_index, block_x, block_y, True, coded_flags, input.luma_4x4_left_edge
-                    )
-                    cond_top = _intra4x4_luma_cond_term(
-                        block_index, block_x, block_y, False, coded_flags, input.luma_4x4_top_edge
-                    )
-                    levels, coded = trial.decode_residual_block(2, cond_left, cond_top, trial_contexts)
-                    coded_flags[block_index] = coded
-                    if coded:
-                        from .h264_reconstruction import inverse_scale_luma4x4, inverse_transform_luma4x4
-
-                        coefficients = inverse_scale_luma4x4(
-                            place_luma4x4_scan_levels(levels), input.luma_4x4_scaling_list, qpy
-                        )
-                        residual = inverse_transform_luma4x4(coefficients)
-                blocks.append(
-                    LumaIntra4x4Block(
-                        modes_4x4[block_index], residual,
-                        top=block.top, left=block.left, top_left=block.top_left,
-                    )
-                )
-            luma_samples = reconstruct_luma_intra4x4_macroblock(blocks)
-            luma_coded_flags = tuple(coded_flags)
-        else:
-            luma_top = input.intra16x16_top if input.intra16x16_top_available else None
-            luma_left = input.intra16x16_left if input.intra16x16_left_available else None
-            luma_result = trial.decode_intra16x16_luma_macroblock(
-                mb_type,
-                trial_contexts,
-                qpy,
-                input.luma_4x4_scaling_list,
-                luma_top,
-                luma_left,
-                input.intra16x16_top_left,
-                input.intra16x16_top_left_available,
-                input.luma_16x16_top_edge,
-                input.luma_16x16_left_edge,
-            )
-            luma_samples = luma_result.samples
-            luma_dc_coded = luma_result.dc_coded
-            luma_ac_coded_flags = luma_result.ac_coded_block_flags
-
-        chroma_result = trial.decode_intra_chroma420_macroblock(
-            trial_contexts,
-            chroma_mode,
-            True,
-            mb_type if mb_type != 0 else 0,
-            mb_type != 0,
-            input.chroma_left_mode_nonzero,
-            input.chroma_top_mode_nonzero,
-            cbp_chroma,
-            qpy,
-            input.chroma_qp_index_offsets,
-            input.chroma_scaling_lists,
-            input.chroma_references,
-            input.chroma_left_edges,
-            input.chroma_top_edges,
-        )
-        builder.place_macroblock(address, luma_samples, chroma_result.cb, chroma_result.cr)
         self._commit_slice_trial(trial, contexts, trial_contexts)
-        return CABACIIntraMacroblockResult(
-            macroblock_type=mb_type,
-            coded_block_pattern_luma=cbp_luma,
-            coded_block_pattern_chroma=cbp_chroma,
-            transform_size_8x8=transform_8x8,
-            intra16x16_luma_mode=intra16x16_luma_mode,
-            chroma_prediction_mode=chroma_mode,
-            luma_4x4_modes=tuple(modes_4x4),
-            luma_8x8_modes=tuple(modes_8x8),
-            qp_delta=qp_delta,
-            qpy=qpy,
-            luma=tuple(luma_samples),
-            cb=chroma_result.cb,
-            cr=chroma_result.cr,
-            luma_4x4_coded_block_flags=luma_coded_flags,
-            chroma_dc_coded=chroma_result.dc_coded,
-            chroma_ac_coded_flags=chroma_result.ac_coded_block_flags,
-            luma_dc_coded=luma_dc_coded,
-            luma_ac_coded_block_flags=luma_ac_coded_flags,
-            luma_8x8_coded_block_flags=tuple(luma_8x8_coded_flags),
-            luma_8x8_nonzero=tuple(luma_8x8_nonzero),
-        )
+        return result
 
     def decode_ipcm_intra_macroblock(
         self,
@@ -3250,17 +3310,11 @@ class CABACArithmeticDecoder:
             macroblock_input, contexts, builder, macroblock_address
         )
 
-    def _decode_inter_macroblock(
-        self,
+    @staticmethod
+    def _validate_inter_macroblock_input(
         input: CABACInterMacroblockInput,
-        residual_input: CABACInterMacroblockResidualInput | None,
-        contexts: list[CABACContextModel],
         builder,
-        address: int,
-        direct_input: CABACBDirectMacroblockInput | None = None,
-        intra_input: CABACIIntraMacroblockInput | None = None,
-    ) -> CABACInterMacroblockResult | CABACIIntraMacroblockResult:
-        _validate_slice_contexts(contexts)
+    ) -> bool:
         if (
             not isinstance(input, CABACInterMacroblockInput)
             or not isinstance(input.slice_type, int)
@@ -3268,7 +3322,9 @@ class CABACArithmeticDecoder:
             or input.slice_type > 9
             or input.slice_type % 5 not in (0, 1, 3)
             or any(
-                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
                 for value in (input.macroblock_x, input.macroblock_y)
             )
             or builder is None
@@ -3289,13 +3345,8 @@ class CABACArithmeticDecoder:
             or any(not isinstance(references, tuple) for references in input.reference_lists)
         ):
             raise CABACError("inter macroblock reference lists are invalid")
-        from .h264_reconstruction import (
-            MotionVector,
-            MotionVectorCandidate,
-            apply_motion_vector_difference,
-            predict_motion_vector,
-            Yuv420Frame,
-        )
+
+        from .h264_reconstruction import Yuv420Frame
 
         for references in input.reference_lists:
             if any(
@@ -3306,34 +3357,16 @@ class CABACArithmeticDecoder:
                 raise CABACError("inter macroblock reference picture is invalid")
         if not input.reference_lists[0] or not input.reference_lists[1] and is_b_slice:
             raise CABACError("inter macroblock reference list is empty")
+        return is_b_slice
 
-        trial, trial_contexts = self._slice_trial(contexts)
-        macroblock_type = trial.decode_inter_mb_type(
-            input.slice_type,
-            trial_contexts,
-            input.left_available,
-            input.top_available,
-            input.left_b_skip_or_direct,
-            input.top_b_skip_or_direct,
-        )
-        intra_type_start = 23 if is_b_slice else 5
-        if macroblock_type >= intra_type_start:
-            if not isinstance(intra_input, CABACIIntraMacroblockInput):
-                raise CABACError("P/B intra macroblock references are unavailable")
-            intra_result = trial._decode_i_intra_macroblock_with_type(
-                intra_input,
-                trial_contexts,
-                builder,
-                address,
-                macroblock_type - intra_type_start,
-            )
-            self._commit_slice_trial(trial, contexts, trial_contexts)
-            return intra_result
-        sub_types: list[int] = []
-        if (not is_b_slice and macroblock_type in (3, 4)) or (is_b_slice and macroblock_type == 22):
-            sub_types = [trial.decode_sub_mb_type(input.slice_type, trial_contexts) for _ in range(4)]
-
-        specifications: list[tuple[int, int, int, int, tuple[bool, bool], bool]] = []
+    @staticmethod
+    def _inter_partition_specifications(
+        macroblock_type: int,
+        is_b_slice: bool,
+        sub_types: Sequence[int],
+    ) -> list[tuple[int, int, int, int, tuple[bool, bool], bool]]:
+        """Expand an inter macroblock type into prediction partitions."""
+        specifications = []
         if not is_b_slice:
             if macroblock_type == 0:
                 specifications.append((0, 0, 16, 16, (True, False), False))
@@ -3355,14 +3388,20 @@ class CABACArithmeticDecoder:
                     for sub_part in range(count):
                         x = base_x + (sub_part % (8 // sub_width)) * sub_width
                         y = base_y + (sub_part // (8 // sub_width)) * sub_height
-                        specifications.append((x, y, sub_width, sub_height, (True, False), False))
+                        specifications.append(
+                            (x, y, sub_width, sub_height, (True, False), False)
+                        )
             else:
                 raise CABACError("intra P macroblock syntax is not an inter macroblock")
         else:
             if macroblock_type == 0:
                 specifications.append((0, 0, 16, 16, (True, True), True))
             elif macroblock_type in (1, 2, 3):
-                flags = ((True, False), (False, True), (True, True))[macroblock_type - 1]
+                flags = (
+                    (True, False),
+                    (False, True),
+                    (True, True),
+                )[macroblock_type - 1]
                 specifications.append((0, 0, 16, 16, flags, False))
             elif 4 <= macroblock_type <= 21:
                 partition_modes = (
@@ -3391,12 +3430,15 @@ class CABACArithmeticDecoder:
                     x = 0 if vertical_split else partition_index * 8
                     y = partition_index * 8 if vertical_split else 0
                     width, height = (16, 8) if vertical_split else (8, 16)
-                    specifications.append((x, y, width, height, flags[partition_index], False))
+                    specifications.append(
+                        (x, y, width, height, flags[partition_index], False)
+                    )
             elif macroblock_type == 22:
                 sub_modes = (
                     (False, False), (True, False), (False, True), (True, True),
                     (True, False), (True, False), (False, True), (False, True),
-                    (True, True), (True, True), (True, False), (False, True), (True, True),
+                    (True, True), (True, True), (True, False), (False, True),
+                    (True, True),
                 )
                 for sub_index, sub_type in enumerate(sub_types):
                     base_x, base_y = (sub_index % 2) * 8, (sub_index // 2) * 8
@@ -3415,9 +3457,30 @@ class CABACArithmeticDecoder:
                     for sub_part in range(count):
                         x = base_x + (sub_part % (8 // sub_width)) * sub_width
                         y = base_y + (sub_part // (8 // sub_width)) * sub_height
-                        specifications.append((x, y, sub_width, sub_height, flags, direct))
+                        specifications.append(
+                            (x, y, sub_width, sub_height, flags, direct)
+                        )
             else:
                 raise CABACError("intra B macroblock syntax is not an inter macroblock")
+        return specifications
+
+    def _decode_inter_prediction(
+        self,
+        input: CABACInterMacroblockInput,
+        residual_input: CABACInterMacroblockResidualInput | None,
+        direct_input: CABACBDirectMacroblockInput | None,
+        specifications: Sequence[tuple[int, int, int, int, tuple[bool, bool], bool]],
+        macroblock_type: int,
+        is_b_slice: bool,
+        trial: "CABACArithmeticDecoder",
+        trial_contexts: list[CABACContextModel],
+    ):
+        from .h264_reconstruction import (
+            MotionVector,
+            MotionVectorCandidate,
+            apply_motion_vector_difference,
+            predict_motion_vector,
+        )
 
         if len(input.partition_neighbors) not in (len(specifications), 16):
             raise CABACError("inter macroblock partition neighbor count does not match its type")
@@ -3779,6 +3842,73 @@ class CABACArithmeticDecoder:
                     )
             partition_results = direct_partition_results
 
+        return (
+            job_frames,
+            job_partitions,
+            partition_results,
+            frame_width,
+            frame_height,
+        )
+
+    def _decode_inter_macroblock(
+        self,
+        input: CABACInterMacroblockInput,
+        residual_input: CABACInterMacroblockResidualInput | None,
+        contexts: list[CABACContextModel],
+        builder,
+        address: int,
+        direct_input: CABACBDirectMacroblockInput | None = None,
+        intra_input: CABACIIntraMacroblockInput | None = None,
+    ) -> CABACInterMacroblockResult | CABACIIntraMacroblockResult:
+        _validate_slice_contexts(contexts)
+        is_b_slice = self._validate_inter_macroblock_input(input, builder)
+
+        trial, trial_contexts = self._slice_trial(contexts)
+        macroblock_type = trial.decode_inter_mb_type(
+            input.slice_type,
+            trial_contexts,
+            input.left_available,
+            input.top_available,
+            input.left_b_skip_or_direct,
+            input.top_b_skip_or_direct,
+        )
+        intra_type_start = 23 if is_b_slice else 5
+        if macroblock_type >= intra_type_start:
+            if not isinstance(intra_input, CABACIIntraMacroblockInput):
+                raise CABACError("P/B intra macroblock references are unavailable")
+            intra_result = trial._decode_i_intra_macroblock_with_type(
+                intra_input,
+                trial_contexts,
+                builder,
+                address,
+                macroblock_type - intra_type_start,
+            )
+            self._commit_slice_trial(trial, contexts, trial_contexts)
+            return intra_result
+        sub_types: list[int] = []
+        if (not is_b_slice and macroblock_type in (3, 4)) or (is_b_slice and macroblock_type == 22):
+            sub_types = [trial.decode_sub_mb_type(input.slice_type, trial_contexts) for _ in range(4)]
+
+        specifications = self._inter_partition_specifications(
+            macroblock_type, is_b_slice, sub_types
+        )
+        (
+            job_frames,
+            job_partitions,
+            partition_results,
+            frame_width,
+            frame_height,
+        ) = self._decode_inter_prediction(
+            input,
+            residual_input,
+            direct_input,
+            specifications,
+            macroblock_type,
+            is_b_slice,
+            trial,
+            trial_contexts,
+        )
+
         residual = _InterResidual()
         residual_result = (0, 0, False, 0, 26, (), (False, False), ((False,) * 4, (False,) * 4), (False,) * 4)
         if residual_input is not None:
@@ -3824,6 +3954,188 @@ class CABACArithmeticDecoder:
             luma_8x8_nonzero=residual_result[8],
         )
 
+    def _decode_inter_luma_residuals(
+        self,
+        cbp_luma: int,
+        transform_8x8: bool,
+        qpy: int,
+        input: CABACInterMacroblockResidualInput,
+        contexts: list[CABACContextModel],
+        residual_output: "_InterResidual",
+    ) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+        from .h264_reconstruction import (
+            reconstruct_luma4x4_residual,
+            reconstruct_luma8x8_residual,
+        )
+        from .h264_utils import block_position_2x2, place_residual_block
+
+        coded_flags = [False] * 16
+        nonzero_8x8 = [False] * 4
+        if transform_8x8:
+            for block_index in range(4):
+                if not cbp_luma & (1 << block_index):
+                    continue
+                scan_levels = self.decode_luma8x8_residual_block(contexts)
+                nonzero_8x8[block_index] = any(scan_levels)
+                if any(scan_levels):
+                    block_x, block_y = block_position_2x2(block_index)
+                    block_x *= 2
+                    block_y *= 2
+                    for row in range(2):
+                        for column in range(2):
+                            raster_index = (block_y + row) * 4 + block_x + column
+                            scan_index = _LUMA4X4_BLOCK_RASTER_TO_SCAN[raster_index]
+                            coded_flags[scan_index] = True
+                raster_levels = [0] * 64
+                for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
+                    raster_levels[raster_index] = scan_levels[scan_index]
+                residual = reconstruct_luma8x8_residual(
+                    raster_levels, input.luma_8x8_scaling_list, qpy
+                )
+                block_x, block_y = block_position_2x2(block_index)
+                place_residual_block(
+                    residual_output.luma, 16, block_x * 8, block_y * 8,
+                    residual, 8,
+                )
+        else:
+            for block_index in range(16):
+                raster_index = _LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index]
+                block_x, block_y = raster_index % 4, raster_index // 4
+                cbp_index = (block_y // 2) * 2 + block_x // 2
+                if not cbp_luma & (1 << cbp_index):
+                    continue
+                cond_left = _inter4x4_luma_cond_term(
+                    block_index, block_x, block_y, True,
+                    coded_flags, input.luma_4x4_left_edge,
+                )
+                cond_top = _inter4x4_luma_cond_term(
+                    block_index, block_x, block_y, False,
+                    coded_flags, input.luma_4x4_top_edge,
+                )
+                levels, coded = self.decode_residual_block(
+                    2, cond_left, cond_top, contexts
+                )
+                coded_flags[block_index] = coded
+                if not coded:
+                    continue
+                residual = reconstruct_luma4x4_residual(
+                    place_luma4x4_scan_levels(levels),
+                    input.luma_4x4_scaling_list,
+                    qpy,
+                )
+                place_residual_block(
+                    residual_output.luma, 16, block_x * 4, block_y * 4,
+                    residual, 4,
+                )
+        return tuple(coded_flags), tuple(nonzero_8x8)
+
+    def _decode_inter_chroma_residuals(
+        self,
+        cbp_chroma: int,
+        qpy: int,
+        input: CABACInterMacroblockResidualInput,
+        contexts: list[CABACContextModel],
+        residual_output: "_InterResidual",
+    ) -> tuple[tuple[bool, bool], tuple[tuple[bool, ...], tuple[bool, ...]]]:
+        from .h264_reconstruction import (
+            derive_chroma_qpc,
+            inverse_scale_chroma_dc2x2,
+            inverse_transform_chroma_dc2x2,
+        )
+        from .h264_utils import (
+            block_position_2x2,
+            reconstruct_chroma_component_residual,
+        )
+
+        dc_coded = [False, False]
+        dc_samples = [[0] * 4 for _ in range(2)]
+        qpc_values = [
+            derive_chroma_qpc(qpy, offset)
+            for offset in input.chroma_qp_index_offsets
+        ]
+        if cbp_chroma:
+            for component in range(2):
+                left_edge = input.chroma_left_edges[component]
+                top_edge = input.chroma_top_edges[component]
+                if not isinstance(left_edge, CABACChroma420EdgeState) or not isinstance(
+                    top_edge, CABACChroma420EdgeState
+                ):
+                    raise CABACError("inter chroma CBF edge state is invalid")
+                cond_left = derive_coded_block_flag_cond_term(
+                    left_edge.available, False, left_edge.is_ipcm,
+                    left_edge.dc_block_available, left_edge.dc_block_coded,
+                )
+                cond_top = derive_coded_block_flag_cond_term(
+                    top_edge.available, False, top_edge.is_ipcm,
+                    top_edge.dc_block_available, top_edge.dc_block_coded,
+                )
+                dc_levels, coded = self.decode_residual_block(
+                    3, cond_left, cond_top, contexts
+                )
+                dc_coded[component] = coded
+                if coded:
+                    dc_samples[component] = inverse_scale_chroma_dc2x2(
+                        inverse_transform_chroma_dc2x2(dc_levels[:4]),
+                        qpc_values[component],
+                    )
+
+        ac_flags = [[False] * 4 for _ in range(2)]
+        for component in range(2):
+            ac_blocks = []
+            for block_index in range(4):
+                block_x, block_y = block_position_2x2(block_index)
+                ac_levels = [0] * 15
+                if cbp_chroma == 2:
+                    left_edge = input.chroma_left_edges[component]
+                    top_edge = input.chroma_top_edges[component]
+                    if block_x:
+                        cond_left = derive_coded_block_flag_cond_term(
+                            True, False, False, True,
+                            ac_flags[component][block_index - 1],
+                        )
+                    elif not left_edge.available or left_edge.is_ipcm:
+                        cond_left = derive_coded_block_flag_cond_term(
+                            left_edge.available, False, left_edge.is_ipcm, False, False
+                        )
+                    else:
+                        cond_left = derive_coded_block_flag_cond_term(
+                            True, False, False,
+                            left_edge.ac_block_available[block_y],
+                            left_edge.ac_block_coded[block_y],
+                        )
+                    if block_y:
+                        cond_top = derive_coded_block_flag_cond_term(
+                            True, False, False, True,
+                            ac_flags[component][block_index - 2],
+                        )
+                    elif not top_edge.available or top_edge.is_ipcm:
+                        cond_top = derive_coded_block_flag_cond_term(
+                            top_edge.available, False, top_edge.is_ipcm, False, False
+                        )
+                    else:
+                        cond_top = derive_coded_block_flag_cond_term(
+                            True, False, False,
+                            top_edge.ac_block_available[block_x],
+                            top_edge.ac_block_coded[block_x],
+                        )
+                    levels, coded = self.decode_residual_block(
+                        4, cond_left, cond_top, contexts
+                    )
+                    ac_flags[component][block_index] = coded
+                    if coded:
+                        ac_levels = levels[:15]
+                ac_blocks.append(ac_levels)
+            residual_output.chroma[component] = reconstruct_chroma_component_residual(
+                dc_samples[component],
+                ac_blocks,
+                input.chroma_scaling_lists[component],
+                qpc_values[component],
+            )
+        return (
+            tuple(dc_coded),
+            (tuple(ac_flags[0]), tuple(ac_flags[1])),
+        )
+
     def _decode_inter_residuals(
         self,
         macroblock_type: int,
@@ -3850,18 +4162,6 @@ class CABACArithmeticDecoder:
             or not isinstance(input.luma_4x4_left_edge, CABACIntra4x4EdgeState)
         ):
             raise CABACError("inter macroblock residual inputs are invalid")
-        from .h264_reconstruction import (
-            assemble_chroma420_residual_macroblock,
-            derive_chroma_qpc,
-            inverse_scale_chroma_dc2x2,
-            inverse_scale_luma4x4,
-            inverse_scale_luma8x8,
-            inverse_transform_chroma_dc2x2,
-            inverse_transform_luma4x4,
-            inverse_transform_luma8x8,
-            reconstruct_chroma4x4_residual,
-        )
-
         cbp_luma = self.decode_luma_coded_block_pattern(
             input.left_luma_cbp, input.top_luma_cbp, contexts[73:77]
         )
@@ -3904,138 +4204,12 @@ class CABACArithmeticDecoder:
             qp_delta = self.decode_mb_qp_delta(contexts[60:64], input.previous_qp_delta)
             qpy = (qpy + qp_delta + 52) % 52
 
-        luma_coded_flags = [False] * 16
-        luma_8x8_nonzero = [False] * 4
-        if transform_8x8:
-            for block_index in range(4):
-                if not cbp_luma & (1 << block_index):
-                    continue
-                scan_levels = self.decode_luma8x8_residual_block(contexts)
-                luma_8x8_nonzero[block_index] = any(scan_levels)
-                if any(scan_levels):
-                    block_x, block_y = (block_index % 2) * 2, (block_index // 2) * 2
-                    for row in range(2):
-                        for column in range(2):
-                            raster_index = (block_y + row) * 4 + block_x + column
-                            scan_index = _LUMA4X4_BLOCK_RASTER_TO_SCAN[raster_index]
-                            luma_coded_flags[scan_index] = True
-                raster_levels = [0] * 64
-                for scan_index, raster_index in enumerate(_LUMA8X8_SCAN_TO_RASTER):
-                    raster_levels[raster_index] = scan_levels[scan_index]
-                residual = inverse_transform_luma8x8(
-                    inverse_scale_luma8x8(raster_levels, input.luma_8x8_scaling_list, qpy)
-                )
-                block_x, block_y = (block_index % 2) * 8, (block_index // 2) * 8
-                for row in range(8):
-                    for column in range(8):
-                        destination = (block_y + row) * 16 + block_x + column
-                        residual_output.luma[destination] = residual[row * 8 + column]
-        else:
-            for block_index in range(16):
-                raster_index = _LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index]
-                block_x, block_y = raster_index % 4, raster_index // 4
-                cbp_index = (block_y // 2) * 2 + block_x // 2
-                if not cbp_luma & (1 << cbp_index):
-                    continue
-                cond_left = _inter4x4_luma_cond_term(
-                    block_index, block_x, block_y, True,
-                    luma_coded_flags, input.luma_4x4_left_edge,
-                )
-                cond_top = _inter4x4_luma_cond_term(
-                    block_index, block_x, block_y, False,
-                    luma_coded_flags, input.luma_4x4_top_edge,
-                )
-                levels, coded = self.decode_residual_block(2, cond_left, cond_top, contexts)
-                luma_coded_flags[block_index] = coded
-                if not coded:
-                    continue
-                residual = inverse_transform_luma4x4(
-                    inverse_scale_luma4x4(
-                        place_luma4x4_scan_levels(levels), input.luma_4x4_scaling_list, qpy
-                    )
-                )
-                for row in range(4):
-                    for column in range(4):
-                        destination = (block_y * 4 + row) * 16 + block_x * 4 + column
-                        residual_output.luma[destination] = residual[row * 4 + column]
-
-        chroma_dc_coded = [False, False]
-        chroma_dc_samples = [[0] * 4 for _ in range(2)]
-        qpc_values = [derive_chroma_qpc(qpy, offset) for offset in input.chroma_qp_index_offsets]
-        if cbp_chroma:
-            for component in range(2):
-                left_edge = input.chroma_left_edges[component]
-                top_edge = input.chroma_top_edges[component]
-                if not isinstance(left_edge, CABACChroma420EdgeState) or not isinstance(
-                    top_edge, CABACChroma420EdgeState
-                ):
-                    raise CABACError("inter chroma CBF edge state is invalid")
-                cond_left = derive_coded_block_flag_cond_term(
-                    left_edge.available, False, left_edge.is_ipcm,
-                    left_edge.dc_block_available, left_edge.dc_block_coded,
-                )
-                cond_top = derive_coded_block_flag_cond_term(
-                    top_edge.available, False, top_edge.is_ipcm,
-                    top_edge.dc_block_available, top_edge.dc_block_coded,
-                )
-                dc_levels, coded = self.decode_residual_block(3, cond_left, cond_top, contexts)
-                chroma_dc_coded[component] = coded
-                if coded:
-                    chroma_dc_samples[component] = inverse_scale_chroma_dc2x2(
-                        inverse_transform_chroma_dc2x2(dc_levels[:4]), qpc_values[component]
-                    )
-
-        chroma_ac_flags = [[False] * 4 for _ in range(2)]
-        for component in range(2):
-            residual_blocks = []
-            for block_index in range(4):
-                block_x, block_y = block_index % 2, block_index // 2
-                ac_levels = [0] * 15
-                if cbp_chroma == 2:
-                    left_edge = input.chroma_left_edges[component]
-                    top_edge = input.chroma_top_edges[component]
-                    if block_x:
-                        cond_left = derive_coded_block_flag_cond_term(
-                            True, False, False, True, chroma_ac_flags[component][block_index - 1]
-                        )
-                    elif not left_edge.available or left_edge.is_ipcm:
-                        cond_left = derive_coded_block_flag_cond_term(
-                            left_edge.available, False, left_edge.is_ipcm, False, False
-                        )
-                    else:
-                        cond_left = derive_coded_block_flag_cond_term(
-                            True, False, False,
-                            left_edge.ac_block_available[block_y],
-                            left_edge.ac_block_coded[block_y],
-                        )
-                    if block_y:
-                        cond_top = derive_coded_block_flag_cond_term(
-                            True, False, False, True, chroma_ac_flags[component][block_index - 2]
-                        )
-                    elif not top_edge.available or top_edge.is_ipcm:
-                        cond_top = derive_coded_block_flag_cond_term(
-                            top_edge.available, False, top_edge.is_ipcm, False, False
-                        )
-                    else:
-                        cond_top = derive_coded_block_flag_cond_term(
-                            True, False, False,
-                            top_edge.ac_block_available[block_x],
-                            top_edge.ac_block_coded[block_x],
-                        )
-                    levels, coded = self.decode_residual_block(4, cond_left, cond_top, contexts)
-                    chroma_ac_flags[component][block_index] = coded
-                    if coded:
-                        ac_levels = levels[:15]
-                residual_blocks.append(
-                    reconstruct_chroma4x4_residual(
-                        chroma_dc_samples[component][block_index],
-                        ac_levels,
-                        input.chroma_scaling_lists[component],
-                        qpc_values[component],
-                    )
-                )
-            residual_plane = assemble_chroma420_residual_macroblock(residual_blocks)
-            residual_output.chroma[component] = residual_plane
+        luma_coded_flags, luma_8x8_nonzero = self._decode_inter_luma_residuals(
+            cbp_luma, transform_8x8, qpy, input, contexts, residual_output
+        )
+        chroma_dc_coded, chroma_ac_flags = self._decode_inter_chroma_residuals(
+            cbp_chroma, qpy, input, contexts, residual_output
+        )
 
         return (
             cbp_luma,

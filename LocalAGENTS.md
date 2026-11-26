@@ -9,7 +9,7 @@ with "source .venv/bin/activate". Use "python3" instead of "/usr/bin/python3".
 
 When working in work/pygorvid, make code changes and bug fixes in all four
 languages rust, go, python, and C++, but don't run any python tests unless it can
-be guaranteed they will run in less than 60 seconds. The python tests will be
+be guaranteed they will run in less than 120 seconds. The python tests will be
 run offline later.
 
 When fixing bugs or implementing features in one language, refer to the other
@@ -18,3 +18,5 @@ in one language from the other languages as needed.
 
 For the video file reader and writer objects, codecs, have the error messages show
 the presentation frame number, if available, and if it applies to the operation.
+
+The build of the four languages is controlled by the top level Makefile.

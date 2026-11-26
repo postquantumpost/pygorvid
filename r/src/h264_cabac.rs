@@ -1026,6 +1026,45 @@ struct CabacInterPartitionSpec {
     direct: bool,
 }
 
+struct CabacInterMotionState {
+    prediction_flags: Vec<[bool; 2]>,
+    reference_indices: Vec<[i32; 2]>,
+    motion_vectors: Vec<[crate::MotionVector; 2]>,
+    motion_vector_differences: Vec<[crate::MotionVector; 2]>,
+}
+
+impl CabacInterMotionState {
+    fn new(input: &CabacInterMacroblockInput, specifications: &[CabacInterPartitionSpec]) -> Self {
+        let mut state = Self {
+            prediction_flags: Vec::with_capacity(specifications.len()),
+            reference_indices: Vec::with_capacity(specifications.len()),
+            motion_vectors: Vec::with_capacity(specifications.len()),
+            motion_vector_differences: vec![
+                [crate::MotionVector::default(); 2];
+                specifications.len()
+            ],
+        };
+        for (partition_index, specification) in specifications.iter().enumerate() {
+            let base_index = inter_partition_neighbor_index(input, specification, partition_index);
+            let neighbors = input.partition_neighbors[base_index];
+            let mut flags = specification.prediction_flags;
+            let mut references = [-1_i32; 2];
+            let mut vectors = [crate::MotionVector::default(); 2];
+            if specification.direct {
+                if let Some(direct) = neighbors.direct_prediction {
+                    flags = direct.prediction_flags;
+                    references = direct.reference_indices;
+                    vectors = direct.motion_vectors;
+                }
+            }
+            state.prediction_flags.push(flags);
+            state.reference_indices.push(references);
+            state.motion_vectors.push(vectors);
+        }
+        state
+    }
+}
+
 fn cabac_resolved_inter_partition_neighbors(
     input: &CabacInterMacroblockInput,
     specifications: &[CabacInterPartitionSpec],
@@ -1293,6 +1332,282 @@ fn cabac_spatial_b_direct_prediction(
     })
 }
 
+fn validate_b_direct_input(input: &CabacBDirectMacroblockInput) -> io::Result<()> {
+    if input.slice_type > 9 || input.slice_type % 5 != 1 {
+        return Err(invalid("B_Direct requires a B-slice macroblock input"));
+    }
+    if input.list0_references.is_empty() || input.list1_references.is_empty() {
+        return Err(invalid("B_Direct reference lists are invalid or empty"));
+    }
+    let dimensions = (
+        input.list0_references[0].frame.width,
+        input.list0_references[0].frame.height,
+    );
+    if dimensions.0 == 0
+        || dimensions.1 == 0
+        || input
+            .list0_references
+            .iter()
+            .chain(&input.list1_references)
+            .any(|reference| (reference.frame.width, reference.frame.height) != dimensions)
+    {
+        return Err(invalid(
+            "B_Direct reference picture dimensions do not match",
+        ));
+    }
+    Ok(())
+}
+
+fn b_direct_prediction_references(
+    input: &CabacBDirectMacroblockInput,
+    prediction: &CabacBDirectMacroblockResult,
+) -> io::Result<[Option<(std::sync::Arc<crate::Yuv420Frame>, crate::MotionVector)>; 2]> {
+    let mut references = [None, None];
+    for list_index in 0..2 {
+        if !prediction.prediction_flags[list_index] {
+            continue;
+        }
+        let list = if list_index == 0 {
+            &input.list0_references
+        } else {
+            &input.list1_references
+        };
+        let index = usize::try_from(prediction.reference_indices[list_index])
+            .ok()
+            .filter(|index| *index < list.len())
+            .ok_or_else(|| invalid("B_Direct selected reference index is unavailable"))?;
+        references[list_index] = Some((
+            list[index].frame.clone(),
+            prediction.motion_vectors[list_index],
+        ));
+    }
+    Ok(references)
+}
+
+fn derive_b_direct_motion(
+    input: &CabacBDirectMacroblockInput,
+) -> io::Result<([i32; 2], [crate::MotionVector; 2])> {
+    let mut reference_indices = [-1_i32; 2];
+    let mut motion_vectors = [crate::MotionVector::default(); 2];
+    if input.direct_spatial {
+        let candidates = [
+            [
+                input.left_l0_candidate,
+                input.top_l0_candidate,
+                input.top_right_l0_candidate.or(input.top_left_l0_candidate),
+            ],
+            [
+                input.left_l1_candidate,
+                input.top_l1_candidate,
+                input.top_right_l1_candidate.or(input.top_left_l1_candidate),
+            ],
+        ];
+        let minimum_positive = |left: i32, right: i32| {
+            if left >= 0 && right >= 0 {
+                left.min(right)
+            } else {
+                left.max(right)
+            }
+        };
+        for list_index in 0..2 {
+            let a = candidates[list_index][0]
+                .and_then(|candidate| candidate.reference_index)
+                .unwrap_or(-1);
+            let b = candidates[list_index][1]
+                .and_then(|candidate| candidate.reference_index)
+                .unwrap_or(-1);
+            let c = candidates[list_index][2]
+                .and_then(|candidate| candidate.reference_index)
+                .unwrap_or(-1);
+            reference_indices[list_index] = minimum_positive(a, minimum_positive(b, c));
+        }
+        let direct_zero = reference_indices == [-1, -1];
+        if direct_zero {
+            reference_indices = [0, 0];
+        }
+        let colocated_zero = !input.list1_references[0].long_term
+            && input.colocated_reference_index == 0
+            && (-1..=1).contains(&input.colocated_motion_vector.x)
+            && (-1..=1).contains(&input.colocated_motion_vector.y);
+        let top_left = [input.top_left_l0_candidate, input.top_left_l1_candidate];
+        for list_index in 0..2 {
+            let ref_index = reference_indices[list_index];
+            if direct_zero || ref_index < 0 || (ref_index == 0 && colocated_zero) {
+                continue;
+            }
+            motion_vectors[list_index] = crate::reconstruction::predict_motion_vector(
+                ref_index,
+                candidates[list_index][0],
+                candidates[list_index][1],
+                candidates[list_index][2],
+                top_left[list_index],
+            );
+        }
+    } else {
+        let (reference_index, colocated_motion) = if input.colocated_reference_index < 0 {
+            (0_usize, crate::MotionVector::default())
+        } else {
+            let col_poc = input
+                .colocated_reference_picture_order_count
+                .ok_or_else(|| invalid("B_Direct co-located reference picture is unavailable"))?;
+            let index = input
+                .list0_references
+                .iter()
+                .position(|reference| reference.picture_order_count == col_poc)
+                .ok_or_else(|| {
+                    invalid("B_Direct co-located reference picture is unavailable in list0")
+                })?;
+            (index, input.colocated_motion_vector)
+        };
+        let ref0 = &input.list0_references[reference_index];
+        let ref1 = &input.list1_references[0];
+        let td = ref1
+            .picture_order_count
+            .checked_sub(ref0.picture_order_count)
+            .ok_or_else(|| invalid("B_Direct picture order count arithmetic is invalid"))?
+            .clamp(-128, 127);
+        if ref0.long_term || td == 0 {
+            motion_vectors = [colocated_motion, crate::MotionVector::default()];
+        } else {
+            let tb = input
+                .current_picture_order_count
+                .checked_sub(ref0.picture_order_count)
+                .ok_or_else(|| invalid("B_Direct picture order count arithmetic is invalid"))?
+                .clamp(-128, 127);
+            let tx = (16_384 + (td / 2).abs()) / td;
+            let scale = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+            let scale_component = |value: i32| -> io::Result<i32> {
+                i32::try_from((scale * i64::from(value) + 128) >> 8)
+                    .map_err(|_| invalid("B_Direct motion vector is outside the supported range"))
+            };
+            motion_vectors[0] = crate::MotionVector {
+                x: scale_component(colocated_motion.x)?,
+                y: scale_component(colocated_motion.y)?,
+            };
+            motion_vectors[1] = crate::MotionVector {
+                x: motion_vectors[0]
+                    .x
+                    .checked_sub(colocated_motion.x)
+                    .ok_or_else(|| {
+                        invalid("B_Direct motion vector is outside the supported range")
+                    })?,
+                y: motion_vectors[0]
+                    .y
+                    .checked_sub(colocated_motion.y)
+                    .ok_or_else(|| {
+                        invalid("B_Direct motion vector is outside the supported range")
+                    })?,
+            };
+        }
+        reference_indices = [
+            i32::try_from(reference_index)
+                .map_err(|_| invalid("B_Direct reference index is outside the supported range"))?,
+            0,
+        ];
+    }
+    Ok((reference_indices, motion_vectors))
+}
+
+fn reconstruct_b_direct_8x8_macroblock(
+    input: &CabacBDirectMacroblockInput,
+    builder: &mut crate::Yuv420FrameBuilder,
+    address: usize,
+    skipped: bool,
+) -> io::Result<CabacBDirectMacroblockResult> {
+    let neighbors = CabacInterPartitionNeighbors {
+        list0: CabacInterListNeighbors {
+            left_candidate: input.left_l0_candidate,
+            top_candidate: input.top_l0_candidate,
+            top_right_candidate: input.top_right_l0_candidate,
+            top_left_candidate: input.top_left_l0_candidate,
+            ..CabacInterListNeighbors::default()
+        },
+        list1: CabacInterListNeighbors {
+            left_candidate: input.left_l1_candidate,
+            top_candidate: input.top_l1_candidate,
+            top_right_candidate: input.top_right_l1_candidate,
+            top_left_candidate: input.top_left_l1_candidate,
+            ..CabacInterListNeighbors::default()
+        },
+        direct_prediction: None,
+    };
+    let mut luma = [0_u8; 256];
+    let mut cb = [0_u8; 64];
+    let mut cr = [0_u8; 64];
+    let mut block_reference_indices = [[-1_i32; 2]; 16];
+    let mut block_motion_vectors = [[crate::MotionVector::default(); 2]; 16];
+    let mut block_prediction_flags = [[false; 2]; 16];
+    let mut first = None;
+    for partition_y in (0..16).step_by(8) {
+        for partition_x in (0..16).step_by(8) {
+            let prediction = cabac_spatial_b_direct_prediction(
+                input,
+                neighbors,
+                partition_x,
+                partition_y,
+                true,
+            )?;
+            if first.is_none() {
+                first = Some((
+                    prediction.reference_indices,
+                    prediction.motion_vectors,
+                    prediction.prediction_flags,
+                ));
+            }
+            let references = b_direct_prediction_references(input, &prediction)?;
+            let weights = input.weighting.select(
+                prediction.reference_indices,
+                [
+                    prediction.prediction_flags[0]
+                        .then(|| &input.list0_references[prediction.reference_indices[0] as usize]),
+                    prediction.prediction_flags[1]
+                        .then(|| &input.list1_references[prediction.reference_indices[1] as usize]),
+                ],
+            )?;
+            let (part_luma, part_cb, part_cr) =
+                b_direct_samples(&references, input.macroblock_x, input.macroblock_y, weights)?;
+            for row in 0..8 {
+                for column in 0..8 {
+                    let y = partition_y + row;
+                    let x = partition_x + column;
+                    luma[y * 16 + x] = part_luma[y * 16 + x];
+                }
+            }
+            for row in 0..4 {
+                for column in 0..4 {
+                    let index = (partition_y / 2 + row) * 8 + partition_x / 2 + column;
+                    cb[index] = part_cb[index];
+                    cr[index] = part_cr[index];
+                }
+            }
+            for block_y in partition_y / 4..partition_y / 4 + 2 {
+                for block_x in partition_x / 4..partition_x / 4 + 2 {
+                    let block = block_y * 4 + block_x;
+                    block_reference_indices[block] = prediction.reference_indices;
+                    block_motion_vectors[block] = prediction.motion_vectors;
+                    block_prediction_flags[block] = prediction.prediction_flags;
+                }
+            }
+        }
+    }
+    let (reference_indices, motion_vectors, prediction_flags) =
+        first.ok_or_else(|| invalid("B_Direct 8x8 prediction is incomplete"))?;
+    builder.place_macroblock(address, &luma, &cb, &cr)?;
+    Ok(CabacBDirectMacroblockResult {
+        skipped,
+        reference_indices,
+        motion_vectors,
+        prediction_flags,
+        luma,
+        cb,
+        cr,
+        block_reference_indices: Some(block_reference_indices),
+        block_motion_vectors: Some(block_motion_vectors),
+        block_prediction_flags: Some(block_prediction_flags),
+        ..CabacBDirectMacroblockResult::default()
+    })
+}
+
 fn append_sub_macroblock_partitions(
     output: &mut Vec<CabacInterPartitionSpec>,
     base_x: usize,
@@ -1484,6 +1799,140 @@ fn cabac_inter_partition_specs(
         }
     }
     Ok(output)
+}
+
+fn inter_partition_neighbor_index(
+    input: &CabacInterMacroblockInput,
+    specification: &CabacInterPartitionSpec,
+    partition_index: usize,
+) -> usize {
+    if input.partition_neighbors.len() == 16 {
+        (specification.y / 4) * 4 + specification.x / 4
+    } else {
+        partition_index
+    }
+}
+
+fn resolve_inter_direct_predictions(
+    input: &CabacInterMacroblockInput,
+    specifications: &[CabacInterPartitionSpec],
+    macroblock_type: u8,
+    direct_8x8_inference: bool,
+    direct_input: Option<&CabacBDirectMacroblockInput>,
+    motion: &mut CabacInterMotionState,
+) -> io::Result<()> {
+    for partition_index in 0..specifications.len() {
+        let specification = specifications[partition_index];
+        if !specification.direct {
+            continue;
+        }
+        let group = (specification.y / 8) * 2 + specification.x / 8;
+        if direct_8x8_inference {
+            if let Some(previous_index) = (0..partition_index).rev().find(|&previous| {
+                specifications[previous].direct
+                    && (specifications[previous].y / 8) * 2 + specifications[previous].x / 8
+                        == group
+            }) {
+                motion.prediction_flags[partition_index] = motion.prediction_flags[previous_index];
+                motion.reference_indices[partition_index] =
+                    motion.reference_indices[previous_index];
+                motion.motion_vectors[partition_index] = motion.motion_vectors[previous_index];
+                continue;
+            }
+        }
+        let base_index = inter_partition_neighbor_index(input, &specification, partition_index);
+        if input.partition_neighbors[base_index]
+            .direct_prediction
+            .is_some()
+        {
+            continue;
+        }
+        let direct_input =
+            direct_input.ok_or_else(|| invalid("direct inter partition metadata is required"))?;
+        let neighbors = cabac_resolved_inter_partition_neighbors(
+            input,
+            specifications,
+            if macroblock_type == 0 {
+                0
+            } else {
+                partition_index
+            },
+            macroblock_type == 0,
+            &motion.prediction_flags,
+            &motion.reference_indices,
+            &motion.motion_vectors,
+            &motion.motion_vector_differences,
+        );
+        let prediction = cabac_spatial_b_direct_prediction(
+            direct_input,
+            neighbors,
+            specification.x,
+            specification.y,
+            direct_8x8_inference,
+        )?;
+        motion.prediction_flags[partition_index] = prediction.prediction_flags;
+        motion.reference_indices[partition_index] = prediction.reference_indices;
+        motion.motion_vectors[partition_index] = prediction.motion_vectors;
+    }
+    Ok(())
+}
+
+fn build_inter_partition_predictions(
+    input: &CabacInterMacroblockInput,
+    specifications: &[CabacInterPartitionSpec],
+    motion: &CabacInterMotionState,
+    result: &mut CabacInterMacroblockResult,
+) -> io::Result<Vec<InterPartitionPrediction>> {
+    let mut predictions = Vec::with_capacity(specifications.len());
+    for (partition_index, specification) in specifications.iter().enumerate() {
+        let flags = motion.prediction_flags[partition_index];
+        let references = motion.reference_indices[partition_index];
+        let vectors = motion.motion_vectors[partition_index];
+        if !flags[0] && !flags[1] {
+            return Err(invalid("inter partition has no active prediction list"));
+        }
+        let mut prediction_references = [None, None];
+        for list_index in 0..2 {
+            if !flags[list_index] {
+                continue;
+            }
+            let reference_index = usize::try_from(references[list_index])
+                .ok()
+                .filter(|index| *index < input.reference_lists[list_index].len())
+                .ok_or_else(|| invalid("inter macroblock reference index is unavailable"))?;
+            prediction_references[list_index] = Some((
+                input.reference_lists[list_index][reference_index]
+                    .frame
+                    .clone(),
+                vectors[list_index],
+            ));
+        }
+        predictions.push(InterPartitionPrediction {
+            weights: input.weighting.select(
+                references,
+                [
+                    (references[0] >= 0).then(|| &input.reference_lists[0][references[0] as usize]),
+                    (references[1] >= 0).then(|| &input.reference_lists[1][references[1] as usize]),
+                ],
+            )?,
+            x: specification.x,
+            y: specification.y,
+            width: specification.width,
+            height: specification.height,
+            references: prediction_references,
+        });
+        result.partitions.push(CabacInterMacroblockPartition {
+            x: specification.x,
+            y: specification.y,
+            width: specification.width,
+            height: specification.height,
+            prediction_flags: flags,
+            reference_indices: references,
+            motion_vectors: vectors,
+            motion_vector_differences: motion.motion_vector_differences[partition_index],
+        });
+    }
+    Ok(predictions)
 }
 
 /// External top/left edge CBF state needed by Intra_4x4 coded_block_flag contexts.
@@ -2890,272 +3339,13 @@ impl<'a> CabacArithmeticDecoder<'a> {
         address: usize,
         skipped: bool,
     ) -> io::Result<CabacBDirectMacroblockResult> {
-        if input.slice_type > 9 || input.slice_type % 5 != 1 {
-            return Err(invalid("B_Direct requires a B-slice macroblock input"));
-        }
-        if input.list0_references.is_empty() || input.list1_references.is_empty() {
-            return Err(invalid("B_Direct reference lists are invalid or empty"));
-        }
-        let dimensions = (
-            input.list0_references[0].frame.width,
-            input.list0_references[0].frame.height,
-        );
-        if dimensions.0 == 0
-            || dimensions.1 == 0
-            || input
-                .list0_references
-                .iter()
-                .chain(&input.list1_references)
-                .any(|reference| (reference.frame.width, reference.frame.height) != dimensions)
-        {
-            return Err(invalid(
-                "B_Direct reference picture dimensions do not match",
-            ));
-        }
+        validate_b_direct_input(input)?;
 
         if input.direct_spatial && input.direct_8x8_inference {
-            let neighbors = CabacInterPartitionNeighbors {
-                list0: CabacInterListNeighbors {
-                    left_candidate: input.left_l0_candidate,
-                    top_candidate: input.top_l0_candidate,
-                    top_right_candidate: input.top_right_l0_candidate,
-                    top_left_candidate: input.top_left_l0_candidate,
-                    ..CabacInterListNeighbors::default()
-                },
-                list1: CabacInterListNeighbors {
-                    left_candidate: input.left_l1_candidate,
-                    top_candidate: input.top_l1_candidate,
-                    top_right_candidate: input.top_right_l1_candidate,
-                    top_left_candidate: input.top_left_l1_candidate,
-                    ..CabacInterListNeighbors::default()
-                },
-                direct_prediction: None,
-            };
-            let mut luma = [0_u8; 256];
-            let mut cb = [0_u8; 64];
-            let mut cr = [0_u8; 64];
-            let mut block_reference_indices = [[-1_i32; 2]; 16];
-            let mut block_motion_vectors = [[crate::MotionVector::default(); 2]; 16];
-            let mut block_prediction_flags = [[false; 2]; 16];
-            let mut first = None;
-            for partition_y in (0..16).step_by(8) {
-                for partition_x in (0..16).step_by(8) {
-                    let prediction = cabac_spatial_b_direct_prediction(
-                        input,
-                        neighbors,
-                        partition_x,
-                        partition_y,
-                        true,
-                    )?;
-                    if first.is_none() {
-                        first = Some((
-                            prediction.reference_indices,
-                            prediction.motion_vectors,
-                            prediction.prediction_flags,
-                        ));
-                    }
-                    let mut references = [None, None];
-                    for list_index in 0..2 {
-                        if prediction.prediction_flags[list_index] {
-                            let list = if list_index == 0 {
-                                &input.list0_references
-                            } else {
-                                &input.list1_references
-                            };
-                            let index = usize::try_from(prediction.reference_indices[list_index])
-                                .map_err(|_| {
-                                invalid("B_Direct selected reference index is unavailable")
-                            })?;
-                            let reference = list.get(index).ok_or_else(|| {
-                                invalid("B_Direct selected reference index is unavailable")
-                            })?;
-                            references[list_index] = Some((
-                                reference.frame.clone(),
-                                prediction.motion_vectors[list_index],
-                            ));
-                        }
-                    }
-                    let weights = input.weighting.select(
-                        prediction.reference_indices,
-                        [
-                            prediction.prediction_flags[0].then(|| {
-                                &input.list0_references[prediction.reference_indices[0] as usize]
-                            }),
-                            prediction.prediction_flags[1].then(|| {
-                                &input.list1_references[prediction.reference_indices[1] as usize]
-                            }),
-                        ],
-                    )?;
-                    let (part_luma, part_cb, part_cr) = b_direct_samples(
-                        &references,
-                        input.macroblock_x,
-                        input.macroblock_y,
-                        weights,
-                    )?;
-                    for row in 0..8 {
-                        for column in 0..8 {
-                            let y = partition_y + row;
-                            let x = partition_x + column;
-                            luma[y * 16 + x] = part_luma[y * 16 + x];
-                        }
-                    }
-                    for row in 0..4 {
-                        for column in 0..4 {
-                            let index = (partition_y / 2 + row) * 8 + partition_x / 2 + column;
-                            cb[index] = part_cb[index];
-                            cr[index] = part_cr[index];
-                        }
-                    }
-                    for block_y in partition_y / 4..partition_y / 4 + 2 {
-                        for block_x in partition_x / 4..partition_x / 4 + 2 {
-                            let block = block_y * 4 + block_x;
-                            block_reference_indices[block] = prediction.reference_indices;
-                            block_motion_vectors[block] = prediction.motion_vectors;
-                            block_prediction_flags[block] = prediction.prediction_flags;
-                        }
-                    }
-                }
-            }
-            let (reference_indices, motion_vectors, prediction_flags) =
-                first.ok_or_else(|| invalid("B_Direct 8x8 prediction is incomplete"))?;
-            builder.place_macroblock(address, &luma, &cb, &cr)?;
-            return Ok(CabacBDirectMacroblockResult {
-                skipped,
-                reference_indices,
-                motion_vectors,
-                prediction_flags,
-                luma,
-                cb,
-                cr,
-                block_reference_indices: Some(block_reference_indices),
-                block_motion_vectors: Some(block_motion_vectors),
-                block_prediction_flags: Some(block_prediction_flags),
-                ..CabacBDirectMacroblockResult::default()
-            });
+            return reconstruct_b_direct_8x8_macroblock(input, builder, address, skipped);
         }
 
-        let mut reference_indices = [-1_i32; 2];
-        let mut motion_vectors = [crate::MotionVector::default(); 2];
-        if input.direct_spatial {
-            let candidates = [
-                [
-                    input.left_l0_candidate,
-                    input.top_l0_candidate,
-                    input.top_right_l0_candidate.or(input.top_left_l0_candidate),
-                ],
-                [
-                    input.left_l1_candidate,
-                    input.top_l1_candidate,
-                    input.top_right_l1_candidate.or(input.top_left_l1_candidate),
-                ],
-            ];
-            let minimum_positive = |left: i32, right: i32| {
-                if left >= 0 && right >= 0 {
-                    left.min(right)
-                } else {
-                    left.max(right)
-                }
-            };
-            for list_index in 0..2 {
-                let a = candidates[list_index][0]
-                    .and_then(|candidate| candidate.reference_index)
-                    .unwrap_or(-1);
-                let b = candidates[list_index][1]
-                    .and_then(|candidate| candidate.reference_index)
-                    .unwrap_or(-1);
-                let c = candidates[list_index][2]
-                    .and_then(|candidate| candidate.reference_index)
-                    .unwrap_or(-1);
-                reference_indices[list_index] = minimum_positive(a, minimum_positive(b, c));
-            }
-            let direct_zero = reference_indices == [-1, -1];
-            if direct_zero {
-                reference_indices = [0, 0];
-            }
-            let colocated_zero = !input.list1_references[0].long_term
-                && input.colocated_reference_index == 0
-                && (-1..=1).contains(&input.colocated_motion_vector.x)
-                && (-1..=1).contains(&input.colocated_motion_vector.y);
-            let top_left = [input.top_left_l0_candidate, input.top_left_l1_candidate];
-            for list_index in 0..2 {
-                let ref_index = reference_indices[list_index];
-                if direct_zero || ref_index < 0 || (ref_index == 0 && colocated_zero) {
-                    continue;
-                }
-                motion_vectors[list_index] = crate::reconstruction::predict_motion_vector(
-                    ref_index,
-                    candidates[list_index][0],
-                    candidates[list_index][1],
-                    candidates[list_index][2],
-                    top_left[list_index],
-                );
-            }
-        } else {
-            let (reference_index, colocated_motion) = if input.colocated_reference_index < 0 {
-                (0_usize, crate::MotionVector::default())
-            } else {
-                let col_poc = input
-                    .colocated_reference_picture_order_count
-                    .ok_or_else(|| {
-                        invalid("B_Direct co-located reference picture is unavailable")
-                    })?;
-                let index = input
-                    .list0_references
-                    .iter()
-                    .position(|reference| reference.picture_order_count == col_poc)
-                    .ok_or_else(|| {
-                        invalid("B_Direct co-located reference picture is unavailable in list0")
-                    })?;
-                (index, input.colocated_motion_vector)
-            };
-            let ref0 = &input.list0_references[reference_index];
-            let ref1 = &input.list1_references[0];
-            let td = ref1
-                .picture_order_count
-                .checked_sub(ref0.picture_order_count)
-                .ok_or_else(|| invalid("B_Direct picture order count arithmetic is invalid"))?
-                .clamp(-128, 127);
-            if ref0.long_term || td == 0 {
-                motion_vectors = [colocated_motion, crate::MotionVector::default()];
-            } else {
-                let tb = input
-                    .current_picture_order_count
-                    .checked_sub(ref0.picture_order_count)
-                    .ok_or_else(|| invalid("B_Direct picture order count arithmetic is invalid"))?
-                    .clamp(-128, 127);
-                let tx = (16_384 + (td / 2).abs()) / td;
-                let scale = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
-                let scale_component = |value: i32| -> io::Result<i32> {
-                    i32::try_from((scale * i64::from(value) + 128) >> 8).map_err(|_| {
-                        invalid("B_Direct motion vector is outside the supported range")
-                    })
-                };
-                motion_vectors[0] = crate::MotionVector {
-                    x: scale_component(colocated_motion.x)?,
-                    y: scale_component(colocated_motion.y)?,
-                };
-                motion_vectors[1] = crate::MotionVector {
-                    x: motion_vectors[0]
-                        .x
-                        .checked_sub(colocated_motion.x)
-                        .ok_or_else(|| {
-                            invalid("B_Direct motion vector is outside the supported range")
-                        })?,
-                    y: motion_vectors[0]
-                        .y
-                        .checked_sub(colocated_motion.y)
-                        .ok_or_else(|| {
-                            invalid("B_Direct motion vector is outside the supported range")
-                        })?,
-                };
-            }
-            reference_indices = [
-                i32::try_from(reference_index).map_err(|_| {
-                    invalid("B_Direct reference index is outside the supported range")
-                })?,
-                0,
-            ];
-        }
+        let (reference_indices, motion_vectors) = derive_b_direct_motion(input)?;
 
         let prediction_flags = [reference_indices[0] >= 0, reference_indices[1] >= 0];
         if !prediction_flags[0] && !prediction_flags[1] {
@@ -3422,31 +3612,29 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 let (ac_levels, coded) =
                     trial.decode_residual_block(1, cond_left, cond_top, &mut trial_contexts)?;
                 result.ac_coded_block_flags[block_index] = coded;
+                let mut ac_scan_levels = [0_i32; 15];
                 if coded {
-                    let mut scan = [0_i32; 16];
-                    scan[1..].copy_from_slice(&ac_levels[..15]);
-                    let mut raster_levels = place_luma4x4_scan_levels(&scan);
-                    raster_levels[0] = 0;
-                    let mut coefficients = crate::reconstruction::inverse_scale_luma4x4(
-                        &raster_levels,
-                        scaling_list,
-                        qpy,
-                    )?;
-                    coefficients[0] = result.dc_levels[raster];
-                    let block_residual =
-                        crate::reconstruction::inverse_transform_luma4x4(&coefficients);
-                    for row in 0..4 {
-                        let destination = (block_y * 4 + row) * 16 + block_x * 4;
-                        result.residual[destination..destination + 4]
-                            .copy_from_slice(&block_residual[row * 4..row * 4 + 4]);
-                    }
-                    continue;
+                    ac_scan_levels.copy_from_slice(&ac_levels[..15]);
                 }
+                let block_residual = crate::reconstruction::reconstruct_luma4x4_ac_residual(
+                    &ac_scan_levels,
+                    result.dc_levels[raster],
+                    scaling_list,
+                    qpy,
+                )?;
+                for row in 0..4 {
+                    let destination = (block_y * 4 + row) * 16 + block_x * 4;
+                    result.residual[destination..destination + 4]
+                        .copy_from_slice(&block_residual[row * 4..row * 4 + 4]);
+                }
+                continue;
             }
-            let mut coefficients =
-                crate::reconstruction::inverse_scale_luma4x4(&[0; 16], scaling_list, qpy)?;
-            coefficients[0] = result.dc_levels[raster];
-            let block_residual = crate::reconstruction::inverse_transform_luma4x4(&coefficients);
+            let block_residual = crate::reconstruction::reconstruct_luma4x4_ac_residual(
+                &[0; 15],
+                result.dc_levels[raster],
+                scaling_list,
+                qpy,
+            )?;
             for row in 0..4 {
                 let destination = (block_y * 4 + row) * 16 + block_x * 4;
                 result.residual[destination..destination + 4]
@@ -3564,10 +3752,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
         for component in 0..2 {
             let qpc = result.qpc[component];
             let dc_samples = component_dc_samples[component];
-            let mut residual_blocks = [[0_i64; 16]; 4];
+            let mut ac_scan_blocks = [[0_i32; 15]; 4];
             let mut ac_coded_flags = [false; 4];
             for block_index in 0..4 {
-                let mut ac_scan_levels = [0_i32; 15];
                 if coded_block_pattern_chroma == 2 {
                     let cond_left = derive_chroma_ac_cond_term(
                         block_index,
@@ -3585,20 +3772,17 @@ impl<'a> CabacArithmeticDecoder<'a> {
                         trial.decode_residual_block(4, cond_left, cond_top, &mut trial_contexts)?;
                     ac_coded_flags[block_index] = coded;
                     if coded {
-                        ac_scan_levels.copy_from_slice(&levels[..15]);
+                        ac_scan_blocks[block_index].copy_from_slice(&levels[..15]);
                     }
                 }
-                residual_blocks[block_index] =
-                    crate::reconstruction::reconstruct_chroma4x4_residual(
-                        dc_samples[block_index],
-                        &ac_scan_levels,
-                        &scaling_lists[component],
-                        qpc,
-                    )?;
             }
             result.ac_coded_block_flags[component] = ac_coded_flags;
-            let residual =
-                crate::reconstruction::assemble_chroma420_residual_macroblock(&residual_blocks);
+            let residual = crate::h264_utils::reconstruct_chroma_component_residual(
+                &dc_samples,
+                &ac_scan_blocks,
+                &scaling_lists[component],
+                qpc,
+            )?;
             let references = references[component];
             let prediction = crate::reconstruction::predict_chroma_intra8x8(
                 prediction_mode,
@@ -3689,40 +3873,7 @@ impl<'a> CabacArithmeticDecoder<'a> {
             ..CabacIIntraMacroblockResult::default()
         };
         if mb_type == 25 {
-            let mut y_block = [0_u8; 256];
-            let mut cb_block = [0_u8; 64];
-            let mut cr_block = [0_u8; 64];
-            while trial.bits.bit_offset() % 8 != 0 {
-                if trial.bits.read_bit()? {
-                    return Err(invalid("I_PCM alignment bit is not zero"));
-                }
-            }
-            for sample in &mut y_block {
-                *sample = trial.bits.read_bits(8)? as u8;
-            }
-            for sample in &mut cb_block {
-                *sample = trial.bits.read_bits(8)? as u8;
-            }
-            for sample in &mut cr_block {
-                *sample = trial.bits.read_bits(8)? as u8;
-            }
-            let offset = if trial.cavlc.is_some() {
-                0
-            } else {
-                trial.bits.read_bits(9)? as u32
-            };
-            if offset >= INITIAL_RANGE {
-                return Err(invalid(
-                    "I_PCM CABAC offset is outside the arithmetic range",
-                ));
-            }
-            builder.place_macroblock(address, &y_block, &cb_block, &cr_block)?;
-            trial.code_range = INITIAL_RANGE;
-            trial.code_offset = offset;
-            trial.terminated = false;
-            result.luma = y_block;
-            result.cb = cb_block;
-            result.cr = cr_block;
+            trial.decode_i_pcm_macroblock_body(builder, address, &mut result)?;
             self.bits = trial.bits;
             self.code_range = trial.code_range;
             self.code_offset = trial.code_offset;
@@ -3732,100 +3883,9 @@ impl<'a> CabacArithmeticDecoder<'a> {
             return Ok(result);
         }
 
-        let mut modes_4x4 = [0_u8; 16];
-        let mut modes_8x8 = [0_u8; 4];
         if mb_type == 0 {
-            if input.transform_8x8_mode_enabled {
-                let mut transform_contexts = [
-                    trial_contexts[399],
-                    trial_contexts[400],
-                    trial_contexts[401],
-                ];
-                result.transform_size_8x8 = trial.decode_transform_size_8x8_flag(
-                    &mut transform_contexts,
-                    input.left_has_8x8_transform,
-                    input.top_has_8x8_transform,
-                )?;
-                trial_contexts[399..402].copy_from_slice(&transform_contexts);
-            }
-            let mut mode_contexts = [trial_contexts[68], trial_contexts[69]];
-            if result.transform_size_8x8 {
-                for block_index in 0..4 {
-                    let block_x = block_index % 2;
-                    let block_y = block_index / 2;
-                    let mut left_available = input.left_mode_available;
-                    let mut top_available = input.top_mode_available;
-                    let mut left_mode = input.left_modes_8x8[block_y];
-                    let mut top_mode = input.top_modes_8x8[block_x];
-                    if block_x > 0 {
-                        left_available = true;
-                        left_mode = modes_8x8[block_index - 1];
-                    }
-                    if block_y > 0 {
-                        top_available = true;
-                        top_mode = modes_8x8[block_index - 2];
-                    }
-                    let predicted = if left_available && top_available {
-                        left_mode.min(top_mode)
-                    } else {
-                        2
-                    };
-                    modes_8x8[block_index] =
-                        trial.decode_intra4x4_pred_mode(predicted, &mut mode_contexts)?;
-                }
-            } else {
-                modes_4x4 = trial.decode_intra4x4_pred_modes(
-                    &mut mode_contexts,
-                    &input.top_modes_4x4,
-                    &input.left_modes_4x4,
-                    input.top_mode_available,
-                    input.left_mode_available,
-                )?;
-            }
-            trial_contexts[68..70].copy_from_slice(&mode_contexts);
-            let mut chroma_mode_contexts = [
-                trial_contexts[64],
-                trial_contexts[65],
-                trial_contexts[66],
-                trial_contexts[67],
-            ];
-            let chroma_mode = trial.decode_intra_chroma_pred_mode(
-                &mut chroma_mode_contexts,
-                input.chroma_left_mode_nonzero,
-                input.chroma_top_mode_nonzero,
-            )?;
-            result.chroma_prediction_mode = chroma_mode;
-            result.luma_4x4_modes = modes_4x4;
-            result.luma_8x8_modes = modes_8x8;
-            trial_contexts[64..68].copy_from_slice(&chroma_mode_contexts);
-            let mut luma_cbp_contexts = [
-                trial_contexts[73],
-                trial_contexts[74],
-                trial_contexts[75],
-                trial_contexts[76],
-            ];
-            result.coded_block_pattern_luma = trial.decode_luma_coded_block_pattern(
-                input.left_luma_cbp,
-                input.top_luma_cbp,
-                &mut luma_cbp_contexts,
-            )?;
-            trial_contexts[73..77].copy_from_slice(&luma_cbp_contexts);
-            let mut chroma_cbp_contexts = [
-                trial_contexts[77],
-                trial_contexts[78],
-                trial_contexts[79],
-                trial_contexts[80],
-                trial_contexts[81],
-                trial_contexts[82],
-                trial_contexts[83],
-                trial_contexts[84],
-            ];
-            result.coded_block_pattern_chroma = trial.decode_chroma_coded_block_pattern(
-                input.left_chroma_cbp,
-                input.top_chroma_cbp,
-                &mut chroma_cbp_contexts,
-            )?;
-            trial_contexts[77..85].copy_from_slice(&chroma_cbp_contexts);
+            let (modes_4x4, modes_8x8, chroma_mode) =
+                trial.decode_intra_nxn_syntax(&input, &mut trial_contexts, &mut result)?;
             let (qpy, qp_delta) = decode_intra_macroblock_qp(
                 &mut trial,
                 &mut trial_contexts,
@@ -3852,13 +3912,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     for (scan_index, raster_index) in LUMA8X8_SCAN_TO_RASTER.iter().enumerate() {
                         raster[*raster_index] = levels[scan_index];
                     }
-                    let coefficients = crate::reconstruction::inverse_scale_luma8x8(
-                        &raster,
-                        &input.luma_8x8_scaling_list,
-                        qpy,
-                    )?;
                     blocks[block_index].residual =
-                        crate::reconstruction::inverse_transform_luma8x8(&coefficients);
+                        crate::reconstruction::reconstruct_luma8x8_residual(
+                            &raster,
+                            &input.luma_8x8_scaling_list,
+                            qpy,
+                        )?;
                 }
                 result.luma = crate::reconstruction::reconstruct_luma_intra8x8_macroblock(&blocks)?;
             } else {
@@ -3895,13 +3954,12 @@ impl<'a> CabacArithmeticDecoder<'a> {
                     result.luma_4x4_coded_block_flags[block_index] = coded;
                     if coded {
                         let raster_levels = crate::place_luma4x4_scan_levels(&levels);
-                        let coefficients = crate::reconstruction::inverse_scale_luma4x4(
-                            &raster_levels,
-                            &input.luma_4x4_scaling_list,
-                            qpy,
-                        )?;
                         blocks[block_index].residual =
-                            crate::reconstruction::inverse_transform_luma4x4(&coefficients);
+                            crate::reconstruction::reconstruct_luma4x4_residual(
+                                &raster_levels,
+                                &input.luma_4x4_scaling_list,
+                                qpy,
+                            )?;
                     }
                 }
                 result.luma = crate::reconstruction::reconstruct_luma_intra4x4_macroblock(&blocks)?;
@@ -4004,6 +4062,135 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(result)
+    }
+
+    fn decode_i_pcm_macroblock_body(
+        &mut self,
+        builder: &mut crate::Yuv420FrameBuilder,
+        address: usize,
+        result: &mut CabacIIntraMacroblockResult,
+    ) -> io::Result<()> {
+        let mut y_block = [0_u8; 256];
+        let mut cb_block = [0_u8; 64];
+        let mut cr_block = [0_u8; 64];
+        while self.bits.bit_offset() % 8 != 0 {
+            if self.bits.read_bit()? {
+                return Err(invalid("I_PCM alignment bit is not zero"));
+            }
+        }
+        for plane in [&mut y_block[..], &mut cb_block[..], &mut cr_block[..]] {
+            for sample in plane {
+                *sample = self.bits.read_bits(8)? as u8;
+            }
+        }
+        let offset = if self.cavlc.is_some() {
+            0
+        } else {
+            self.bits.read_bits(9)? as u32
+        };
+        if offset >= INITIAL_RANGE {
+            return Err(invalid(
+                "I_PCM CABAC offset is outside the arithmetic range",
+            ));
+        }
+        builder.place_macroblock(address, &y_block, &cb_block, &cr_block)?;
+        self.code_range = INITIAL_RANGE;
+        self.code_offset = offset;
+        self.terminated = false;
+        result.luma = y_block;
+        result.cb = cb_block;
+        result.cr = cr_block;
+        Ok(())
+    }
+
+    fn decode_intra_nxn_syntax(
+        &mut self,
+        input: &CabacIIntraMacroblockInput,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        result: &mut CabacIIntraMacroblockResult,
+    ) -> io::Result<([u8; 16], [u8; 4], u8)> {
+        let mut modes_4x4 = [0_u8; 16];
+        let mut modes_8x8 = [0_u8; 4];
+        if input.transform_8x8_mode_enabled {
+            let mut transform_contexts = [contexts[399], contexts[400], contexts[401]];
+            result.transform_size_8x8 = self.decode_transform_size_8x8_flag(
+                &mut transform_contexts,
+                input.left_has_8x8_transform,
+                input.top_has_8x8_transform,
+            )?;
+            contexts[399..402].copy_from_slice(&transform_contexts);
+        }
+        let mut mode_contexts = [contexts[68], contexts[69]];
+        if result.transform_size_8x8 {
+            for block_index in 0..4 {
+                let block_x = block_index % 2;
+                let block_y = block_index / 2;
+                let mut left_available = input.left_mode_available;
+                let mut top_available = input.top_mode_available;
+                let mut left_mode = input.left_modes_8x8[block_y];
+                let mut top_mode = input.top_modes_8x8[block_x];
+                if block_x > 0 {
+                    left_available = true;
+                    left_mode = modes_8x8[block_index - 1];
+                }
+                if block_y > 0 {
+                    top_available = true;
+                    top_mode = modes_8x8[block_index - 2];
+                }
+                let predicted = if left_available && top_available {
+                    left_mode.min(top_mode)
+                } else {
+                    2
+                };
+                modes_8x8[block_index] =
+                    self.decode_intra4x4_pred_mode(predicted, &mut mode_contexts)?;
+            }
+        } else {
+            modes_4x4 = self.decode_intra4x4_pred_modes(
+                &mut mode_contexts,
+                &input.top_modes_4x4,
+                &input.left_modes_4x4,
+                input.top_mode_available,
+                input.left_mode_available,
+            )?;
+        }
+        contexts[68..70].copy_from_slice(&mode_contexts);
+
+        let mut chroma_mode_contexts = [contexts[64], contexts[65], contexts[66], contexts[67]];
+        let chroma_mode = self.decode_intra_chroma_pred_mode(
+            &mut chroma_mode_contexts,
+            input.chroma_left_mode_nonzero,
+            input.chroma_top_mode_nonzero,
+        )?;
+        contexts[64..68].copy_from_slice(&chroma_mode_contexts);
+        result.chroma_prediction_mode = chroma_mode;
+        result.luma_4x4_modes = modes_4x4;
+        result.luma_8x8_modes = modes_8x8;
+
+        let mut luma_cbp_contexts = [contexts[73], contexts[74], contexts[75], contexts[76]];
+        result.coded_block_pattern_luma = self.decode_luma_coded_block_pattern(
+            input.left_luma_cbp,
+            input.top_luma_cbp,
+            &mut luma_cbp_contexts,
+        )?;
+        contexts[73..77].copy_from_slice(&luma_cbp_contexts);
+        let mut chroma_cbp_contexts = [
+            contexts[77],
+            contexts[78],
+            contexts[79],
+            contexts[80],
+            contexts[81],
+            contexts[82],
+            contexts[83],
+            contexts[84],
+        ];
+        result.coded_block_pattern_chroma = self.decode_chroma_coded_block_pattern(
+            input.left_chroma_cbp,
+            input.top_chroma_cbp,
+            &mut chroma_cbp_contexts,
+        )?;
+        contexts[77..85].copy_from_slice(&chroma_cbp_contexts);
+        Ok((modes_4x4, modes_8x8, chroma_mode))
     }
 
     /// Decodes and places one 8-bit 4:2:0 I_PCM macroblock, then restarts CABAC per clause 9.3.1.2.
@@ -4249,9 +4436,11 @@ impl<'a> CabacArithmeticDecoder<'a> {
             }
             let scan_levels = trial.decode_luma8x8_residual_block(&mut trial_contexts)?;
             let raster_levels = place_luma8x8_scan_levels(&scan_levels);
-            let scaled =
-                crate::reconstruction::inverse_scale_luma8x8(&raster_levels, scaling_list, qpy)?;
-            let residual = crate::reconstruction::inverse_transform_luma8x8(&scaled);
+            let residual = crate::reconstruction::reconstruct_luma8x8_residual(
+                &raster_levels,
+                scaling_list,
+                qpy,
+            )?;
             reconstructed_blocks[block_index].residual = residual;
             result.residuals[block_index] = residual;
         }
@@ -4928,286 +5117,31 @@ impl<'a> CabacArithmeticDecoder<'a> {
             chroma_dc_coded: [false; 2],
             chroma_ac_coded_flags: [[false; 4]; 2],
         };
-        let mut prediction_flags = Vec::with_capacity(specifications.len());
-        let mut reference_indices = Vec::with_capacity(specifications.len());
-        let mut motion_vectors = Vec::with_capacity(specifications.len());
-        let mut motion_vector_differences =
-            vec![[crate::MotionVector::default(); 2]; specifications.len()];
-        for (partition_index, specification) in specifications.iter().enumerate() {
-            let base_index = if input.partition_neighbors.len() == 16 {
-                (specification.y / 4) * 4 + specification.x / 4
-            } else {
-                partition_index
-            };
-            let neighbors = input.partition_neighbors[base_index];
-            let mut flags = specification.prediction_flags;
-            let mut references = [-1_i32; 2];
-            let mut vectors = [crate::MotionVector::default(); 2];
-            if specification.direct {
-                if let Some(direct) = neighbors.direct_prediction {
-                    flags = direct.prediction_flags;
-                    references = direct.reference_indices;
-                    vectors = direct.motion_vectors;
-                }
-            }
-            prediction_flags.push(flags);
-            reference_indices.push(references);
-            motion_vectors.push(vectors);
-        }
+        let mut motion = CabacInterMotionState::new(&input, &specifications);
+        resolve_inter_direct_predictions(
+            &input,
+            &specifications,
+            macroblock_type,
+            direct_8x8_inference,
+            direct_input,
+            &mut motion,
+        )?;
 
-        for partition_index in 0..specifications.len() {
-            if !specifications[partition_index].direct {
-                continue;
-            }
-            let direct_8x8_inference =
-                residual_input.is_some_and(|residual| residual.direct_8x8_inference_flag);
-            let group =
-                (specifications[partition_index].y / 8) * 2 + specifications[partition_index].x / 8;
-            if direct_8x8_inference {
-                if let Some(previous_index) = (0..partition_index).rev().find(|&previous| {
-                    specifications[previous].direct
-                        && (specifications[previous].y / 8) * 2 + specifications[previous].x / 8
-                            == group
-                }) {
-                    prediction_flags[partition_index] = prediction_flags[previous_index];
-                    reference_indices[partition_index] = reference_indices[previous_index];
-                    motion_vectors[partition_index] = motion_vectors[previous_index];
-                    continue;
-                }
-            }
-            let base_index = if input.partition_neighbors.len() == 16 {
-                (specifications[partition_index].y / 4) * 4 + specifications[partition_index].x / 4
-            } else {
-                partition_index
-            };
-            if input.partition_neighbors[base_index]
-                .direct_prediction
-                .is_some()
-            {
-                continue;
-            }
-            let direct_input = direct_input
-                .ok_or_else(|| invalid("direct inter partition metadata is required"))?;
-            let neighbor_partition_index = if macroblock_type == 0 {
-                0
-            } else {
-                partition_index
-            };
-            let neighbors = cabac_resolved_inter_partition_neighbors(
-                &input,
-                &specifications,
-                neighbor_partition_index,
-                macroblock_type == 0,
-                &prediction_flags,
-                &reference_indices,
-                &motion_vectors,
-                &motion_vector_differences,
-            );
-            let prediction = cabac_spatial_b_direct_prediction(
-                direct_input,
-                neighbors,
-                specifications[partition_index].x,
-                specifications[partition_index].y,
-                residual_input.is_some_and(|residual| residual.direct_8x8_inference_flag),
-            )?;
-            prediction_flags[partition_index] = prediction.prediction_flags;
-            reference_indices[partition_index] = prediction.reference_indices;
-            motion_vectors[partition_index] = prediction.motion_vectors;
-        }
-
-        for list_index in 0..2 {
-            for group in 0..4 {
-                let Some(first_index) = specifications.iter().position(|specification| {
-                    (specification.y / 8) * 2 + specification.x / 8 == group
-                }) else {
-                    continue;
-                };
-                if specifications[first_index].direct || !prediction_flags[first_index][list_index]
-                {
-                    continue;
-                }
-                let neighbors = cabac_resolved_inter_partition_neighbors(
-                    &input,
-                    &specifications,
-                    first_index,
-                    false,
-                    &prediction_flags,
-                    &reference_indices,
-                    &motion_vectors,
-                    &motion_vector_differences,
-                );
-                let list_neighbors = if list_index == 0 {
-                    neighbors.list0
-                } else {
-                    neighbors.list1
-                };
-                let decoded_reference_index = if matches!(input.slice_type % 5, 0 | 3)
-                    && macroblock_type == 4
-                {
-                    0
-                } else {
-                    let mut ref_contexts: [CabacContextModel; 6] = trial_contexts[54..60]
-                        .try_into()
-                        .map_err(|_| invalid("ref_idx context range is invalid"))?;
-                    let value = i32::from(trial.decode_reference_index_for_partition(
-                        input.max_reference_index_minus1[list_index],
-                        list_neighbors.left,
-                        list_neighbors.top,
-                        false,
-                        false,
-                        &mut ref_contexts,
-                    ).map_err(|error| invalid(format!(
-                        "macroblock ({}, {}), type {macroblock_type}, partition {first_index}, list {list_index}, maximum {}: {error}",
-                        input.macroblock_x, input.macroblock_y,
-                        input.max_reference_index_minus1[list_index],
-                    )))?);
-                    trial_contexts[54..60].copy_from_slice(&ref_contexts);
-                    value
-                };
-                for (partition_index, specification) in specifications.iter().enumerate() {
-                    let partition_group = (specification.y / 8) * 2 + specification.x / 8;
-                    if partition_group == group
-                        && !specification.direct
-                        && prediction_flags[partition_index][list_index]
-                    {
-                        reference_indices[partition_index][list_index] = decoded_reference_index;
-                    }
-                }
-            }
-        }
-
-        for list_index in 0..2 {
-            for (partition_index, specification) in specifications.iter().enumerate() {
-                if specification.direct || !prediction_flags[partition_index][list_index] {
-                    continue;
-                }
-                let neighbors = cabac_resolved_inter_partition_neighbors(
-                    &input,
-                    &specifications,
-                    partition_index,
-                    false,
-                    &prediction_flags,
-                    &reference_indices,
-                    &motion_vectors,
-                    &motion_vector_differences,
-                );
-                let list_neighbors = if list_index == 0 {
-                    neighbors.list0
-                } else {
-                    neighbors.list1
-                };
-                let mut difference = [0_i32; 2];
-                for component in 0..2 {
-                    let context_base = if component == 0 { 40 } else { 47 };
-                    let mut mvd_contexts: [CabacContextModel; 7] = trial_contexts
-                        [context_base..context_base + 7]
-                        .try_into()
-                        .map_err(|_| invalid("MVD context range is invalid"))?;
-                    difference[component] = trial.decode_motion_vector_difference_for_partition(
-                        component as u8,
-                        list_neighbors.left,
-                        list_neighbors.top,
-                        false,
-                        false,
-                        &mut mvd_contexts,
-                    )?;
-                    trial_contexts[context_base..context_base + 7].copy_from_slice(&mvd_contexts);
-                }
-                motion_vector_differences[partition_index][list_index] = crate::MotionVector {
-                    x: difference[0],
-                    y: difference[1],
-                };
-                let left = list_neighbors.left_candidate;
-                let top = list_neighbors.top_candidate;
-                let right = list_neighbors
-                    .top_right_candidate
-                    .or(list_neighbors.top_left_candidate);
-                let preferred = match (specification.width, specification.height) {
-                    (16, 8) if specification.y == 0 => top,
-                    (16, 8) => left,
-                    (8, 16) if specification.x == 0 => left,
-                    (8, 16) => right,
-                    _ => None,
-                };
-                let reference_index = reference_indices[partition_index][list_index];
-                let predicted = if let Some(candidate) =
-                    preferred.filter(|candidate| candidate.reference_index == Some(reference_index))
-                {
-                    candidate.vector
-                } else if top.is_none() && right.is_none() {
-                    left.map_or_default(|candidate| candidate.vector)
-                } else {
-                    crate::reconstruction::predict_motion_vector(
-                        reference_index,
-                        left,
-                        top,
-                        right,
-                        None,
-                    )
-                };
-                motion_vectors[partition_index][list_index] =
-                    crate::reconstruction::apply_motion_vector_difference(
-                        predicted,
-                        crate::MotionVector {
-                            x: difference[0],
-                            y: difference[1],
-                        },
-                    );
-            }
-        }
-
-        let mut partition_predictions = Vec::with_capacity(specifications.len());
-        for (partition_index, specification) in specifications.iter().enumerate() {
-            let flags = prediction_flags[partition_index];
-            let references = reference_indices[partition_index];
-            let vectors = motion_vectors[partition_index];
-
-            if !flags[0] && !flags[1] {
-                return Err(invalid("inter partition has no active prediction list"));
-            }
-            let mut prediction_references = [None, None];
-            for list_index in 0..2 {
-                if !flags[list_index] {
-                    continue;
-                }
-                let reference_index = usize::try_from(references[list_index])
-                    .ok()
-                    .filter(|index| *index < input.reference_lists[list_index].len())
-                    .ok_or_else(|| invalid("inter macroblock reference index is unavailable"))?;
-                prediction_references[list_index] = Some((
-                    input.reference_lists[list_index][reference_index]
-                        .frame
-                        .clone(),
-                    vectors[list_index],
-                ));
-            }
-            partition_predictions.push(InterPartitionPrediction {
-                weights: input.weighting.select(
-                    references,
-                    [
-                        (references[0] >= 0)
-                            .then(|| &input.reference_lists[0][references[0] as usize]),
-                        (references[1] >= 0)
-                            .then(|| &input.reference_lists[1][references[1] as usize]),
-                    ],
-                )?,
-                x: specification.x,
-                y: specification.y,
-                width: specification.width,
-                height: specification.height,
-                references: prediction_references,
-            });
-            result.partitions.push(CabacInterMacroblockPartition {
-                x: specification.x,
-                y: specification.y,
-                width: specification.width,
-                height: specification.height,
-                prediction_flags: flags,
-                reference_indices: references,
-                motion_vectors: vectors,
-                motion_vector_differences: motion_vector_differences[partition_index],
-            });
-        }
+        trial.decode_inter_reference_indices(
+            &input,
+            &specifications,
+            macroblock_type,
+            &mut trial_contexts,
+            &mut motion,
+        )?;
+        trial.decode_inter_motion_vectors(
+            &input,
+            &specifications,
+            &mut trial_contexts,
+            &mut motion,
+        )?;
+        let partition_predictions =
+            build_inter_partition_predictions(&input, &specifications, &motion, &mut result)?;
         let mut inter_residual = InterResidual::new();
         if let Some(residual_input) = residual_input {
             let residual = trial.decode_inter_residuals(
@@ -5246,6 +5180,169 @@ impl<'a> CabacArithmeticDecoder<'a> {
         self.cavlc = trial.cavlc;
         *contexts = trial_contexts;
         Ok(CabacPBMacroblockPrediction::Inter(result))
+    }
+
+    fn decode_inter_reference_indices(
+        &mut self,
+        input: &CabacInterMacroblockInput,
+        specifications: &[CabacInterPartitionSpec],
+        macroblock_type: u8,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        motion: &mut CabacInterMotionState,
+    ) -> io::Result<()> {
+        for list_index in 0..2 {
+            for group in 0..4 {
+                let Some(first_index) = specifications.iter().position(|specification| {
+                    (specification.y / 8) * 2 + specification.x / 8 == group
+                }) else {
+                    continue;
+                };
+                if specifications[first_index].direct
+                    || !motion.prediction_flags[first_index][list_index]
+                {
+                    continue;
+                }
+                let neighbors = cabac_resolved_inter_partition_neighbors(
+                    input,
+                    specifications,
+                    first_index,
+                    false,
+                    &motion.prediction_flags,
+                    &motion.reference_indices,
+                    &motion.motion_vectors,
+                    &motion.motion_vector_differences,
+                );
+                let list_neighbors = if list_index == 0 {
+                    neighbors.list0
+                } else {
+                    neighbors.list1
+                };
+                let decoded_reference_index = if matches!(input.slice_type % 5, 0 | 3)
+                    && macroblock_type == 4
+                {
+                    0
+                } else {
+                    let mut ref_contexts: [CabacContextModel; 6] = contexts[54..60]
+                        .try_into()
+                        .map_err(|_| invalid("ref_idx context range is invalid"))?;
+                    let value = i32::from(
+                        self.decode_reference_index_for_partition(
+                        input.max_reference_index_minus1[list_index],
+                        list_neighbors.left,
+                        list_neighbors.top,
+                        false,
+                        false,
+                        &mut ref_contexts,
+                        )
+                        .map_err(|error| {
+                            invalid(format!(
+                        "macroblock ({}, {}), type {macroblock_type}, partition {first_index}, list {list_index}, maximum {}: {error}",
+                                input.macroblock_x,
+                                input.macroblock_y,
+                        input.max_reference_index_minus1[list_index],
+                            ))
+                        })?,
+                    );
+                    contexts[54..60].copy_from_slice(&ref_contexts);
+                    value
+                };
+                for (partition_index, specification) in specifications.iter().enumerate() {
+                    let partition_group = (specification.y / 8) * 2 + specification.x / 8;
+                    if partition_group == group
+                        && !specification.direct
+                        && motion.prediction_flags[partition_index][list_index]
+                    {
+                        motion.reference_indices[partition_index][list_index] =
+                            decoded_reference_index;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_inter_motion_vectors(
+        &mut self,
+        input: &CabacInterMacroblockInput,
+        specifications: &[CabacInterPartitionSpec],
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        motion: &mut CabacInterMotionState,
+    ) -> io::Result<()> {
+        for list_index in 0..2 {
+            for (partition_index, specification) in specifications.iter().enumerate() {
+                if specification.direct || !motion.prediction_flags[partition_index][list_index] {
+                    continue;
+                }
+                let neighbors = cabac_resolved_inter_partition_neighbors(
+                    input,
+                    specifications,
+                    partition_index,
+                    false,
+                    &motion.prediction_flags,
+                    &motion.reference_indices,
+                    &motion.motion_vectors,
+                    &motion.motion_vector_differences,
+                );
+                let list_neighbors = if list_index == 0 {
+                    neighbors.list0
+                } else {
+                    neighbors.list1
+                };
+                let mut difference = [0_i32; 2];
+                for component in 0..2 {
+                    let context_base = if component == 0 { 40 } else { 47 };
+                    let mut mvd_contexts: [CabacContextModel; 7] = contexts
+                        [context_base..context_base + 7]
+                        .try_into()
+                        .map_err(|_| invalid("MVD context range is invalid"))?;
+                    difference[component] = self.decode_motion_vector_difference_for_partition(
+                        component as u8,
+                        list_neighbors.left,
+                        list_neighbors.top,
+                        false,
+                        false,
+                        &mut mvd_contexts,
+                    )?;
+                    contexts[context_base..context_base + 7].copy_from_slice(&mvd_contexts);
+                }
+                let difference = crate::MotionVector {
+                    x: difference[0],
+                    y: difference[1],
+                };
+                motion.motion_vector_differences[partition_index][list_index] = difference;
+                let left = list_neighbors.left_candidate;
+                let top = list_neighbors.top_candidate;
+                let right = list_neighbors
+                    .top_right_candidate
+                    .or(list_neighbors.top_left_candidate);
+                let preferred = match (specification.width, specification.height) {
+                    (16, 8) if specification.y == 0 => top,
+                    (16, 8) => left,
+                    (8, 16) if specification.x == 0 => left,
+                    (8, 16) => right,
+                    _ => None,
+                };
+                let reference_index = motion.reference_indices[partition_index][list_index];
+                let predicted = if let Some(candidate) =
+                    preferred.filter(|candidate| candidate.reference_index == Some(reference_index))
+                {
+                    candidate.vector
+                } else if top.is_none() && right.is_none() {
+                    left.map_or_default(|candidate| candidate.vector)
+                } else {
+                    crate::reconstruction::predict_motion_vector(
+                        reference_index,
+                        left,
+                        top,
+                        right,
+                        None,
+                    )
+                };
+                motion.motion_vectors[partition_index][list_index] =
+                    crate::reconstruction::apply_motion_vector_difference(predicted, difference);
+            }
+        }
+        Ok(())
     }
 
     fn decode_inter_residuals(
@@ -5346,7 +5443,49 @@ impl<'a> CabacArithmeticDecoder<'a> {
             (0, input.previous_qpy)
         };
 
-        let mut luma_coded_flags = [false; 16];
+        let luma_coded_flags = self.decode_inter_luma_residuals(
+            coded_block_pattern_luma,
+            transform_size_8x8,
+            qpy,
+            &input,
+            contexts,
+            output,
+        )?;
+
+        let qpc = [
+            crate::reconstruction::derive_chroma_qpc(qpy, input.chroma_qp_index_offsets[0])?,
+            crate::reconstruction::derive_chroma_qpc(qpy, input.chroma_qp_index_offsets[1])?,
+        ];
+        let (chroma_dc_coded, chroma_ac_coded_flags) = self.decode_inter_chroma_residuals(
+            coded_block_pattern_chroma,
+            qpc,
+            &input,
+            contexts,
+            output,
+        )?;
+        Ok((
+            coded_block_pattern_luma,
+            coded_block_pattern_chroma,
+            transform_size_8x8,
+            qp_delta,
+            qpy,
+            luma_coded_flags,
+            chroma_dc_coded,
+            chroma_ac_coded_flags,
+            output.luma_8x8_nonzero,
+        ))
+    }
+
+    fn decode_inter_luma_residuals(
+        &mut self,
+        coded_block_pattern_luma: u8,
+        transform_size_8x8: bool,
+        qpy: i32,
+        input: &CabacInterMacroblockResidualInput,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        output: &mut InterResidual,
+    ) -> io::Result<[bool; 16]> {
+        let mut coded_flags = [false; 16];
         if transform_size_8x8 {
             for block_index in 0..4 {
                 if coded_block_pattern_luma & (1 << block_index) == 0 {
@@ -5358,74 +5497,79 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 for (scan_index, raster_index) in LUMA8X8_SCAN_TO_RASTER.iter().enumerate() {
                     raster_levels[*raster_index] = levels[scan_index];
                 }
-                let coefficients = crate::reconstruction::inverse_scale_luma8x8(
+                let residual = crate::h264_utils::reconstruct_luma8x8_residual(
                     &raster_levels,
                     &input.luma_8x8_scaling_list,
                     qpy,
                 )?;
-                let residual = crate::reconstruction::inverse_transform_luma8x8(&coefficients);
-                let block_x = block_index % 2 * 8;
-                let block_y = block_index / 2 * 8;
-                for row in 0..8 {
-                    for column in 0..8 {
-                        let index = (block_y + row) * 16 + block_x + column;
-                        output.luma[index] = residual[row * 8 + column];
-                    }
-                }
+                let (block_x, block_y) = crate::h264_utils::block_position_2x2(block_index);
+                crate::h264_utils::place_residual_block(
+                    &mut output.luma,
+                    16,
+                    block_x * 8,
+                    block_y * 8,
+                    &residual,
+                    8,
+                );
             }
-        } else {
-            for block_index in 0..16 {
-                let raster_index = LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index];
-                let block_x = raster_index % 4;
-                let block_y = raster_index / 4;
-                let cbp_index = (block_y / 2) * 2 + block_x / 2;
-                if coded_block_pattern_luma & (1 << cbp_index) == 0 {
-                    continue;
-                }
-                let cond_left = derive_inter4x4_luma_cond_term(
-                    block_index,
-                    block_x,
-                    block_y,
-                    true,
-                    &luma_coded_flags,
-                    input.luma_4x4_left_edge,
-                );
-                let cond_top = derive_inter4x4_luma_cond_term(
-                    block_index,
-                    block_x,
-                    block_y,
-                    false,
-                    &luma_coded_flags,
-                    input.luma_4x4_top_edge,
-                );
-                let (levels, coded) =
-                    self.decode_residual_block(2, cond_left, cond_top, contexts)?;
-                luma_coded_flags[block_index] = coded;
-                if !coded {
-                    continue;
-                }
+            return Ok(coded_flags);
+        }
+        for block_index in 0..16 {
+            let raster_index = LUMA4X4_BLOCK_SCAN_TO_RASTER[block_index];
+            let block_x = raster_index % 4;
+            let block_y = raster_index / 4;
+            let cbp_index = (block_y / 2) * 2 + block_x / 2;
+            if coded_block_pattern_luma & (1 << cbp_index) == 0 {
+                continue;
+            }
+            let cond_left = derive_inter4x4_luma_cond_term(
+                block_index,
+                block_x,
+                block_y,
+                true,
+                &coded_flags,
+                input.luma_4x4_left_edge,
+            );
+            let cond_top = derive_inter4x4_luma_cond_term(
+                block_index,
+                block_x,
+                block_y,
+                false,
+                &coded_flags,
+                input.luma_4x4_top_edge,
+            );
+            let (levels, coded) = self.decode_residual_block(2, cond_left, cond_top, contexts)?;
+            coded_flags[block_index] = coded;
+            if coded {
                 let raster_levels = place_luma4x4_scan_levels(&levels);
-                let coefficients = crate::reconstruction::inverse_scale_luma4x4(
+                let residual = crate::h264_utils::reconstruct_luma4x4_residual(
                     &raster_levels,
                     &input.luma_4x4_scaling_list,
                     qpy,
                 )?;
-                let residual = crate::reconstruction::inverse_transform_luma4x4(&coefficients);
-                for row in 0..4 {
-                    for column in 0..4 {
-                        let index = (block_y * 4 + row) * 16 + block_x * 4 + column;
-                        output.luma[index] = residual[row * 4 + column];
-                    }
-                }
+                crate::h264_utils::place_residual_block(
+                    &mut output.luma,
+                    16,
+                    block_x * 4,
+                    block_y * 4,
+                    &residual,
+                    4,
+                );
             }
         }
+        Ok(coded_flags)
+    }
 
-        let qpc = [
-            crate::reconstruction::derive_chroma_qpc(qpy, input.chroma_qp_index_offsets[0])?,
-            crate::reconstruction::derive_chroma_qpc(qpy, input.chroma_qp_index_offsets[1])?,
-        ];
-        let mut chroma_dc_coded = [false; 2];
-        let mut chroma_dc_samples = [[0_i64; 4]; 2];
+    fn decode_inter_chroma_residuals(
+        &mut self,
+        coded_block_pattern_chroma: u8,
+        qpc: [i32; 2],
+        input: &CabacInterMacroblockResidualInput,
+        contexts: &mut [CabacContextModel; CABAC_CONTEXT_COUNT],
+        output: &mut InterResidual,
+    ) -> io::Result<([bool; 2], [[bool; 4]; 2])> {
+        let mut dc_coded = [false; 2];
+        let mut dc_samples = [[0_i64; 4]; 2];
         if coded_block_pattern_chroma != 0 {
             for component in 0..2 {
                 let left = input.chroma_left_edges[component];
@@ -5446,109 +5590,94 @@ impl<'a> CabacArithmeticDecoder<'a> {
                 );
                 let (levels, coded) =
                     self.decode_residual_block(3, cond_left, cond_top, contexts)?;
-                chroma_dc_coded[component] = coded;
+                dc_coded[component] = coded;
                 if coded {
-                    let dc_levels = [levels[0], levels[1], levels[2], levels[3]];
-                    let transformed =
-                        crate::reconstruction::inverse_transform_chroma_dc2x2(&dc_levels);
-                    chroma_dc_samples[component] =
-                        crate::reconstruction::inverse_scale_chroma_dc2x2(
-                            &transformed,
-                            qpc[component],
-                        )?;
-                }
-            }
-        }
-        let mut chroma_ac_coded_flags = [[false; 4]; 2];
-        for component in 0..2 {
-            let mut residual_blocks = [[0_i64; 16]; 4];
-            for block_index in 0..4 {
-                let mut ac_levels = [0_i32; 15];
-                if coded_block_pattern_chroma == 2 {
-                    let block_x = block_index % 2;
-                    let block_y = block_index / 2;
-                    let left = input.chroma_left_edges[component];
-                    let top = input.chroma_top_edges[component];
-                    let cond_left = if block_x > 0 {
-                        derive_coded_block_flag_cond_term(
-                            true,
-                            false,
-                            false,
-                            true,
-                            chroma_ac_coded_flags[component][block_index - 1],
-                        )
-                    } else if !left.available || left.is_ipcm {
-                        derive_coded_block_flag_cond_term(
-                            left.available,
-                            false,
-                            left.is_ipcm,
-                            false,
-                            false,
-                        )
-                    } else {
-                        derive_coded_block_flag_cond_term(
-                            true,
-                            false,
-                            false,
-                            left.ac_block_available[block_y],
-                            left.ac_block_coded[block_y],
-                        )
-                    };
-                    let cond_top = if block_y > 0 {
-                        derive_coded_block_flag_cond_term(
-                            true,
-                            false,
-                            false,
-                            true,
-                            chroma_ac_coded_flags[component][block_index - 2],
-                        )
-                    } else if !top.available || top.is_ipcm {
-                        derive_coded_block_flag_cond_term(
-                            top.available,
-                            false,
-                            top.is_ipcm,
-                            false,
-                            false,
-                        )
-                    } else {
-                        derive_coded_block_flag_cond_term(
-                            true,
-                            false,
-                            false,
-                            top.ac_block_available[block_x],
-                            top.ac_block_coded[block_x],
-                        )
-                    };
-                    let (levels, coded) =
-                        self.decode_residual_block(4, cond_left, cond_top, contexts)?;
-                    chroma_ac_coded_flags[component][block_index] = coded;
-                    if coded {
-                        ac_levels.copy_from_slice(&levels[..15]);
-                    }
-                }
-                residual_blocks[block_index] =
-                    crate::reconstruction::reconstruct_chroma4x4_residual(
-                        chroma_dc_samples[component][block_index],
-                        &ac_levels,
-                        &input.chroma_scaling_lists[component],
+                    let transformed = crate::reconstruction::inverse_transform_chroma_dc2x2(&[
+                        levels[0], levels[1], levels[2], levels[3],
+                    ]);
+                    dc_samples[component] = crate::reconstruction::inverse_scale_chroma_dc2x2(
+                        &transformed,
                         qpc[component],
                     )?;
+                }
             }
-            let residual =
-                crate::reconstruction::assemble_chroma420_residual_macroblock(&residual_blocks);
-            output.chroma[component] = residual;
         }
-        Ok((
-            coded_block_pattern_luma,
-            coded_block_pattern_chroma,
-            transform_size_8x8,
-            qp_delta,
-            qpy,
-            luma_coded_flags,
-            chroma_dc_coded,
-            chroma_ac_coded_flags,
-            output.luma_8x8_nonzero,
-        ))
+        let mut ac_coded_flags = [[false; 4]; 2];
+        for component in 0..2 {
+            let mut ac_scan_blocks = [[0_i32; 15]; 4];
+            for block_index in 0..4 {
+                if coded_block_pattern_chroma != 2 {
+                    continue;
+                }
+                let block_x = block_index % 2;
+                let block_y = block_index / 2;
+                let left = input.chroma_left_edges[component];
+                let top = input.chroma_top_edges[component];
+                let cond_left = if block_x > 0 {
+                    derive_coded_block_flag_cond_term(
+                        true,
+                        false,
+                        false,
+                        true,
+                        ac_coded_flags[component][block_index - 1],
+                    )
+                } else if !left.available || left.is_ipcm {
+                    derive_coded_block_flag_cond_term(
+                        left.available,
+                        false,
+                        left.is_ipcm,
+                        false,
+                        false,
+                    )
+                } else {
+                    derive_coded_block_flag_cond_term(
+                        true,
+                        false,
+                        false,
+                        left.ac_block_available[block_y],
+                        left.ac_block_coded[block_y],
+                    )
+                };
+                let cond_top = if block_y > 0 {
+                    derive_coded_block_flag_cond_term(
+                        true,
+                        false,
+                        false,
+                        true,
+                        ac_coded_flags[component][block_index - 2],
+                    )
+                } else if !top.available || top.is_ipcm {
+                    derive_coded_block_flag_cond_term(
+                        top.available,
+                        false,
+                        top.is_ipcm,
+                        false,
+                        false,
+                    )
+                } else {
+                    derive_coded_block_flag_cond_term(
+                        true,
+                        false,
+                        false,
+                        top.ac_block_available[block_x],
+                        top.ac_block_coded[block_x],
+                    )
+                };
+                let (levels, coded) =
+                    self.decode_residual_block(4, cond_left, cond_top, contexts)?;
+                ac_coded_flags[component][block_index] = coded;
+                if coded {
+                    ac_scan_blocks[block_index].copy_from_slice(&levels[..15]);
+                }
+            }
+            output.chroma[component] = crate::h264_utils::reconstruct_chroma_component_residual(
+                &dc_samples[component],
+                &ac_scan_blocks,
+                &input.chroma_scaling_lists[component],
+                qpc[component],
+            )?;
+        }
+        Ok((dc_coded, ac_coded_flags))
     }
 
     /// Decodes intra_chroma_pred_mode using caller-initialized contexts 64 through 67.

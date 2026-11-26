@@ -1,6 +1,7 @@
 #include "pygorvid/h264.hpp"
 #include "pygorvid/cabac.hpp"
 #include "pygorvid/cavlc.hpp"
+#include "h264_utils.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -17,8 +18,148 @@
 namespace pygorvid {
 namespace {
 
+using h264_utils::floor_shift;
+
 using MotionVector = std::array<std::int64_t, 2>;
 using MacroblockMotionVectors = std::array<MotionVector, 16>;
+
+struct DirectMotionCandidate {
+    std::int32_t reference_index;
+    MotionVector motion_vector;
+};
+
+struct DirectMotionGroup {
+    std::array<std::int32_t, 2> reference_indices{};
+    std::uint8_t prediction_flags = 0;
+    std::array<MotionVector, 2> motion{};
+};
+
+DirectMotionGroup derive_spatial_direct_group(
+    const std::array<std::array<std::optional<DirectMotionCandidate>, 4>, 2>&
+        candidates,
+    const std::array<std::size_t, 2>& reference_list_sizes,
+    bool colocated_zero) {
+    const auto minimum_nonnegative =
+        [](std::int32_t left, std::int32_t right) {
+        if (left >= 0 && right >= 0) {
+            return std::min(left, right);
+        }
+        return std::max(left, right);
+    };
+    DirectMotionGroup result;
+    for (std::size_t list_index = 0; list_index < 2; ++list_index) {
+        const auto reference_at = [&](std::size_t candidate_index) {
+            return candidates[list_index][candidate_index]
+                ? candidates[list_index][candidate_index]->reference_index
+                : -1;
+        };
+        result.reference_indices[list_index] = minimum_nonnegative(
+            reference_at(0),
+            minimum_nonnegative(reference_at(1), reference_at(2)));
+    }
+    const bool direct_zero =
+        result.reference_indices[0] == -1 &&
+        result.reference_indices[1] == -1;
+    if (direct_zero) {
+        result.reference_indices = {0, 0};
+    }
+    for (std::size_t list_index = 0; list_index < 2; ++list_index) {
+        const auto reference_index = result.reference_indices[list_index];
+        if (reference_index < 0) {
+            continue;
+        }
+        if (static_cast<std::size_t>(reference_index) >=
+            reference_list_sizes[list_index]) {
+            throw std::runtime_error(
+                "B_Direct spatial reference index is unavailable");
+        }
+        if (direct_zero || (reference_index == 0 && colocated_zero)) {
+            continue;
+        }
+        std::size_t match_count = 0;
+        MotionVector matching_motion{};
+        std::array<MotionVector, 3> median_candidates{};
+        for (std::size_t candidate_index = 0; candidate_index < 3;
+             ++candidate_index) {
+            const auto& candidate = candidates[list_index][candidate_index];
+            if (!candidate || candidate->reference_index < 0) {
+                continue;
+            }
+            median_candidates[candidate_index] = candidate->motion_vector;
+            if (candidate->reference_index == reference_index) {
+                ++match_count;
+                matching_motion = candidate->motion_vector;
+            }
+        }
+        if (match_count == 1) {
+            result.motion[list_index] = matching_motion;
+        } else {
+            for (std::size_t component = 0; component < 2; ++component) {
+                std::array<std::int64_t, 3> values{
+                    median_candidates[0][component],
+                    median_candidates[1][component],
+                    median_candidates[2][component]};
+                std::sort(values.begin(), values.end());
+                result.motion[list_index][component] = values[1];
+            }
+        }
+    }
+    result.prediction_flags = static_cast<std::uint8_t>(
+        (result.reference_indices[0] >= 0 ? 1 : 0) |
+        (result.reference_indices[1] >= 0 ? 2 : 0));
+    return result;
+}
+
+DirectMotionGroup derive_temporal_direct_group(
+    const ColocatedMotionFact& colocated,
+    const std::vector<const Yuv420Frame*>& reference_frames_l0,
+    const Yuv420Frame& reference_frame_l1,
+    std::int64_t current_picture_order_count) {
+    DirectMotionGroup result{{0, 0}, 3, {}};
+    std::int32_t reference_index = -1;
+    for (std::size_t index = 0; index < reference_frames_l0.size(); ++index) {
+        if (reference_frames_l0[index] != nullptr &&
+            reference_frames_l0[index]->picture_order_count ==
+                colocated.reference_picture_order_count) {
+            reference_index = static_cast<std::int32_t>(index);
+            break;
+        }
+    }
+    if (colocated.reference_picture_order_count ==
+        std::numeric_limits<std::int64_t>::min()) {
+        reference_index = -1;
+    }
+    result.reference_indices[0] = std::max(reference_index, 0);
+    if (reference_index < 0) {
+        return result;
+    }
+    if (static_cast<std::size_t>(reference_index) >=
+        reference_frames_l0.size()) {
+        throw std::runtime_error(
+            "B_Direct temporal reference index is unavailable");
+    }
+    result.reference_indices[0] = reference_index;
+    const auto& reference = *reference_frames_l0[reference_index];
+    auto td = reference_frame_l1.picture_order_count -
+              reference.picture_order_count;
+    auto tb = current_picture_order_count - reference.picture_order_count;
+    if (td != 0) {
+        td = std::clamp<std::int64_t>(td, -128, 127);
+        tb = std::clamp<std::int64_t>(tb, -128, 127);
+        const auto tx = (16384 + std::abs(td / 2)) / td;
+        const auto scale =
+            std::clamp<std::int64_t>((tb * tx + 32) >> 6, -1024, 1023);
+        result.motion[0] = {
+            static_cast<std::int64_t>(
+                (scale * colocated.motion_vector[0] + 128) >> 8),
+            static_cast<std::int64_t>(
+                (scale * colocated.motion_vector[1] + 128) >> 8)};
+    }
+    result.motion[1] = {
+        result.motion[0][0] - colocated.motion_vector[0],
+        result.motion[0][1] - colocated.motion_vector[1]};
+    return result;
+}
 
 std::size_t checked_plane_size(std::uint32_t width, std::uint32_t height) {
     if (height != 0 &&
@@ -27,6 +168,83 @@ std::size_t checked_plane_size(std::uint32_t width, std::uint32_t height) {
         throw std::runtime_error("decoded frame plane size overflows");
     }
     return static_cast<std::size_t>(width) * height;
+}
+
+std::vector<const Yuv420Frame*> coded_reference_frames(
+    const std::vector<const Yuv420Frame*>& inputs) {
+    std::vector<const Yuv420Frame*> result;
+    result.reserve(inputs.size());
+    for (const auto* frame : inputs) {
+        result.push_back(
+            frame != nullptr && frame->coded_reference
+                ? frame->coded_reference.get()
+                : frame);
+    }
+    return result;
+}
+
+void validate_inter_picture_inputs(
+    const std::vector<std::vector<std::uint8_t>>& slice_nals,
+    const SpsInfo& sps,
+    const std::vector<const Yuv420Frame*>& reference_frames_l0,
+    const std::vector<const Yuv420Frame*>& reference_frames_l1) {
+    if (slice_nals.empty()) {
+        throw std::invalid_argument("P picture contains no slice NAL units");
+    }
+    if (reference_frames_l0.empty() || reference_frames_l0.front() == nullptr) {
+        throw std::invalid_argument(
+            "inter picture requires a decoded L0 reference frame");
+    }
+    if (!sps.frame_mbs_only || sps.chroma_format_idc != 1 ||
+        sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 ||
+        sps.coded_width == 0 || sps.coded_height == 0 ||
+        sps.coded_width % 16 != 0 || sps.coded_height % 16 != 0 ||
+        sps.width == 0 || sps.height == 0 || sps.width % 2 != 0 ||
+        sps.height % 2 != 0 || sps.frame_crop_left % 2 != 0 ||
+        sps.frame_crop_top % 2 != 0 ||
+        static_cast<std::uint64_t>(sps.frame_crop_left) + sps.width +
+                sps.frame_crop_right !=
+            sps.coded_width ||
+        static_cast<std::uint64_t>(sps.frame_crop_top) + sps.height +
+                sps.frame_crop_bottom !=
+            sps.coded_height) {
+        throw std::runtime_error(
+            "P-picture decoding requires a valid progressive 8-bit 4:2:0 SPS");
+    }
+    const auto& reference_frame = *reference_frames_l0.front();
+    if (reference_frame.width != sps.coded_width ||
+        reference_frame.height != sps.coded_height ||
+        reference_frame.luma.size() !=
+            checked_plane_size(sps.coded_width, sps.coded_height) ||
+        reference_frame.chroma_u.size() !=
+            checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
+        reference_frame.chroma_v.size() != reference_frame.chroma_u.size()) {
+        throw std::invalid_argument(
+            "P-picture reference frame dimensions or planes do not match the SPS");
+    }
+    const auto validate_list =
+        [&](const std::vector<const Yuv420Frame*>& references,
+            const char* message) {
+        for (const auto* reference : references) {
+            if (reference == nullptr ||
+                reference->width != sps.coded_width ||
+                reference->height != sps.coded_height ||
+                reference->luma.size() !=
+                    checked_plane_size(sps.coded_width, sps.coded_height) ||
+                reference->chroma_u.size() !=
+                    checked_plane_size(
+                        sps.coded_width / 2, sps.coded_height / 2) ||
+                reference->chroma_v.size() != reference->chroma_u.size()) {
+                throw std::invalid_argument(message);
+            }
+        }
+    };
+    validate_list(
+        reference_frames_l0,
+        "P-picture L0 reference dimensions or planes do not match the SPS");
+    validate_list(
+        reference_frames_l1,
+        "B-picture L1 reference dimensions or planes do not match the SPS");
 }
 
 template <typename MacroblockOperation>
@@ -746,15 +964,6 @@ void write_chroma_macroblock(BitReader& reader, std::vector<std::uint8_t>& plane
     }
 }
 
-std::int64_t floor_shift(std::int64_t value, unsigned shift) {
-    const auto divisor = std::int64_t{1} << shift;
-    auto quotient = value / divisor;
-    if (value < 0 && value % divisor != 0) {
-        --quotient;
-    }
-    return quotient;
-}
-
 std::array<std::int64_t, 16> reconstruct_intra16x16_luma_dc(
     const CavlcResidualBlock& block, std::int32_t qpy) {
     static constexpr std::array<std::size_t, 16> scan{{
@@ -769,155 +978,33 @@ std::array<std::int64_t, 16> reconstruct_intra16x16_luma_dc(
     for (std::size_t index = 0; index < scan.size(); ++index) {
         levels[scan[index]] = block.coefficients[index];
     }
-    const auto hadamard = [](const std::array<std::int64_t, 4>& values) {
-        return std::array<std::int64_t, 4>{{
-            values[0] + values[1] + values[2] + values[3],
-            values[0] + values[1] - values[2] - values[3],
-            values[0] - values[1] - values[2] + values[3],
-            values[0] - values[1] + values[2] - values[3],
-        }};
-    };
-
-    std::array<std::int64_t, 16> horizontal{};
-    for (std::size_t row = 0; row < 4; ++row) {
-        const auto transformed = hadamard({{
-            levels[row * 4], levels[row * 4 + 1],
-            levels[row * 4 + 2], levels[row * 4 + 3],
-        }});
-        std::copy(transformed.begin(), transformed.end(),
-                  horizontal.begin() + static_cast<std::ptrdiff_t>(row * 4));
-    }
-
+    const auto transformed = h264_utils::hadamard4x4(levels);
     std::array<std::int64_t, 16> dc_residuals{};
     const auto factor = scale[static_cast<std::size_t>(qpy % 6)][0] * 16;
-    for (std::size_t column = 0; column < 4; ++column) {
-        const auto transformed = hadamard({{
-            horizontal[column], horizontal[4 + column],
-            horizontal[8 + column], horizontal[12 + column],
-        }});
-        for (std::size_t row = 0; row < 4; ++row) {
-            const auto hadamard_value = transformed[row];
-            if (hadamard_value < -32768 || hadamard_value > 32767) {
-                throw std::runtime_error(
-                    "I16x16 luma DC Hadamard coefficient exceeds 8-bit range");
-            }
-            auto scaled = std::int64_t{0};
-            if (qpy >= 36) {
-                scaled = (hadamard_value * factor) *
-                         (std::int64_t{1} << (qpy / 6 - 6));
-            } else {
-                const auto shift = static_cast<unsigned>(6 - qpy / 6);
-                scaled = floor_shift(
-                    hadamard_value * factor +
-                        (std::int64_t{1} << (5 - qpy / 6)),
-                    shift);
-            }
-            if (scaled < -32768 || scaled > 32767) {
-                throw std::runtime_error(
-                    "I16x16 scaled luma DC coefficient exceeds 8-bit range");
-            }
-            dc_residuals[row * 4 + column] = scaled;
+    for (std::size_t index = 0; index < transformed.size(); ++index) {
+        const auto hadamard_value = transformed[index];
+        if (hadamard_value < -32768 || hadamard_value > 32767) {
+            throw std::runtime_error(
+                "I16x16 luma DC Hadamard coefficient exceeds 8-bit range");
         }
+        auto scaled = std::int64_t{0};
+        if (qpy >= 36) {
+            scaled = (hadamard_value * factor) *
+                     (std::int64_t{1} << (qpy / 6 - 6));
+        } else {
+            const auto shift = static_cast<unsigned>(6 - qpy / 6);
+            scaled = floor_shift(
+                hadamard_value * factor +
+                    (std::int64_t{1} << (5 - qpy / 6)),
+                shift);
+        }
+        if (scaled < -32768 || scaled > 32767) {
+            throw std::runtime_error(
+                "I16x16 scaled luma DC coefficient exceeds 8-bit range");
+        }
+        dc_residuals[index] = scaled;
     }
     return dc_residuals;
-}
-
-std::array<std::int64_t, 16> inverse_transform_luma4x4(
-    const std::array<std::int64_t, 16>& coefficients) {
-    const auto transform_line = [](const std::array<std::int64_t, 4>& values) {
-        const auto s0 = values[0] + values[2];
-        const auto s1 = values[0] - values[2];
-        const auto s2 = floor_shift(values[1], 1) - values[3];
-        const auto s3 = values[1] + floor_shift(values[3], 1);
-        return std::array<std::int64_t, 4>{{
-            s0 + s3, s1 + s2, s1 - s2, s0 - s3,
-        }};
-    };
-    std::array<std::int64_t, 16> horizontal{};
-    for (std::size_t row = 0; row < 4; ++row) {
-        const auto transformed = transform_line({{
-            coefficients[row * 4], coefficients[row * 4 + 1],
-            coefficients[row * 4 + 2], coefficients[row * 4 + 3],
-        }});
-        std::copy(transformed.begin(), transformed.end(),
-                  horizontal.begin() + static_cast<std::ptrdiff_t>(row * 4));
-    }
-    std::array<std::int64_t, 16> residual{};
-    for (std::size_t column = 0; column < 4; ++column) {
-        const auto transformed = transform_line({{
-            horizontal[column], horizontal[4 + column],
-            horizontal[8 + column], horizontal[12 + column],
-        }});
-        for (std::size_t row = 0; row < 4; ++row) {
-            residual[row * 4 + column] =
-                floor_shift(transformed[row] + 32, 6);
-        }
-    }
-    return residual;
-}
-
-std::array<std::int64_t, 16> inverse_scale_intra4x4_ac(
-    const CavlcResidualBlock& block, std::int32_t qpy,
-    std::int64_t dc_coefficient) {
-    static constexpr std::array<std::size_t, 16> scan{{
-        0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15,
-    }};
-    static constexpr std::array<std::array<std::int64_t, 3>, 6> scale{{
-        {{10, 13, 16}}, {{11, 14, 18}}, {{13, 16, 20}},
-        {{14, 18, 23}}, {{16, 20, 25}}, {{18, 23, 29}},
-    }};
-    if (block.coefficients.size() != 15 || qpy < 0 || qpy > 51) {
-        throw std::runtime_error("invalid I16x16 AC reconstruction input");
-    }
-    std::array<std::int64_t, 16> coefficients{};
-    coefficients[0] = dc_coefficient;
-    for (std::size_t scan_index = 1; scan_index < scan.size(); ++scan_index) {
-        const auto natural_index = scan[scan_index];
-        const auto row = natural_index / 4;
-        const auto column = natural_index % 4;
-        const auto factor_class = row % 2 + column % 2;
-        const auto value =
-            static_cast<std::int64_t>(block.coefficients[scan_index - 1]) *
-            scale[static_cast<std::size_t>(qpy % 6)][factor_class] * 16;
-        coefficients[natural_index] =
-            qpy >= 24
-                ? value * (std::int64_t{1} << (qpy / 6 - 4))
-                : floor_shift(value +
-                                  (std::int64_t{1} << (3 - qpy / 6)),
-                              static_cast<unsigned>(4 - qpy / 6));
-    }
-    return coefficients;
-}
-
-std::array<std::int64_t, 16> inverse_scale_intra4x4(
-    const CavlcResidualBlock& block, std::int32_t qpy) {
-    static constexpr std::array<std::size_t, 16> scan{{
-        0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15,
-    }};
-    static constexpr std::array<std::array<std::int64_t, 3>, 6> scale{{
-        {{10, 13, 16}}, {{11, 14, 18}}, {{13, 16, 20}},
-        {{14, 18, 23}}, {{16, 20, 25}}, {{18, 23, 29}},
-    }};
-    if (block.coefficients.size() != 16 || qpy < 0 || qpy > 51) {
-        throw std::runtime_error("invalid I4x4 residual reconstruction input");
-    }
-    std::array<std::int64_t, 16> coefficients{};
-    for (std::size_t scan_index = 0; scan_index < scan.size(); ++scan_index) {
-        const auto natural_index = scan[scan_index];
-        const auto row = natural_index / 4;
-        const auto column = natural_index % 4;
-        const auto factor_class = row % 2 + column % 2;
-        const auto value =
-            static_cast<std::int64_t>(block.coefficients[scan_index]) *
-            scale[static_cast<std::size_t>(qpy % 6)][factor_class] * 16;
-        coefficients[natural_index] =
-            qpy >= 24
-                ? value * (std::int64_t{1} << (qpy / 6 - 4))
-                : floor_shift(value +
-                                  (std::int64_t{1} << (3 - qpy / 6)),
-                              static_cast<unsigned>(4 - qpy / 6));
-    }
-    return coefficients;
 }
 
 std::int32_t chroma_qp(std::int32_t qpy, std::int64_t chroma_qp_offset) {
@@ -1314,96 +1401,6 @@ std::array<std::uint8_t, 16> predict_intra4x4(
     return prediction;
 }
 
-std::array<std::int64_t, 8> inverse_transform_luma8x8_line(
-    const std::array<std::int64_t, 8>& coefficients) {
-    const auto a0 = coefficients[0] + coefficients[4];
-    const auto a2 = coefficients[0] - coefficients[4];
-    const auto a4 = (coefficients[2] >> 1) - coefficients[6];
-    const auto a6 = coefficients[2] + (coefficients[6] >> 1);
-    const auto b0 = a0 + a6;
-    const auto b2 = a2 + a4;
-    const auto b4 = a2 - a4;
-    const auto b6 = a0 - a6;
-    const auto a1 = -coefficients[3] + coefficients[5] - coefficients[7] -
-                    (coefficients[7] >> 1);
-    const auto a3 = coefficients[1] + coefficients[7] - coefficients[3] -
-                    (coefficients[3] >> 1);
-    const auto a5 = -coefficients[1] + coefficients[7] + coefficients[5] +
-                    (coefficients[5] >> 1);
-    const auto a7 = coefficients[3] + coefficients[5] + coefficients[1] +
-                    (coefficients[1] >> 1);
-    const auto b1 = a1 + (a7 >> 2);
-    const auto b3 = a3 + (a5 >> 2);
-    const auto b5 = (a3 >> 2) - a5;
-    const auto b7 = a7 - (a1 >> 2);
-    return {{b0 + b7, b2 + b5, b4 + b3, b6 + b1,
-             b6 - b1, b4 - b3, b2 - b5, b0 - b7}};
-}
-
-std::array<std::int64_t, 64> inverse_transform_luma8x8(
-    const std::array<std::int64_t, 64>& coefficients) {
-    std::array<std::int64_t, 64> horizontal{};
-    for (std::size_t row = 0; row < 8; ++row) {
-        std::array<std::int64_t, 8> line{};
-        std::copy_n(coefficients.begin() +
-                        static_cast<std::ptrdiff_t>(row * 8),
-                    8, line.begin());
-        const auto transformed = inverse_transform_luma8x8_line(line);
-        std::copy(transformed.begin(), transformed.end(),
-                  horizontal.begin() + static_cast<std::ptrdiff_t>(row * 8));
-    }
-
-    std::array<std::int64_t, 64> residual{};
-    for (std::size_t column = 0; column < 8; ++column) {
-        std::array<std::int64_t, 8> line{};
-        for (std::size_t row = 0; row < 8; ++row) {
-            line[row] = horizontal[row * 8 + column];
-        }
-        const auto transformed = inverse_transform_luma8x8_line(line);
-        for (std::size_t row = 0; row < 8; ++row) {
-            residual[row * 8 + column] =
-                floor_shift(transformed[row] + 32, 6);
-        }
-    }
-    return residual;
-}
-
-std::array<std::int64_t, 64> inverse_scale_luma8x8(
-    const std::array<std::int32_t, 64>& levels, std::int32_t qpy) {
-    static constexpr std::array<std::array<std::int64_t, 6>, 6> factors{{
-        {{20, 18, 32, 19, 25, 24}},
-        {{22, 19, 35, 21, 28, 26}},
-        {{26, 23, 42, 24, 33, 31}},
-        {{28, 25, 45, 26, 35, 33}},
-        {{32, 28, 51, 30, 40, 38}},
-        {{36, 32, 58, 34, 46, 43}},
-    }};
-    static constexpr std::array<std::size_t, 64> factor_classes{{
-        0, 3, 4, 3, 0, 3, 4, 3, 3, 1, 5, 1, 3, 1, 5, 1,
-        4, 5, 2, 5, 4, 5, 2, 5, 3, 1, 5, 1, 3, 1, 5, 1,
-        0, 3, 4, 3, 0, 3, 4, 3, 3, 1, 5, 1, 3, 1, 5, 1,
-        4, 5, 2, 5, 4, 5, 2, 5, 3, 1, 5, 1, 3, 1, 5, 1,
-    }};
-    if (qpy < 0 || qpy > 51) {
-        throw std::runtime_error("8x8 inverse scaling QPY is outside [0,51]");
-    }
-    std::array<std::int64_t, 64> scaled{};
-    for (std::size_t index = 0; index < scaled.size(); ++index) {
-        const auto value =
-            static_cast<std::int64_t>(levels[index]) *
-            factors[static_cast<std::size_t>(qpy % 6)]
-                   [factor_classes[index]] *
-            16;
-        scaled[index] = qpy >= 36
-                            ? value * (std::int64_t{1} << (qpy / 6 - 6))
-                            : floor_shift(value +
-                                              (std::int64_t{1}
-                                               << (5 - qpy / 6)),
-                                          static_cast<unsigned>(6 - qpy / 6));
-    }
-    return scaled;
-}
-
 std::array<std::uint8_t, 64> predict_intra8x8(
     std::uint8_t mode, std::array<std::uint8_t, 16> top,
     bool top_available, std::array<std::uint8_t, 16> left,
@@ -1787,6 +1784,106 @@ void predict_chroma8x8(std::vector<std::uint8_t>& plane,
 
 namespace {
 
+template <typename Flags>
+void decode_intra_prediction_modes(
+    BitReader& reader, std::optional<CabacArithmeticDecoder>& cabac_decoder,
+    std::vector<CabacContextModel>& cabac_contexts, bool transform_8x8,
+    std::size_t macroblock_address, std::size_t slice_id,
+    std::uint32_t macroblock_width, std::size_t luma_block_width,
+    const Flags& decoded_macroblocks,
+    std::array<std::uint8_t, 16>& modes,
+    std::array<std::uint8_t, 4>& modes_8x8,
+    std::vector<std::uint8_t>& intra4x4_modes,
+    std::vector<std::uint8_t>& intra4x4_mode_valid,
+    const std::vector<std::size_t>& macroblock_slice_ids,
+    const std::vector<std::uint8_t>* inter_slice_intra_flags) {
+    const auto macroblock_x =
+        static_cast<std::uint32_t>(macroblock_address % macroblock_width);
+    const auto macroblock_y =
+        static_cast<std::uint32_t>(macroblock_address / macroblock_width);
+    const auto neighbor_mode =
+        [&](std::uint32_t neighbor_x, std::uint32_t neighbor_y,
+            bool neighbor_exists) -> std::optional<std::uint8_t> {
+        if (!neighbor_exists) {
+            return std::nullopt;
+        }
+        const auto neighbor_index =
+            static_cast<std::size_t>(neighbor_y) * luma_block_width +
+            neighbor_x;
+        const auto neighbor_macroblock =
+            static_cast<std::size_t>(neighbor_y / 4) * macroblock_width +
+            neighbor_x / 4;
+        const bool available =
+            neighbor_macroblock == macroblock_address
+                ? intra4x4_mode_valid[neighbor_index] != 0
+                : decoded_macroblocks[neighbor_macroblock] &&
+                      macroblock_slice_ids[neighbor_macroblock] == slice_id;
+        if (!available) {
+            return std::nullopt;
+        }
+        if (inter_slice_intra_flags &&
+            neighbor_macroblock != macroblock_address &&
+            !(*inter_slice_intra_flags)[neighbor_macroblock]) {
+            return std::uint8_t{2};
+        }
+        return intra4x4_modes[neighbor_index];
+    };
+    const auto decode_mode =
+        [&](std::uint32_t block_x, std::uint32_t block_y) {
+        const auto left_mode = neighbor_mode(
+            block_x == 0 ? 0 : block_x - 1, block_y, block_x != 0);
+        const auto top_mode = neighbor_mode(
+            block_x, block_y == 0 ? 0 : block_y - 1, block_y != 0);
+        const auto predicted_mode =
+            left_mode && top_mode
+                ? std::min(*left_mode, *top_mode)
+                : std::uint8_t{2};
+        if (cabac_decoder) {
+            return static_cast<std::uint8_t>(
+                cabac_decoder->decode_intra4x4_pred_mode(
+                    predicted_mode, cabac_contexts));
+        }
+        if (reader.read_bit()) {
+            return predicted_mode;
+        }
+        const auto remainder = reader.read_bits(3);
+        return static_cast<std::uint8_t>(
+            remainder < predicted_mode ? remainder : remainder + 1);
+    };
+    if (transform_8x8) {
+        for (std::uint32_t block_index = 0; block_index < 4; ++block_index) {
+            const auto block_x =
+                macroblock_x * 4 + (block_index % 2) * 2;
+            const auto block_y =
+                macroblock_y * 4 + (block_index / 2) * 2;
+            const auto mode = decode_mode(block_x, block_y);
+            modes_8x8[block_index] = mode;
+            for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
+                for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
+                    const auto grid_index =
+                        static_cast<std::size_t>(block_y + sub_y) *
+                            luma_block_width +
+                        block_x + sub_x;
+                    intra4x4_modes[grid_index] = mode;
+                    intra4x4_mode_valid[grid_index] = true;
+                }
+            }
+        }
+        return;
+    }
+    for (std::uint32_t block_index = 0; block_index < 16; ++block_index) {
+        const auto position = luma_block_position(block_index);
+        const auto block_x = macroblock_x * 4 + position[0];
+        const auto block_y = macroblock_y * 4 + position[1];
+        const auto block_grid_index =
+            static_cast<std::size_t>(block_y) * luma_block_width + block_x;
+        const auto mode = decode_mode(block_x, block_y);
+        modes[block_index] = mode;
+        intra4x4_modes[block_grid_index] = mode;
+        intra4x4_mode_valid[block_grid_index] = true;
+    }
+}
+
 template <typename Flags, typename TransformFlags, typename DcFlags, typename NeighborCoded>
 void decode_intra_nxn(
     BitReader& reader, std::optional<CabacArithmeticDecoder>& cabac_decoder,
@@ -1850,137 +1947,11 @@ void decode_intra_nxn(
     }
     std::array<std::uint8_t, 16> modes{};
     std::array<std::uint8_t, 4> modes_8x8{};
-    if (transform_8x8) {
-        for (std::uint32_t block_index = 0; block_index < 4;
-             ++block_index) {
-            const auto block_x = macroblock_x * 4 +
-                                 (block_index % 2) * 2;
-            const auto block_y = macroblock_y * 4 +
-                                 (block_index / 2) * 2;
-            const auto neighbor_mode =
-                [&](std::uint32_t neighbor_x,
-                    std::uint32_t neighbor_y,
-                    bool neighbor_exists)
-                    -> std::optional<std::uint8_t> {
-                if (!neighbor_exists) {
-                    return std::nullopt;
-                }
-                const auto neighbor_index =
-                    static_cast<std::size_t>(neighbor_y) *
-                        luma_block_width +
-                    neighbor_x;
-                const auto neighbor_macroblock =
-                    static_cast<std::size_t>(neighbor_y / 4) *
-                        macroblock_width +
-                    neighbor_x / 4;
-                const bool available =
-                    neighbor_macroblock == macroblock_address
-                        ? intra4x4_mode_valid[neighbor_index] != 0
-                        : decoded_macroblocks[neighbor_macroblock] &&
-                              macroblock_slice_ids[neighbor_macroblock] ==
-                                  slice_id;
-                if (!available) {
-                    return std::nullopt;
-                }
-                if (inter_slice_intra_flags && neighbor_macroblock != macroblock_address &&
-                    !(*inter_slice_intra_flags)[neighbor_macroblock]) {
-                    return std::uint8_t{2};
-                }
-                return intra4x4_modes[neighbor_index];
-            };
-            const auto left_mode = neighbor_mode(
-                block_x == 0 ? 0 : block_x - 1, block_y,
-                block_x != 0);
-            const auto top_mode = neighbor_mode(
-                block_x, block_y == 0 ? 0 : block_y - 1,
-                block_y != 0);
-            const auto predicted_mode =
-                left_mode && top_mode
-                    ? std::min(*left_mode, *top_mode)
-                    : std::uint8_t{2};
-            const auto mode =
-                cabac_decoder->decode_intra4x4_pred_mode(
-                    predicted_mode, cabac_contexts);
-            modes_8x8[block_index] = mode;
-            for (std::uint32_t sub_y = 0; sub_y < 2; ++sub_y) {
-                for (std::uint32_t sub_x = 0; sub_x < 2; ++sub_x) {
-                    const auto grid_index =
-                        static_cast<std::size_t>(block_y + sub_y) *
-                            luma_block_width +
-                        block_x + sub_x;
-                    intra4x4_modes[grid_index] = mode;
-                    intra4x4_mode_valid[grid_index] = true;
-                }
-            }
-        }
-    } else {
-        for (std::uint32_t block_index = 0; block_index < 16;
-             ++block_index) {
-            const auto position = luma_block_position(block_index);
-            const auto block_x = macroblock_x * 4 + position[0];
-            const auto block_y = macroblock_y * 4 + position[1];
-            const auto block_grid_index =
-                static_cast<std::size_t>(block_y) * luma_block_width +
-                block_x;
-            const auto neighbor_mode =
-                [&](std::uint32_t neighbor_x,
-                    std::uint32_t neighbor_y,
-                    bool neighbor_exists)
-                    -> std::optional<std::uint8_t> {
-                if (!neighbor_exists) {
-                    return std::nullopt;
-                }
-                const auto neighbor_index =
-                    static_cast<std::size_t>(neighbor_y) *
-                        luma_block_width +
-                    neighbor_x;
-                const auto neighbor_macroblock =
-                    static_cast<std::size_t>(neighbor_y / 4) *
-                        macroblock_width +
-                    neighbor_x / 4;
-                const bool available =
-                    neighbor_macroblock == macroblock_address
-                        ? intra4x4_mode_valid[neighbor_index] != 0
-                        : decoded_macroblocks[neighbor_macroblock] &&
-                              macroblock_slice_ids[neighbor_macroblock] ==
-                                  slice_id;
-                if (!available) {
-                    return std::nullopt;
-                }
-                if (inter_slice_intra_flags && neighbor_macroblock != macroblock_address &&
-                    !(*inter_slice_intra_flags)[neighbor_macroblock]) {
-                    return std::uint8_t{2};
-                }
-                return intra4x4_modes[neighbor_index];
-            };
-            const auto left_mode = neighbor_mode(
-                block_x == 0 ? 0 : block_x - 1, block_y,
-                block_x != 0);
-            const auto top_mode = neighbor_mode(
-                block_x, block_y == 0 ? 0 : block_y - 1,
-                block_y != 0);
-            const auto predicted_mode =
-                left_mode && top_mode
-                    ? std::min(*left_mode, *top_mode)
-                    : std::uint8_t{2};
-            std::uint8_t mode = predicted_mode;
-            if (cabac_decoder) {
-                mode = cabac_decoder->decode_intra4x4_pred_mode(
-                    predicted_mode, cabac_contexts);
-            } else {
-                const auto previous_mode_flag = reader.read_bit();
-                if (!previous_mode_flag) {
-                    const auto remainder = reader.read_bits(3);
-                    mode = static_cast<std::uint8_t>(
-                        remainder < predicted_mode ? remainder
-                                                   : remainder + 1);
-                }
-            }
-            modes[block_index] = mode;
-            intra4x4_modes[block_grid_index] = mode;
-            intra4x4_mode_valid[block_grid_index] = true;
-        }
-    }
+    decode_intra_prediction_modes(
+        reader, cabac_decoder, cabac_contexts, transform_8x8,
+        macroblock_address, slice_id, macroblock_width, luma_block_width,
+        decoded_macroblocks, modes, modes_8x8, intra4x4_modes,
+        intra4x4_mode_valid, macroblock_slice_ids, inter_slice_intra_flags);
     const bool chroma_left_nonzero =
         left_available && decoded_macroblocks[left_address] &&
         macroblock_slice_ids[left_address] == slice_id &&
@@ -2363,21 +2334,17 @@ void decode_intra_nxn(
             }
         }
     }
-    if (any_luma_coefficients &&
-        ((transform_8x8 &&
-          sps.seq_intra_luma_8x8_scaling_list_present) ||
-         (!transform_8x8 &&
-          sps.seq_intra_luma_4x4_scaling_list_present) ||
-         pps.pic_scaling_matrix_present)) {
-        throw std::runtime_error(
-            "intra luma residuals with custom scaling matrices are not supported");
-    }
-    if (any_chroma_coefficients &&
-        (sps.seq_intra_chroma_4x4_scaling_list_present ||
-         pps.pic_scaling_matrix_present)) {
-        throw std::runtime_error(
-            "I4x4 chroma residuals with custom scaling matrices are not supported");
-    }
+    h264_utils::validate_luma_scaling(
+        any_luma_coefficients, transform_8x8,
+        sps.seq_intra_luma_4x4_scaling_list_present,
+        sps.seq_intra_luma_8x8_scaling_list_present,
+        pps.pic_scaling_matrix_present,
+        "intra luma residuals with custom scaling matrices are not supported");
+    h264_utils::validate_chroma_scaling(
+        any_chroma_coefficients,
+        sps.seq_intra_chroma_4x4_scaling_list_present,
+        pps.pic_scaling_matrix_present,
+        "I4x4 chroma residuals with custom scaling matrices are not supported");
     std::array<std::array<std::int64_t, 16>, 16>
         luma_residual_blocks{};
     std::array<std::array<std::int64_t, 64>, 4>
@@ -2385,18 +2352,16 @@ void decode_intra_nxn(
     if (transform_8x8) {
         for (std::uint32_t block_index = 0; block_index < 4;
              ++block_index) {
-            const auto scaled = inverse_scale_luma8x8(
-                luma8x8_levels[block_index], previous_qpy);
             luma8x8_residual_blocks[block_index] =
-                inverse_transform_luma8x8(scaled);
+                h264_utils::reconstruct_luma8x8(
+                    luma8x8_levels[block_index], previous_qpy);
         }
     } else {
         for (std::uint32_t block_index = 0; block_index < 16;
              ++block_index) {
             luma_residual_blocks[block_index] =
-                inverse_transform_luma4x4(
-                    inverse_scale_intra4x4(luma_blocks[block_index],
-                                           previous_qpy));
+                h264_utils::reconstruct_intra4x4(
+                    luma_blocks[block_index], previous_qpy);
         }
     }
     std::array<std::array<std::int64_t, 4>, 2>
@@ -2409,20 +2374,14 @@ void decode_intra_nxn(
             reconstruct_intra16x16_chroma_dc(chroma_dc_blocks[1],
                                             qpc_cr);
     }
-    std::array<std::array<std::array<std::int64_t, 16>, 4>, 2>
-        chroma_residual_blocks{};
+    std::array<h264_utils::Residual8x8, 2> chroma_residual_components{};
     for (std::size_t plane_index = 0; plane_index < 2;
          ++plane_index) {
-        const auto& dc = chroma_dc_residuals[plane_index];
-        for (std::uint32_t block_index = 0; block_index < 4;
-             ++block_index) {
-            const auto qp = plane_index == 0 ? qpc_cb : qpc_cr;
-            chroma_residual_blocks[plane_index][block_index] =
-                inverse_transform_luma4x4(
-                    inverse_scale_intra4x4_ac(
-                        chroma_ac_blocks[plane_index][block_index],
-                        qp, dc[block_index]));
-        }
+        const auto qp = plane_index == 0 ? qpc_cb : qpc_cr;
+        chroma_residual_components[plane_index] =
+            h264_utils::reconstruct_chroma_component(
+                chroma_ac_blocks[plane_index],
+                chroma_dc_residuals[plane_index], qp);
     }
 
     const auto sample_available =
@@ -2450,10 +2409,9 @@ void decode_intra_nxn(
     if (transform_8x8) {
         for (std::uint32_t block_index = 0; block_index < 4;
              ++block_index) {
-            const auto origin_x =
-                macroblock_x * 16 + (block_index % 2) * 8;
-            const auto origin_y =
-                macroblock_y * 16 + (block_index / 2) * 8;
+            const auto position = h264_utils::block_position_2x2(block_index);
+            const auto origin_x = macroblock_x * 16 + position.x * 8;
+            const auto origin_y = macroblock_y * 16 + position.y * 8;
             std::array<std::uint8_t, 16> top{};
             std::array<std::uint8_t, 16> left{};
             bool top_available = true;
@@ -2623,12 +2581,12 @@ void decode_intra_nxn(
                       macroblock_x, macroblock_y,
                       static_cast<std::uint8_t>(chroma_mode),
                       prediction_top_available, prediction_left_available);
-    add_intra16x16_chroma_residual(
-        frame.chroma_u, frame.width / 2, macroblock_x, macroblock_y,
-        chroma_residual_blocks[0]);
-    add_intra16x16_chroma_residual(
-        frame.chroma_v, frame.width / 2, macroblock_x, macroblock_y,
-        chroma_residual_blocks[1]);
+    h264_utils::add_residual_block(
+        frame.chroma_u, frame.width / 2, macroblock_x * 8,
+        macroblock_y * 8, chroma_residual_components[0], 8);
+    h264_utils::add_residual_block(
+        frame.chroma_v, frame.width / 2, macroblock_x * 8,
+        macroblock_y * 8, chroma_residual_components[1], 8);
 
 }
 
@@ -3012,11 +2970,12 @@ Yuv420Frame decode_idr_i_frame_impl(
                 }
                 std::array<std::int64_t, 16> luma_dc_residuals{};
                 if (luma_dc.total_coeff != 0) {
-                    if (sps.seq_intra_luma_4x4_scaling_list_present ||
-                        pps.pic_scaling_matrix_present) {
-                        throw std::runtime_error(
-                            "I16x16 luma DC residuals with custom scaling matrices are not supported");
-                    }
+                    h264_utils::validate_luma_scaling(
+                        true, false,
+                        sps.seq_intra_luma_4x4_scaling_list_present,
+                        sps.seq_intra_luma_8x8_scaling_list_present,
+                        pps.pic_scaling_matrix_present,
+                        "I16x16 luma DC residuals with custom scaling matrices are not supported");
                     luma_dc_residuals =
                         reconstruct_intra16x16_luma_dc(luma_dc, previous_qpy);
                 }
@@ -3298,21 +3257,18 @@ Yuv420Frame decode_idr_i_frame_impl(
                             block.total_coeff;
                     }
                 }
-                if (luma_dc.total_coeff != 0 || any_luma_ac_coefficients) {
-                    if (sps.seq_intra_luma_4x4_scaling_list_present ||
-                        pps.pic_scaling_matrix_present) {
-                        throw std::runtime_error(
-                            "I16x16 luma residuals with custom scaling matrices are not supported");
-                    }
-                }
-                if (chroma_dc_nonzero[0] || chroma_dc_nonzero[1] ||
-                    any_chroma_ac_coefficients) {
-                    if (sps.seq_intra_chroma_4x4_scaling_list_present ||
-                        pps.pic_scaling_matrix_present) {
-                        throw std::runtime_error(
-                            "I16x16 chroma residuals with custom scaling matrices are not supported");
-                    }
-                }
+                h264_utils::validate_luma_scaling(
+                    luma_dc.total_coeff != 0 || any_luma_ac_coefficients,
+                    false, sps.seq_intra_luma_4x4_scaling_list_present,
+                    sps.seq_intra_luma_8x8_scaling_list_present,
+                    pps.pic_scaling_matrix_present,
+                    "I16x16 luma residuals with custom scaling matrices are not supported");
+                h264_utils::validate_chroma_scaling(
+                    chroma_dc_nonzero[0] || chroma_dc_nonzero[1] ||
+                        any_chroma_ac_coefficients,
+                    sps.seq_intra_chroma_4x4_scaling_list_present,
+                    pps.pic_scaling_matrix_present,
+                    "I16x16 chroma residuals with custom scaling matrices are not supported");
                 std::array<std::array<std::int64_t, 16>, 16>
                     luma_residual_blocks{};
                 for (std::uint32_t block_index = 0; block_index < 16;
@@ -3321,11 +3277,10 @@ Yuv420Frame decode_idr_i_frame_impl(
                         luma_block_position(block_index);
                     const auto dc_block_index =
                         block_position[1] * 4 + block_position[0];
-                    const auto coefficients = inverse_scale_intra4x4_ac(
-                        luma_ac_blocks[block_index], previous_qpy,
-                        luma_dc_residuals[dc_block_index]);
                     luma_residual_blocks[block_index] =
-                        inverse_transform_luma4x4(coefficients);
+                        h264_utils::reconstruct_intra4x4_ac(
+                            luma_ac_blocks[block_index], previous_qpy,
+                            luma_dc_residuals[dc_block_index]);
                 }
                 const bool prediction_left_available =
                     left_available && decoded_macroblocks[left_address] &&
@@ -3354,12 +3309,11 @@ Yuv420Frame decode_idr_i_frame_impl(
                         chroma_residual_blocks{};
                     for (std::uint32_t block_index = 0; block_index < 4;
                          ++block_index) {
-                        const auto coefficients = inverse_scale_intra4x4_ac(
-                            chroma_ac_blocks[plane_index][block_index],
-                            qpc[plane_index],
-                            chroma_dc_residuals[plane_index][block_index]);
                         chroma_residual_blocks[block_index] =
-                            inverse_transform_luma4x4(coefficients);
+                            h264_utils::reconstruct_intra4x4_ac(
+                                chroma_ac_blocks[plane_index][block_index],
+                                qpc[plane_index],
+                                chroma_dc_residuals[plane_index][block_index]);
                     }
                     auto& plane = plane_index == 0 ? frame.chroma_u
                                                    : frame.chroma_v;
@@ -3759,6 +3713,91 @@ Yuv420Frame decode_idr_i_frame(
     return decode_idr_i_frame_impl(slice_nals, sps, pps, false);
 }
 
+template <typename ReconstructPrediction>
+void reconstruct_inter_residual_macroblock(
+    Yuv420Frame& frame, const SpsInfo& sps, const PpsInfo& pps,
+    std::uint32_t macroblock_x, std::uint32_t macroblock_y,
+    bool transform_8x8, bool any_luma_coefficients,
+    bool any_chroma_coefficients, std::uint8_t chroma_cbp,
+    std::int32_t qpy,
+    const std::array<CavlcResidualBlock, 16>& luma_blocks,
+    const std::array<std::array<std::int32_t, 64>, 4>& luma8x8_levels,
+    const std::array<CavlcResidualBlock, 2>& chroma_dc_blocks,
+    const std::array<std::array<CavlcResidualBlock, 4>, 2>&
+        chroma_ac_blocks,
+    ReconstructPrediction&& reconstruct_prediction) {
+    h264_utils::validate_luma_scaling(
+        any_luma_coefficients, transform_8x8,
+        sps.seq_intra_luma_4x4_scaling_list_present,
+        sps.seq_intra_luma_8x8_scaling_list_present,
+        pps.pic_scaling_matrix_present,
+        "P luma residuals with custom scaling matrices are unsupported");
+    h264_utils::validate_chroma_scaling(
+        any_chroma_coefficients,
+        sps.seq_intra_chroma_4x4_scaling_list_present,
+        pps.pic_scaling_matrix_present,
+        "P chroma residuals with custom scaling matrices are unsupported");
+    std::array<std::array<std::int64_t, 16>, 16> luma_residual_blocks{};
+    std::array<std::array<std::int64_t, 64>, 4> luma8x8_residual_blocks{};
+    if (transform_8x8) {
+        for (std::uint32_t block_index = 0; block_index < 4; ++block_index) {
+            luma8x8_residual_blocks[block_index] =
+                h264_utils::reconstruct_luma8x8(
+                    luma8x8_levels[block_index], qpy);
+        }
+    } else {
+        for (std::uint32_t block_index = 0; block_index < 16; ++block_index) {
+            luma_residual_blocks[block_index] =
+                h264_utils::reconstruct_intra4x4(
+                    luma_blocks[block_index], qpy);
+        }
+    }
+    const auto qpc_cb = chroma_qp(qpy, pps.chroma_qp_index_offset);
+    const auto qpc_cr =
+        chroma_qp(qpy, pps.second_chroma_qp_index_offset);
+    std::array<std::array<std::int64_t, 4>, 2> chroma_dc_residuals{};
+    if (chroma_cbp != 0) {
+        chroma_dc_residuals[0] = reconstruct_intra16x16_chroma_dc(
+            chroma_dc_blocks[0], qpc_cb);
+        chroma_dc_residuals[1] = reconstruct_intra16x16_chroma_dc(
+            chroma_dc_blocks[1], qpc_cr);
+    }
+    std::array<h264_utils::Residual8x8, 2> chroma_residual_components{};
+    for (std::size_t plane_index = 0; plane_index < 2; ++plane_index) {
+        const auto qpc = plane_index == 0 ? qpc_cb : qpc_cr;
+        chroma_residual_components[plane_index] =
+            h264_utils::reconstruct_chroma_component(
+                chroma_ac_blocks[plane_index],
+                chroma_dc_residuals[plane_index], qpc);
+    }
+    reconstruct_prediction();
+    if (transform_8x8) {
+        for (std::uint32_t block_index = 0; block_index < 4; ++block_index) {
+            const auto position = h264_utils::block_position_2x2(block_index);
+            h264_utils::add_residual_block(
+                frame.luma, frame.width,
+                macroblock_x * 16 + position.x * 8,
+                macroblock_y * 16 + position.y * 8,
+                luma8x8_residual_blocks[block_index], 8);
+        }
+    } else {
+        for (std::uint32_t block_index = 0; block_index < 16; ++block_index) {
+            const auto position = luma_block_position(block_index);
+            h264_utils::add_residual_block(
+                frame.luma, frame.width,
+                macroblock_x * 16 + position[0] * 4,
+                macroblock_y * 16 + position[1] * 4,
+                luma_residual_blocks[block_index], 4);
+        }
+    }
+    h264_utils::add_residual_block(
+        frame.chroma_u, frame.width / 2, macroblock_x * 8,
+        macroblock_y * 8, chroma_residual_components[0], 8);
+    h264_utils::add_residual_block(
+        frame.chroma_v, frame.width / 2, macroblock_x * 8,
+        macroblock_y * 8, chroma_residual_components[1], 8);
+}
+
 Yuv420Frame decode_p_frame_with_lists(
     const std::vector<std::vector<std::uint8_t>>& slice_nals,
     const SpsInfo& sps, const PpsInfo& pps,
@@ -3766,75 +3805,13 @@ Yuv420Frame decode_p_frame_with_lists(
     const std::vector<const Yuv420Frame*>& input_frames_l1,
     std::optional<std::int64_t> picture_order_count = std::nullopt,
     std::size_t threads = 0) {
-    if (slice_nals.empty()) {
-        throw std::invalid_argument("P picture contains no slice NAL units");
-    }
-    if (input_frames_l0.empty() || input_frames_l0.front() == nullptr) {
-        throw std::invalid_argument(
-            "inter picture requires a decoded L0 reference frame");
-    }
-    const auto coded_references = [](const std::vector<const Yuv420Frame*>& inputs) {
-        std::vector<const Yuv420Frame*> result;
-        result.reserve(inputs.size());
-        for (const auto* frame : inputs) {
-            result.push_back(frame != nullptr && frame->coded_reference
-                                 ? frame->coded_reference.get() : frame);
-        }
-        return result;
-    };
-    const auto reference_frames_l0 = coded_references(input_frames_l0);
-    const auto reference_frames_l1 = coded_references(input_frames_l1);
+    const auto reference_frames_l0 = coded_reference_frames(input_frames_l0);
+    const auto reference_frames_l1 = coded_reference_frames(input_frames_l1);
+    validate_inter_picture_inputs(
+        slice_nals, sps, reference_frames_l0, reference_frames_l1);
     const auto& reference_frame = *reference_frames_l0.front();
     const auto* reference_frame_l1 =
         reference_frames_l1.empty() ? nullptr : reference_frames_l1.front();
-    if (!sps.frame_mbs_only || sps.chroma_format_idc != 1 ||
-        sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 ||
-        sps.coded_width == 0 || sps.coded_height == 0 ||
-        sps.coded_width % 16 != 0 || sps.coded_height % 16 != 0 ||
-        sps.width == 0 || sps.height == 0 || sps.width % 2 != 0 ||
-        sps.height % 2 != 0 ||
-        sps.frame_crop_left % 2 != 0 || sps.frame_crop_top % 2 != 0 ||
-        static_cast<std::uint64_t>(sps.frame_crop_left) + sps.width +
-                sps.frame_crop_right !=
-            sps.coded_width ||
-        static_cast<std::uint64_t>(sps.frame_crop_top) + sps.height +
-                sps.frame_crop_bottom !=
-            sps.coded_height) {
-        throw std::runtime_error(
-            "P-picture decoding requires a valid progressive 8-bit 4:2:0 SPS");
-    }
-    if (reference_frame.width != sps.coded_width ||
-        reference_frame.height != sps.coded_height ||
-        reference_frame.luma.size() !=
-            checked_plane_size(sps.coded_width, sps.coded_height) ||
-        reference_frame.chroma_u.size() !=
-            checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
-        reference_frame.chroma_v.size() != reference_frame.chroma_u.size()) {
-        throw std::invalid_argument(
-            "P-picture reference frame dimensions or planes do not match the SPS");
-    }
-    for (const auto* reference : reference_frames_l0) {
-        if (reference == nullptr || reference->width != sps.coded_width ||
-            reference->height != sps.coded_height ||
-            reference->luma.size() != checked_plane_size(sps.coded_width, sps.coded_height) ||
-            reference->chroma_u.size() !=
-                checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
-            reference->chroma_v.size() != reference->chroma_u.size()) {
-            throw std::invalid_argument(
-                "P-picture L0 reference dimensions or planes do not match the SPS");
-        }
-    }
-    for (const auto* reference : reference_frames_l1) {
-        if (reference == nullptr || reference->width != sps.coded_width ||
-            reference->height != sps.coded_height ||
-            reference->luma.size() != checked_plane_size(sps.coded_width, sps.coded_height) ||
-            reference->chroma_u.size() !=
-                checked_plane_size(sps.coded_width / 2, sps.coded_height / 2) ||
-            reference->chroma_v.size() != reference->chroma_u.size()) {
-            throw std::invalid_argument(
-                "B-picture L1 reference dimensions or planes do not match the SPS");
-        }
-    }
 
     const auto macroblock_width = sps.coded_width / 16;
     const auto macroblock_height = sps.coded_height / 16;
@@ -4151,10 +4128,6 @@ Yuv420Frame decode_p_frame_with_lists(
             address, current_slice_id, 0, 0, 4, 4, 0, 0, references,
             flags, valid, motion, motion);
     };
-    struct DirectMotionCandidate {
-        std::int32_t reference_index;
-        MotionVector motion_vector;
-    };
     const auto neighbor_direct_motion_candidate =
         [&](std::int64_t block_x, std::int64_t block_y,
             std::size_t current_macroblock, std::size_t current_slice_id,
@@ -4216,13 +4189,6 @@ Yuv420Frame decode_p_frame_with_lists(
             partition_width == 4 && partition_height == 4;
         const std::int32_t inference_step =
             sps.direct_8x8_inference ? 2 : 1;
-        const auto minimum_nonnegative = [](std::int32_t left,
-                                            std::int32_t right) {
-            if (left >= 0 && right >= 0) {
-                return std::min(left, right);
-            }
-            return std::max(left, right);
-        };
         for (std::int32_t group_y = partition_y;
              group_y < partition_y + partition_height;
              group_y += inference_step) {
@@ -4282,25 +4248,6 @@ Yuv420Frame decode_p_frame_with_lists(
                             output_prediction_flags, output_motion,
                             output_motion_l1);
                 }
-                std::array<std::int32_t, 2> reference_index{};
-                for (std::size_t list_index = 0; list_index < 2;
-                     ++list_index) {
-                    const auto reference_at = [&](std::size_t index) {
-                        return candidates[list_index][index]
-                                   ? candidates[list_index][index]
-                                         ->reference_index
-                                   : -1;
-                    };
-                    reference_index[list_index] = minimum_nonnegative(
-                        reference_at(0),
-                        minimum_nonnegative(reference_at(1),
-                                            reference_at(2)));
-                }
-                const bool direct_zero =
-                    reference_index[0] == -1 && reference_index[1] == -1;
-                if (direct_zero) {
-                    reference_index = {0, 0};
-                }
                 bool colocated_zero = false;
                 if (!reference_frames_l1.empty() &&
                     !input_frames_l1.front()->long_term_reference &&
@@ -4325,65 +4272,11 @@ Yuv420Frame decode_p_frame_with_lists(
                         colocated.motion_vector[1] >= -1 &&
                         colocated.motion_vector[1] <= 1;
                 }
-                std::array<MotionVector, 2> group_motion{};
-                for (std::size_t list_index = 0; list_index < 2;
-                     ++list_index) {
-                    if (reference_index[list_index] < 0) {
-                        continue;
-                    }
-                    const auto& list = list_index == 0
-                                           ? reference_frames_l0
-                                           : reference_frames_l1;
-                    if (static_cast<std::size_t>(
-                            reference_index[list_index]) >= list.size()) {
-                        throw std::runtime_error(
-                            "B_Direct spatial reference index is unavailable");
-                    }
-                    if (direct_zero ||
-                        (reference_index[list_index] == 0 &&
-                         colocated_zero)) {
-                        continue;
-                    }
-                    auto match_count = 0;
-                    MotionVector matching_motion{};
-                    std::array<MotionVector, 3> median_candidates{};
-                    for (std::size_t candidate_index = 0;
-                         candidate_index < 3; ++candidate_index) {
-                        if (!candidates[list_index][candidate_index] ||
-                            candidates[list_index][candidate_index]
-                                    ->reference_index < 0) {
-                            continue;
-                        }
-                        median_candidates[candidate_index] =
-                            candidates[list_index][candidate_index]
-                                ->motion_vector;
-                        if (candidates[list_index][candidate_index]
-                                ->reference_index ==
-                            reference_index[list_index]) {
-                            ++match_count;
-                            matching_motion =
-                                candidates[list_index][candidate_index]
-                                    ->motion_vector;
-                        }
-                    }
-                    if (match_count == 1) {
-                        group_motion[list_index] = matching_motion;
-                    } else {
-                        for (std::size_t component = 0; component < 2;
-                             ++component) {
-                            std::array<std::int64_t, 3> values{
-                                median_candidates[0][component],
-                                median_candidates[1][component],
-                                median_candidates[2][component]};
-                            std::sort(values.begin(), values.end());
-                            group_motion[list_index][component] = values[1];
-                        }
-                    }
-                }
-                const auto prediction_mask =
-                    static_cast<std::uint8_t>(
-                        (reference_index[0] >= 0 ? 1 : 0) |
-                        (reference_index[1] >= 0 ? 2 : 0));
+                const auto group = derive_spatial_direct_group(
+                    candidates,
+                    {reference_frames_l0.size(),
+                     reference_frames_l1.size()},
+                    colocated_zero);
                 for (std::int32_t block_offset_y = 0;
                      block_offset_y < inference_step; ++block_offset_y) {
                     for (std::int32_t block_offset_x = 0;
@@ -4392,14 +4285,14 @@ Yuv420Frame decode_p_frame_with_lists(
                             (group_y + block_offset_y) * 4 +
                             group_x + block_offset_x);
                         output_prediction_flags[block_index] =
-                            prediction_mask;
+                            group.prediction_flags;
                         for (std::size_t list_index = 0; list_index < 2;
                              ++list_index) {
                             output_reference_indices[list_index][block_index] =
-                                reference_index[list_index];
+                                group.reference_indices[list_index];
                         }
-                        output_motion[block_index] = group_motion[0];
-                        output_motion_l1[block_index] = group_motion[1];
+                        output_motion[block_index] = group.motion[0];
+                        output_motion_l1[block_index] = group.motion[1];
                         motion_vector_valid[macroblock_address][block_index] =
                             1;
                     }
@@ -4451,59 +4344,10 @@ Yuv420Frame decode_p_frame_with_lists(
                     reference_frames_l1.front()
                         ->colocated_motion_field[macroblock_address]
                                                 [colocated_block];
-                std::int32_t reference_index = -1;
-                for (std::size_t index = 0;
-                     index < reference_frames_l0.size(); ++index) {
-                    if (reference_frames_l0[index] != nullptr &&
-                        reference_frames_l0[index]->picture_order_count ==
-                            colocated.reference_picture_order_count) {
-                        reference_index = static_cast<std::int32_t>(index);
-                        break;
-                    }
-                }
-                if (colocated.reference_picture_order_count ==
-                    std::numeric_limits<std::int64_t>::min()) {
-                    reference_index = -1;
-                }
-                std::array<std::int32_t, 2> reference_indices{
-                    std::max(reference_index, 0), 0};
-                MotionVector group_motion_l0{};
-                MotionVector group_motion_l1{};
-                constexpr std::uint8_t prediction_mask = 3;
-                if (reference_index >= 0) {
-                    if (static_cast<std::size_t>(reference_index) >=
-                        reference_frames_l0.size()) {
-                        throw std::runtime_error(
-                            "B_Direct temporal reference index is unavailable");
-                    }
-                    reference_indices[0] = reference_index;
-                    const auto& reference =
-                        *reference_frames_l0[reference_index];
-                    auto td =
-                        reference_frames_l1.front()->picture_order_count -
-                        reference.picture_order_count;
-                    auto tb =
-                        current_picture_order_count -
-                        reference.picture_order_count;
-                    if (td != 0) {
-                        td = std::clamp<std::int64_t>(td, -128, 127);
-                        tb = std::clamp<std::int64_t>(tb, -128, 127);
-                        const auto tx =
-                            (16384 + std::abs(td / 2)) / td;
-                        const auto scale = std::clamp<std::int64_t>(
-                            (tb * tx + 32) >> 6, -1024, 1023);
-                        group_motion_l0 = {
-                            static_cast<std::int64_t>(
-                                (scale * colocated.motion_vector[0] + 128) >>
-                                8),
-                            static_cast<std::int64_t>(
-                                (scale * colocated.motion_vector[1] + 128) >>
-                                8)};
-                    }
-                    group_motion_l1 = {
-                        group_motion_l0[0] - colocated.motion_vector[0],
-                        group_motion_l0[1] - colocated.motion_vector[1]};
-                }
+                const auto group = derive_temporal_direct_group(
+                    colocated, reference_frames_l0,
+                    *reference_frames_l1.front(),
+                    current_picture_order_count);
                 for (std::int32_t block_offset_y = 0;
                      block_offset_y < inference_step; ++block_offset_y) {
                     for (std::int32_t block_offset_x = 0;
@@ -4513,13 +4357,13 @@ Yuv420Frame decode_p_frame_with_lists(
                             (group_y + block_offset_y) * 4 +
                             group_x + block_offset_x);
                         output_prediction_flags[block_index] =
-                            prediction_mask;
+                            group.prediction_flags;
                         output_reference_indices[0][block_index] =
-                            reference_indices[0];
+                            group.reference_indices[0];
                         output_reference_indices[1][block_index] =
-                            reference_indices[1];
-                        output_motion[block_index] = group_motion_l0;
-                        output_motion_l1[block_index] = group_motion_l1;
+                            group.reference_indices[1];
+                        output_motion[block_index] = group.motion[0];
+                        output_motion_l1[block_index] = group.motion[1];
                         motion_vector_valid[macroblock_address][block_index] =
                             1;
                     }
@@ -5189,11 +5033,12 @@ Yuv420Frame decode_p_frame_with_lists(
                 }
                 std::array<std::int64_t, 16> luma_dc_residuals{};
                 if (luma_dc.total_coeff != 0) {
-                    if (sps.seq_intra_luma_4x4_scaling_list_present ||
-                        pps.pic_scaling_matrix_present) {
-                        throw std::runtime_error(
-                            "P-slice Intra16x16 custom luma scaling matrices are unsupported");
-                    }
+                    h264_utils::validate_luma_scaling(
+                        true, false,
+                        sps.seq_intra_luma_4x4_scaling_list_present,
+                        sps.seq_intra_luma_8x8_scaling_list_present,
+                        pps.pic_scaling_matrix_present,
+                        "P-slice Intra16x16 custom luma scaling matrices are unsupported");
                     luma_dc_residuals =
                         reconstruct_intra16x16_luma_dc(luma_dc, qpy);
                 }
@@ -5279,12 +5124,12 @@ Yuv420Frame decode_p_frame_with_lists(
                     any_luma_ac_coefficients |= block.total_coeff != 0;
                     luma_ac_blocks[block_index] = std::move(block);
                 }
-                if (any_luma_ac_coefficients &&
-                    (sps.seq_intra_luma_4x4_scaling_list_present ||
-                     pps.pic_scaling_matrix_present)) {
-                    throw std::runtime_error(
-                        "P-slice Intra16x16 custom luma scaling matrices are unsupported");
-                }
+                h264_utils::validate_luma_scaling(
+                    any_luma_ac_coefficients, false,
+                    sps.seq_intra_luma_4x4_scaling_list_present,
+                    sps.seq_intra_luma_8x8_scaling_list_present,
+                    pps.pic_scaling_matrix_present,
+                    "P-slice Intra16x16 custom luma scaling matrices are unsupported");
                 std::array<std::array<std::int64_t, 4>, 2> chroma_dc{};
                 std::array<std::array<CavlcResidualBlock, 4>, 2> chroma_ac;
                 for (auto& plane : chroma_ac) {
@@ -5370,23 +5215,21 @@ Yuv420Frame decode_p_frame_with_lists(
                         }
                     }
                 }
-                if (any_chroma_coefficients &&
-                    (sps.seq_intra_chroma_4x4_scaling_list_present ||
-                     pps.pic_scaling_matrix_present)) {
-                    throw std::runtime_error(
-                        "P-slice Intra16x16 custom chroma scaling matrices are unsupported");
-                }
+                h264_utils::validate_chroma_scaling(
+                    any_chroma_coefficients,
+                    sps.seq_intra_chroma_4x4_scaling_list_present,
+                    pps.pic_scaling_matrix_present,
+                    "P-slice Intra16x16 custom chroma scaling matrices are unsupported");
                 std::array<std::array<std::int64_t, 16>, 16>
                     luma_residual_blocks{};
                 for (std::uint32_t block_index = 0; block_index < 16;
                      ++block_index) {
                     const auto position = luma_block_position(block_index);
                     const auto dc_index = position[1] * 4 + position[0];
-                    const auto coefficients = inverse_scale_intra4x4_ac(
-                        luma_ac_blocks[block_index], qpy,
-                        luma_dc_residuals[dc_index]);
                     luma_residual_blocks[block_index] =
-                        inverse_transform_luma4x4(coefficients);
+                        h264_utils::reconstruct_intra4x4_ac(
+                            luma_ac_blocks[block_index], qpy,
+                            luma_dc_residuals[dc_index]);
                 }
                 const bool prediction_left_available =
                     left_available && decoded_macroblocks[left_address] &&
@@ -5410,9 +5253,10 @@ Yuv420Frame decode_p_frame_with_lists(
                 for (std::size_t plane = 0; plane < 2; ++plane) {
                     std::array<std::array<std::int64_t, 16>, 4> residuals{};
                     for (std::size_t index = 0; index < 4; ++index) {
-                        residuals[index] = inverse_transform_luma4x4(
-                            inverse_scale_intra4x4_ac(chroma_ac[plane][index],
-                                                      qpc[plane], chroma_dc[plane][index]));
+                        residuals[index] =
+                            h264_utils::reconstruct_intra4x4_ac(
+                                chroma_ac[plane][index], qpc[plane],
+                                chroma_dc[plane][index]);
                     }
                     add_intra16x16_chroma_residual(
                         plane == 0 ? frame.chroma_u : frame.chroma_v,
@@ -6135,10 +5979,6 @@ Yuv420Frame decode_p_frame_with_lists(
                 luma_blocks[block_index] = std::move(block);
             }
 
-            const auto qpc_cb =
-                chroma_qp(qpy, pps.chroma_qp_index_offset);
-            const auto qpc_cr =
-                chroma_qp(qpy, pps.second_chroma_qp_index_offset);
             std::array<CavlcResidualBlock, 2> chroma_dc_blocks;
             std::array<std::array<CavlcResidualBlock, 4>, 2>
                 chroma_ac_blocks;
@@ -6328,122 +6168,20 @@ Yuv420Frame decode_p_frame_with_lists(
                     }
                 }
             }
-            if (any_luma_coefficients &&
-                ((transform_8x8 &&
-                  sps.seq_intra_luma_8x8_scaling_list_present) ||
-                 (!transform_8x8 &&
-                  sps.seq_intra_luma_4x4_scaling_list_present) ||
-                 pps.pic_scaling_matrix_present)) {
-                throw std::runtime_error(
-                    "P luma residuals with custom scaling matrices are unsupported");
-            }
-            if (any_chroma_coefficients &&
-                (sps.seq_intra_chroma_4x4_scaling_list_present ||
-                 pps.pic_scaling_matrix_present)) {
-                throw std::runtime_error(
-                    "P chroma residuals with custom scaling matrices are unsupported");
-            }
-            std::array<std::array<std::int64_t, 16>, 16>
-                luma_residual_blocks{};
-            std::array<std::array<std::int64_t, 64>, 4>
-                luma8x8_residual_blocks{};
-            if (transform_8x8) {
-                for (std::uint32_t block_index = 0; block_index < 4;
-                     ++block_index) {
-                    luma8x8_residual_blocks[block_index] =
-                        inverse_transform_luma8x8(inverse_scale_luma8x8(
-                            luma8x8_levels[block_index], qpy));
-                }
-            } else {
-                for (std::uint32_t block_index = 0; block_index < 16;
-                     ++block_index) {
-                    luma_residual_blocks[block_index] =
-                        inverse_transform_luma4x4(inverse_scale_intra4x4(
-                            luma_blocks[block_index], qpy));
-                }
-            }
-            std::array<std::array<std::int64_t, 4>, 2>
-                chroma_dc_residuals{};
-            if (chroma_cbp != 0) {
-                chroma_dc_residuals[0] = reconstruct_intra16x16_chroma_dc(
-                    chroma_dc_blocks[0], qpc_cb);
-                chroma_dc_residuals[1] = reconstruct_intra16x16_chroma_dc(
-                    chroma_dc_blocks[1], qpc_cr);
-            }
-            std::array<std::array<std::array<std::int64_t, 16>, 4>, 2>
-                chroma_residual_blocks{};
-            for (std::size_t plane_index = 0; plane_index < 2;
-                 ++plane_index) {
-                const auto qpc = plane_index == 0 ? qpc_cb : qpc_cr;
-                for (std::uint32_t block_index = 0; block_index < 4;
-                     ++block_index) {
-                    const auto coefficients = inverse_scale_intra4x4_ac(
-                        chroma_ac_blocks[plane_index][block_index], qpc,
-                        chroma_dc_residuals[plane_index][block_index]);
-                    chroma_residual_blocks[plane_index][block_index] =
-                        inverse_transform_luma4x4(coefficients);
-                }
-            }
-            reconstruct_macroblock(
-                macroblock_address, motion,
-                b_slice ? &motion_l1 : nullptr,
-                b_slice ? &prediction_flags : nullptr,
-                &macroblock_reference_indices[macroblock_address],
-                slice_header.prediction_weight_table
-                    ? &*slice_header.prediction_weight_table
-                    : nullptr);
-            if (transform_8x8) {
-                for (std::uint32_t block_index = 0; block_index < 4;
-                     ++block_index) {
-                    const auto origin_x =
-                        macroblock_x * 16 + (block_index % 2) * 8;
-                    const auto origin_y =
-                        macroblock_y * 16 + (block_index / 2) * 8;
-                    for (std::uint32_t row = 0; row < 8; ++row) {
-                        for (std::uint32_t column = 0; column < 8; ++column) {
-                            auto& sample = frame.luma[
-                                static_cast<std::size_t>(origin_y + row) *
-                                    frame.width +
-                                origin_x + column];
-                            sample = static_cast<std::uint8_t>(
-                                std::clamp<std::int64_t>(
-                                    static_cast<std::int64_t>(sample) +
-                                        luma8x8_residual_blocks[block_index]
-                                            [row * 8 + column],
-                                    0, 255));
-                        }
-                    }
-                }
-            } else {
-                for (std::uint32_t block_index = 0; block_index < 16;
-                     ++block_index) {
-                    const auto position = luma_block_position(block_index);
-                    const auto origin_x =
-                        macroblock_x * 16 + position[0] * 4;
-                    const auto origin_y =
-                        macroblock_y * 16 + position[1] * 4;
-                    for (std::uint32_t row = 0; row < 4; ++row) {
-                        for (std::uint32_t column = 0; column < 4; ++column) {
-                            auto& sample = frame.luma[
-                                static_cast<std::size_t>(origin_y + row) *
-                                    frame.width +
-                                origin_x + column];
-                            sample = static_cast<std::uint8_t>(
-                                std::clamp<std::int64_t>(
-                                    static_cast<std::int64_t>(sample) +
-                                        luma_residual_blocks[block_index]
-                                            [row * 4 + column],
-                                    0, 255));
-                        }
-                    }
-                }
-            }
-            add_intra16x16_chroma_residual(
-                frame.chroma_u, frame.width / 2, macroblock_x, macroblock_y,
-                chroma_residual_blocks[0]);
-            add_intra16x16_chroma_residual(
-                frame.chroma_v, frame.width / 2, macroblock_x, macroblock_y,
-                chroma_residual_blocks[1]);
+            reconstruct_inter_residual_macroblock(
+                frame, sps, pps, macroblock_x, macroblock_y, transform_8x8,
+                any_luma_coefficients, any_chroma_coefficients, chroma_cbp,
+                qpy, luma_blocks, luma8x8_levels, chroma_dc_blocks,
+                chroma_ac_blocks, [&] {
+                    reconstruct_macroblock(
+                        macroblock_address, motion,
+                        b_slice ? &motion_l1 : nullptr,
+                        b_slice ? &prediction_flags : nullptr,
+                        &macroblock_reference_indices[macroblock_address],
+                        slice_header.prediction_weight_table
+                            ? &*slice_header.prediction_weight_table
+                            : nullptr);
+                });
             decoded = 1;
             macroblock_slice_ids[macroblock_address] = slice_id;
             macroblock_qpy[macroblock_address] = qpy;

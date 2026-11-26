@@ -7,21 +7,27 @@ from functools import lru_cache
 from typing import Optional, Sequence
 
 
-from .h264_cabac import place_chroma4x4_scan_levels
+from .h264_utils import (
+    INVERSE_SCALE_4X4_FACTORS as _INVERSE_SCALE_4X4_FACTORS,
+    InverseScaleError,
+    InverseTransformError,
+    hadamard4x4,
+    inverse_scale_chroma4x4,
+    inverse_scale_luma4x4,
+    inverse_scale_luma8x8,
+    inverse_transform_luma4x4,
+    inverse_transform_luma8x8,
+    reconstruct_chroma4x4_residual,
+    reconstruct_luma4x4_residual,
+    reconstruct_luma4x4_ac_residual,
+    reconstruct_luma8x8_residual,
+)
 from .h264_slice import RefPicListModification
 from .codec_frame import Yuv420Frame
 
 
-class InverseScaleError(ValueError):
-    """Raised when inverse-scaling inputs are invalid."""
-
-
 class ChromaQPError(ValueError):
     """Raised when chroma quantization-parameter inputs are invalid."""
-
-
-class InverseTransformError(ValueError):
-    """Raised when inverse-transform inputs are invalid."""
 
 
 class IntraPredictionError(ValueError):
@@ -2501,37 +2507,10 @@ def derive_motion_vector(
     return apply_motion_vector_difference(predicted, difference)
 
 
-_INVERSE_SCALE_4X4_FACTORS = (
-    (10, 13, 16),
-    (11, 14, 18),
-    (13, 16, 20),
-    (14, 18, 23),
-    (16, 20, 25),
-    (18, 23, 29),
-)
 _CHROMA_QPC_FROM_QPI = (
     29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36,
     36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39,
 )
-_INVERSE_SCALE_8X8_FACTORS = (
-    (20, 18, 32, 19, 25, 24),
-    (22, 19, 35, 21, 28, 26),
-    (26, 23, 42, 24, 33, 31),
-    (28, 25, 45, 26, 35, 33),
-    (32, 28, 51, 30, 40, 38),
-    (36, 32, 58, 34, 46, 43),
-)
-_INVERSE_SCALE_8X8_CLASSES = (
-    0, 3, 4, 3, 0, 3, 4, 3,
-    3, 1, 5, 1, 3, 1, 5, 1,
-    4, 5, 2, 5, 4, 5, 2, 5,
-    3, 1, 5, 1, 3, 1, 5, 1,
-    0, 3, 4, 3, 0, 3, 4, 3,
-    3, 1, 5, 1, 3, 1, 5, 1,
-    4, 5, 2, 5, 4, 5, 2, 5,
-    3, 1, 5, 1, 3, 1, 5, 1,
-)
-
 
 def derive_chroma_qpc(qpy: int, qp_offset: int) -> int:
     """Derive 8-bit chroma QPC from luma QPY and a PPS component offset."""
@@ -2548,41 +2527,6 @@ def derive_chroma_qpc(qpy: int, qp_offset: int) -> int:
     if qpi < 30:
         return qpi
     return _CHROMA_QPC_FROM_QPI[qpi - 30]
-
-
-def inverse_scale_luma4x4(
-    levels: Sequence[int], scaling_list: Sequence[int], qpy: int
-) -> list[int]:
-    """Apply H.264 4x4 luma inverse scaling to raster-order coefficient levels."""
-    if not isinstance(qpy, int) or isinstance(qpy, bool) or not 0 <= qpy <= 51:
-        raise InverseScaleError("inverse scaling QPY is outside [0,51]")
-    if len(levels) != 16 or any(
-        not isinstance(level, int)
-        or isinstance(level, bool)
-        or not -(1 << 31) <= level < (1 << 31)
-        for level in levels
-    ):
-        raise InverseScaleError("inverse scaling levels must contain 16 signed 32-bit integers")
-    if len(scaling_list) != 16 or any(
-        not isinstance(weight, int)
-        or isinstance(weight, bool)
-        or not 1 <= weight <= 255
-        for weight in scaling_list
-    ):
-        raise InverseScaleError("inverse scaling list must contain 16 values in [1,255]")
-
-    scaled = []
-    for index, (level, weight) in enumerate(zip(levels, scaling_list)):
-        row, column = divmod(index, 4)
-        factor_class = row % 2 + column % 2
-        value = level * _INVERSE_SCALE_4X4_FACTORS[qpy % 6][factor_class] * weight
-        if qpy >= 24:
-            scaled.append(value << (qpy // 6 - 4))
-        else:
-            shift = 4 - qpy // 6
-            rounding = 1 << (shift - 1)
-            scaled.append((value + rounding) >> shift)
-    return scaled
 
 
 def inverse_scale_chroma_dc2x2(transformed: Sequence[int], qpc: int) -> list[int]:
@@ -2605,64 +2549,6 @@ def inverse_scale_chroma_dc2x2(transformed: Sequence[int], qpc: int) -> list[int
     return scaled
 
 
-def inverse_scale_chroma4x4(
-    levels: Sequence[int], scaling_list: Sequence[int], qpc: int
-) -> list[int]:
-    """Preserve scaled chroma DC and inverse-scale 4x4 chroma AC levels."""
-    if not isinstance(qpc, int) or isinstance(qpc, bool) or not 0 <= qpc <= 39:
-        raise InverseScaleError("inverse scaling QPC is outside [0,39]")
-    if len(levels) != 16 or any(
-        not isinstance(level, int)
-        or isinstance(level, bool)
-        or not -(1 << 15) <= level < (1 << 15)
-        for level in levels
-    ):
-        raise InverseScaleError("chroma block levels must contain 16 signed 16-bit integers")
-    if len(scaling_list) != 16 or any(
-        not isinstance(weight, int)
-        or isinstance(weight, bool)
-        or not 1 <= weight <= 255
-        for weight in scaling_list
-    ):
-        raise InverseScaleError("inverse scaling list must contain 16 values in [1,255]")
-
-    scaled = [levels[0]] + [0] * 15
-    for index in range(1, 16):
-        row, column = divmod(index, 4)
-        factor_class = row % 2 + column % 2
-        value = levels[index] * _INVERSE_SCALE_4X4_FACTORS[qpc % 6][factor_class] * scaling_list[index]
-        if qpc >= 24:
-            scaled[index] = value << (qpc // 6 - 4)
-        else:
-            shift = 4 - qpc // 6
-            rounding = 1 << (shift - 1)
-            scaled[index] = (value + rounding) >> shift
-        if not -(1 << 15) <= scaled[index] < (1 << 15):
-            raise InverseScaleError("scaled chroma block value is outside the signed 16-bit range")
-    return scaled
-
-
-def reconstruct_chroma4x4_residual(
-    dc_c: int,
-    ac_scan_levels: Sequence[int],
-    scaling_list: Sequence[int],
-    qpc: int,
-) -> list[int]:
-    """Assemble, scale, and inverse-transform one 4x4 chroma residual block."""
-    if not isinstance(qpc, int) or isinstance(qpc, bool) or not 0 <= qpc <= 39:
-        raise InverseScaleError("inverse scaling QPC is outside [0,39]")
-    if (
-        not isinstance(dc_c, int)
-        or isinstance(dc_c, bool)
-        or not -(1 << 15) <= dc_c < (1 << 15)
-    ):
-        raise InverseScaleError("chroma block DC must be a signed 16-bit integer")
-
-    scan_levels = place_chroma4x4_scan_levels(dc_c, list(ac_scan_levels))
-    scaled = inverse_scale_chroma4x4(scan_levels, scaling_list, qpc)
-    return inverse_transform_luma4x4(scaled)
-
-
 def reconstruct_intra16x16_luma_dc(
     raster_levels: Sequence[int], scaling_list: Sequence[int], qpy: int
 ) -> list[int]:
@@ -2680,18 +2566,7 @@ def reconstruct_intra16x16_luma_dc(
     ):
         raise InverseScaleError("inverse scaling list must contain 16 values in [1,255]")
 
-    def hadamard(values: Sequence[int]) -> list[int]:
-        a, b, c, d = values
-        return [a + b + c + d, a + b - c - d, a - b - c + d, a - b + c - d]
-
-    horizontal = [0] * 16
-    for row in range(4):
-        horizontal[row * 4 : row * 4 + 4] = hadamard(raster_levels[row * 4 : row * 4 + 4])
-    transformed = [0] * 16
-    for column in range(4):
-        column_values = hadamard([horizontal[row * 4 + column] for row in range(4)])
-        for row, value in enumerate(column_values):
-            transformed[row * 4 + column] = value
+    transformed = hadamard4x4(raster_levels)
 
     factor = _INVERSE_SCALE_4X4_FACTORS[qpy % 6][0] * scaling_list[0]
     if qpy >= 36:
@@ -2741,40 +2616,6 @@ def reconstruct_chroma420_macroblock(
     ):
         raise InverseTransformError("chroma residual must contain 64 integer samples")
     return [min(255, max(0, predicted + value)) for predicted, value in zip(prediction, residual)]
-
-
-def inverse_scale_luma8x8(
-    levels: Sequence[int], scaling_list: Sequence[int], qpy: int
-) -> list[int]:
-    """Apply H.264 8x8 luma inverse scaling to raster-order coefficient levels."""
-    if not isinstance(qpy, int) or isinstance(qpy, bool) or not 0 <= qpy <= 51:
-        raise InverseScaleError("inverse scaling QPY is outside [0,51]")
-    if len(levels) != 64 or any(
-        not isinstance(level, int)
-        or isinstance(level, bool)
-        or not -(1 << 31) <= level < (1 << 31)
-        for level in levels
-    ):
-        raise InverseScaleError("inverse scaling levels must contain 64 signed 32-bit integers")
-    if len(scaling_list) != 64 or any(
-        not isinstance(weight, int)
-        or isinstance(weight, bool)
-        or not 1 <= weight <= 255
-        for weight in scaling_list
-    ):
-        raise InverseScaleError("inverse scaling list must contain 64 values in [1,255]")
-
-    scaled = []
-    for index, (level, weight) in enumerate(zip(levels, scaling_list)):
-        factor_class = _INVERSE_SCALE_8X8_CLASSES[index]
-        value = level * _INVERSE_SCALE_8X8_FACTORS[qpy % 6][factor_class] * weight
-        if qpy >= 36:
-            scaled.append(value << (qpy // 6 - 6))
-        else:
-            shift = 6 - qpy // 6
-            rounding = 1 << (shift - 1)
-            scaled.append((value + rounding) >> shift)
-    return scaled
 
 
 def predict_luma_intra8x8_vertical(top: Sequence[int]) -> list[int]:
@@ -3898,37 +3739,6 @@ def filter_luma_intra8x8_reference_samples(
     return filtered_top, filtered_left, filtered_top_left
 
 
-def inverse_transform_luma4x4(coefficients: Sequence[int]) -> list[int]:
-    """Transform dequantized raster-order coefficients into residual samples."""
-    if len(coefficients) != 16 or any(
-        not isinstance(coefficient, int) or isinstance(coefficient, bool)
-        for coefficient in coefficients
-    ):
-        raise InverseTransformError("inverse transform requires 16 integer coefficients")
-
-    horizontal = [0] * 16
-    for row in range(4):
-        row_offset = row * 4
-        transformed = _inverse_transform_4x4_line(coefficients[row_offset : row_offset + 4])
-        horizontal[row_offset : row_offset + 4] = transformed
-
-    residual = [0] * 16
-    for column in range(4):
-        transformed = _inverse_transform_4x4_line(
-            [horizontal[row * 4 + column] for row in range(4)]
-        )
-        for row, value in enumerate(transformed):
-            residual[row * 4 + column] = (value + 32) >> 6
-    return residual
-
-
-def reconstruct_luma4x4_residual(
-    levels: Sequence[int], scaling_list: Sequence[int], qpy: int
-) -> list[int]:
-    """Apply luma 4x4 inverse scaling and inverse transform to raster-order levels."""
-    return inverse_transform_luma4x4(inverse_scale_luma4x4(levels, scaling_list, qpy))
-
-
 def inverse_transform_chroma_dc2x2(coefficients: Sequence[int]) -> list[int]:
     """Apply the 4:2:0 2x2 inverse Hadamard transform to chroma DC levels."""
     if len(coefficients) != 4 or any(
@@ -3943,73 +3753,4 @@ def inverse_transform_chroma_dc2x2(coefficients: Sequence[int]) -> list[int]:
         c00 - c01 + c10 - c11,
         c00 + c01 - c10 - c11,
         c00 - c01 - c10 + c11,
-    ]
-
-
-def inverse_transform_luma8x8(coefficients: Sequence[int]) -> list[int]:
-    """Transform 8x8 dequantized raster-order coefficients into residual samples."""
-    if len(coefficients) != 64 or any(
-        not isinstance(coefficient, int) or isinstance(coefficient, bool)
-        for coefficient in coefficients
-    ):
-        raise InverseTransformError("inverse transform requires 64 integer coefficients")
-
-    horizontal = [0] * 64
-    for row in range(8):
-        row_offset = row * 8
-        horizontal[row_offset : row_offset + 8] = _inverse_transform_8x8_line(
-            coefficients[row_offset : row_offset + 8]
-        )
-
-    residual = [0] * 64
-    for column in range(8):
-        transformed = _inverse_transform_8x8_line(
-            [horizontal[row * 8 + column] for row in range(8)]
-        )
-        for row, value in enumerate(transformed):
-            residual[row * 8 + column] = (value + 32) >> 6
-    return residual
-
-
-def _inverse_transform_4x4_line(coefficients: Sequence[int]) -> list[int]:
-    even_sum = coefficients[0] + coefficients[2]
-    even_difference = coefficients[0] - coefficients[2]
-    odd_difference = (coefficients[1] >> 1) - coefficients[3]
-    odd_sum = coefficients[1] + (coefficients[3] >> 1)
-    return [
-        even_sum + odd_sum,
-        even_difference + odd_difference,
-        even_difference - odd_difference,
-        even_sum - odd_sum,
-    ]
-
-
-def _inverse_transform_8x8_line(coefficients: Sequence[int]) -> list[int]:
-    a0 = coefficients[0] + coefficients[4]
-    a2 = coefficients[0] - coefficients[4]
-    a4 = (coefficients[2] >> 1) - coefficients[6]
-    a6 = coefficients[2] + (coefficients[6] >> 1)
-    b0 = a0 + a6
-    b2 = a2 + a4
-    b4 = a2 - a4
-    b6 = a0 - a6
-
-    a1 = -coefficients[3] + coefficients[5] - coefficients[7] - (coefficients[7] >> 1)
-    a3 = coefficients[1] + coefficients[7] - coefficients[3] - (coefficients[3] >> 1)
-    a5 = -coefficients[1] + coefficients[7] + coefficients[5] + (coefficients[5] >> 1)
-    a7 = coefficients[3] + coefficients[5] + coefficients[1] + (coefficients[1] >> 1)
-    b1 = a1 + (a7 >> 2)
-    b3 = a3 + (a5 >> 2)
-    b5 = (a3 >> 2) - a5
-    b7 = a7 - (a1 >> 2)
-
-    return [
-        b0 + b7,
-        b2 + b5,
-        b4 + b3,
-        b6 + b1,
-        b6 - b1,
-        b4 - b3,
-        b2 - b5,
-        b0 - b7,
     ]

@@ -2495,62 +2495,15 @@ pub fn derive_motion_vector(
     apply_motion_vector_difference(predicted, difference)
 }
 
-const INVERSE_SCALE_4X4_FACTORS: [[i64; 3]; 6] = [
-    [10, 13, 16],
-    [11, 14, 18],
-    [13, 16, 20],
-    [14, 18, 23],
-    [16, 20, 25],
-    [18, 23, 29],
-];
+use crate::h264_utils::INVERSE_SCALE_4X4_FACTORS;
+pub use crate::h264_utils::{
+    inverse_scale_chroma4x4, inverse_scale_luma4x4, inverse_scale_luma8x8,
+    inverse_transform_luma4x4, inverse_transform_luma8x8, reconstruct_chroma4x4_residual,
+    reconstruct_luma4x4_ac_residual, reconstruct_luma4x4_residual, reconstruct_luma8x8_residual,
+};
 const CHROMA_QPC_FROM_QPI: [i32; 22] = [
     29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39,
 ];
-const INVERSE_SCALE_8X8_FACTORS: [[i64; 6]; 6] = [
-    [20, 18, 32, 19, 25, 24],
-    [22, 19, 35, 21, 28, 26],
-    [26, 23, 42, 24, 33, 31],
-    [28, 25, 45, 26, 35, 33],
-    [32, 28, 51, 30, 40, 38],
-    [36, 32, 58, 34, 46, 43],
-];
-const INVERSE_SCALE_8X8_CLASSES: [usize; 64] = [
-    0, 3, 4, 3, 0, 3, 4, 3, 3, 1, 5, 1, 3, 1, 5, 1, 4, 5, 2, 5, 4, 5, 2, 5, 3, 1, 5, 1, 3, 1, 5, 1,
-    0, 3, 4, 3, 0, 3, 4, 3, 3, 1, 5, 1, 3, 1, 5, 1, 4, 5, 2, 5, 4, 5, 2, 5, 3, 1, 5, 1, 3, 1, 5, 1,
-];
-
-/// Applies H.264 4x4 luma inverse scaling to raster-order coefficient levels.
-pub fn inverse_scale_luma4x4(
-    levels: &[i32; 16],
-    scaling_list: &[u8; 16],
-    qpy: i32,
-) -> io::Result<[i64; 16]> {
-    if !(0..=51).contains(&qpy) {
-        return Err(invalid("inverse scaling QPY is outside [0,51]"));
-    }
-    if scaling_list.contains(&0) {
-        return Err(invalid("inverse scaling list contains zero"));
-    }
-
-    let mut scaled = [0_i64; 16];
-    for index in 0..16 {
-        let row = index / 4;
-        let column = index % 4;
-        let factor_class = row % 2 + column % 2;
-        let value = i64::from(levels[index])
-            * INVERSE_SCALE_4X4_FACTORS[(qpy % 6) as usize][factor_class]
-            * i64::from(scaling_list[index]);
-        scaled[index] = if qpy >= 24 {
-            value << (qpy / 6 - 4)
-        } else {
-            let shift = 4 - qpy / 6;
-            let rounding = 1_i64 << (shift - 1);
-            (value + rounding) >> shift
-        };
-    }
-    Ok(scaled)
-}
-
 /// Applies H.264 4:2:0 chroma DC inverse scaling for 8-bit QP-prime C.
 pub fn inverse_scale_chroma_dc2x2(transformed: &[i64; 4], qpc: i32) -> io::Result<[i64; 4]> {
     if !(0..=39).contains(&qpc) {
@@ -2578,75 +2531,6 @@ pub fn inverse_scale_chroma_dc2x2(transformed: &[i64; 4], qpc: i32) -> io::Resul
         scaled[index] = value;
     }
     Ok(scaled)
-}
-
-/// Preserves pre-scaled chroma DC and inverse-scales the 4x4 chroma AC levels.
-pub fn inverse_scale_chroma4x4(
-    levels: &[i32; 16],
-    scaling_list: &[u8; 16],
-    qpc: i32,
-) -> io::Result<[i64; 16]> {
-    if !(0..=39).contains(&qpc) {
-        return Err(invalid("inverse scaling QPC is outside [0,39]"));
-    }
-    if levels
-        .iter()
-        .any(|level| !(-(1_i32 << 15)..=(1_i32 << 15) - 1).contains(level))
-    {
-        return Err(invalid(
-            "chroma block levels must be in the signed 16-bit range",
-        ));
-    }
-    if scaling_list.contains(&0) {
-        return Err(invalid("inverse scaling list contains zero"));
-    }
-
-    let mut scaled = [0_i64; 16];
-    scaled[0] = i64::from(levels[0]);
-    for index in 1..16 {
-        let row = index / 4;
-        let column = index % 4;
-        let factor_class = row % 2 + column % 2;
-        let value = i64::from(levels[index])
-            * INVERSE_SCALE_4X4_FACTORS[(qpc % 6) as usize][factor_class]
-            * i64::from(scaling_list[index]);
-        scaled[index] = if qpc >= 24 {
-            value << (qpc / 6 - 4)
-        } else {
-            let shift = 4 - qpc / 6;
-            let rounding = 1_i64 << (shift - 1);
-            (value + rounding) >> shift
-        };
-        if !(-(1_i64 << 15)..=(1_i64 << 15) - 1).contains(&scaled[index]) {
-            return Err(invalid(
-                "scaled chroma block value is outside the signed 16-bit range",
-            ));
-        }
-    }
-    Ok(scaled)
-}
-
-/// Assembles, scales, and inverse-transforms one 4x4 chroma residual block.
-pub fn reconstruct_chroma4x4_residual(
-    dc_c: i64,
-    ac_scan_levels: &[i32; 15],
-    scaling_list: &[u8; 16],
-    qpc: i32,
-) -> io::Result<[i64; 16]> {
-    if !(0..=39).contains(&qpc) {
-        return Err(invalid("inverse scaling QPC is outside [0,39]"));
-    }
-    if !(-(1_i64 << 15)..=(1_i64 << 15) - 1).contains(&dc_c) {
-        return Err(invalid(
-            "chroma block DC must be in the signed 16-bit range",
-        ));
-    }
-
-    let dc_level = i32::try_from(dc_c)
-        .map_err(|_| invalid("chroma block DC must be in the signed 16-bit range"))?;
-    let levels = crate::place_chroma4x4_scan_levels(dc_level, ac_scan_levels);
-    let scaled = inverse_scale_chroma4x4(&levels, scaling_list, qpc)?;
-    Ok(inverse_transform_luma4x4(&scaled))
 }
 
 /// Places four raster-ordered 4x4 residual blocks into an 8x8 4:2:0 chroma macroblock.
@@ -2690,75 +2574,6 @@ pub fn derive_chroma_qpc(qpy: i32, qp_offset: i32) -> io::Result<i32> {
     Ok(CHROMA_QPC_FROM_QPI[(qpi - 30) as usize])
 }
 
-/// Applies H.264 8x8 luma inverse scaling to raster-order coefficient levels.
-pub fn inverse_scale_luma8x8(
-    levels: &[i32; 64],
-    scaling_list: &[u8; 64],
-    qpy: i32,
-) -> io::Result<[i64; 64]> {
-    if !(0..=51).contains(&qpy) {
-        return Err(invalid("inverse scaling QPY is outside [0,51]"));
-    }
-    if scaling_list.contains(&0) {
-        return Err(invalid("inverse scaling list contains zero"));
-    }
-
-    let mut scaled = [0_i64; 64];
-    for index in 0..64 {
-        let factor_class = INVERSE_SCALE_8X8_CLASSES[index];
-        let value = i64::from(levels[index])
-            * INVERSE_SCALE_8X8_FACTORS[(qpy % 6) as usize][factor_class]
-            * i64::from(scaling_list[index]);
-        scaled[index] = if qpy >= 36 {
-            value << (qpy / 6 - 6)
-        } else {
-            let shift = 6 - qpy / 6;
-            let rounding = 1_i64 << (shift - 1);
-            (value + rounding) >> shift
-        };
-    }
-    Ok(scaled)
-}
-
-/// Transforms dequantized raster-order coefficients into luma residual samples.
-pub fn inverse_transform_luma4x4(coefficients: &[i64; 16]) -> [i64; 16] {
-    let mut horizontal = [0_i64; 16];
-    for row in 0..4 {
-        let offset = row * 4;
-        let transformed = inverse_transform_4x4_line([
-            coefficients[offset],
-            coefficients[offset + 1],
-            coefficients[offset + 2],
-            coefficients[offset + 3],
-        ]);
-        horizontal[offset..offset + 4].copy_from_slice(&transformed);
-    }
-
-    let mut residual = [0_i64; 16];
-    for column in 0..4 {
-        let transformed = inverse_transform_4x4_line([
-            horizontal[column],
-            horizontal[4 + column],
-            horizontal[8 + column],
-            horizontal[12 + column],
-        ]);
-        for (row, value) in transformed.into_iter().enumerate() {
-            residual[row * 4 + column] = (value + 32) >> 6;
-        }
-    }
-    residual
-}
-
-/// Applies luma 4x4 inverse scaling and inverse transform to raster-order levels.
-pub fn reconstruct_luma4x4_residual(
-    levels: &[i32; 16],
-    scaling_list: &[u8; 16],
-    qpy: i32,
-) -> io::Result<[i64; 16]> {
-    let coefficients = inverse_scale_luma4x4(levels, scaling_list, qpy)?;
-    Ok(inverse_transform_luma4x4(&coefficients))
-}
-
 /// Applies the Intra_16x16 luma DC Hadamard and clause 8.5.10 scaling.
 pub fn reconstruct_intra16x16_luma_dc(
     raster_levels: &[i32; 16],
@@ -2771,35 +2586,7 @@ pub fn reconstruct_intra16x16_luma_dc(
     if scaling_list[0] == 0 {
         return Err(invalid("inverse scaling list contains zero"));
     }
-    let hadamard = |values: [i64; 4]| {
-        [
-            values[0] + values[1] + values[2] + values[3],
-            values[0] + values[1] - values[2] - values[3],
-            values[0] - values[1] - values[2] + values[3],
-            values[0] - values[1] + values[2] - values[3],
-        ]
-    };
-    let mut horizontal = [0_i64; 16];
-    for row in 0..4 {
-        horizontal[row * 4..row * 4 + 4].copy_from_slice(&hadamard([
-            i64::from(raster_levels[row * 4]),
-            i64::from(raster_levels[row * 4 + 1]),
-            i64::from(raster_levels[row * 4 + 2]),
-            i64::from(raster_levels[row * 4 + 3]),
-        ]));
-    }
-    let mut transformed = [0_i64; 16];
-    for column in 0..4 {
-        let result = hadamard([
-            horizontal[column],
-            horizontal[4 + column],
-            horizontal[8 + column],
-            horizontal[12 + column],
-        ]);
-        for row in 0..4 {
-            transformed[row * 4 + column] = result[row];
-        }
-    }
+    let mut transformed = crate::h264_utils::hadamard4x4(raster_levels);
     let factor = INVERSE_SCALE_4X4_FACTORS[(qpy % 6) as usize][0] * i64::from(scaling_list[0]);
     for value in &mut transformed {
         *value = if qpy >= 36 {
@@ -2854,43 +2641,6 @@ pub fn inverse_transform_chroma_dc2x2(coefficients: &[i32; 4]) -> [i64; 4] {
         c00 + c01 - c10 - c11,
         c00 - c01 - c10 + c11,
     ]
-}
-
-/// Transforms 8x8 dequantized raster-order coefficients into residual samples.
-pub fn inverse_transform_luma8x8(coefficients: &[i64; 64]) -> [i64; 64] {
-    let mut horizontal = [0_i64; 64];
-    for row in 0..8 {
-        let offset = row * 8;
-        let transformed = inverse_transform_8x8_line([
-            coefficients[offset],
-            coefficients[offset + 1],
-            coefficients[offset + 2],
-            coefficients[offset + 3],
-            coefficients[offset + 4],
-            coefficients[offset + 5],
-            coefficients[offset + 6],
-            coefficients[offset + 7],
-        ]);
-        horizontal[offset..offset + 8].copy_from_slice(&transformed);
-    }
-
-    let mut residual = [0_i64; 64];
-    for column in 0..8 {
-        let transformed = inverse_transform_8x8_line([
-            horizontal[column],
-            horizontal[8 + column],
-            horizontal[16 + column],
-            horizontal[24 + column],
-            horizontal[32 + column],
-            horizontal[40 + column],
-            horizontal[48 + column],
-            horizontal[56 + column],
-        ]);
-        for (row, value) in transformed.into_iter().enumerate() {
-            residual[row * 8 + column] = (value + 32) >> 6;
-        }
-    }
-    residual
 }
 
 /// Repeats eight filtered top reference samples across an 8x8 luma block.
@@ -3802,50 +3552,6 @@ pub fn reconstruct_luma_intra8x8_macroblock(
         }
     }
     Ok(macroblock)
-}
-
-fn inverse_transform_4x4_line(coefficients: [i64; 4]) -> [i64; 4] {
-    let even_sum = coefficients[0] + coefficients[2];
-    let even_difference = coefficients[0] - coefficients[2];
-    let odd_difference = (coefficients[1] >> 1) - coefficients[3];
-    let odd_sum = coefficients[1] + (coefficients[3] >> 1);
-    [
-        even_sum + odd_sum,
-        even_difference + odd_difference,
-        even_difference - odd_difference,
-        even_sum - odd_sum,
-    ]
-}
-
-fn inverse_transform_8x8_line(coefficients: [i64; 8]) -> [i64; 8] {
-    let a0 = coefficients[0] + coefficients[4];
-    let a2 = coefficients[0] - coefficients[4];
-    let a4 = (coefficients[2] >> 1) - coefficients[6];
-    let a6 = coefficients[2] + (coefficients[6] >> 1);
-    let b0 = a0 + a6;
-    let b2 = a2 + a4;
-    let b4 = a2 - a4;
-    let b6 = a0 - a6;
-
-    let a1 = -coefficients[3] + coefficients[5] - coefficients[7] - (coefficients[7] >> 1);
-    let a3 = coefficients[1] + coefficients[7] - coefficients[3] - (coefficients[3] >> 1);
-    let a5 = -coefficients[1] + coefficients[7] + coefficients[5] + (coefficients[5] >> 1);
-    let a7 = coefficients[3] + coefficients[5] + coefficients[1] + (coefficients[1] >> 1);
-    let b1 = a1 + (a7 >> 2);
-    let b3 = a3 + (a5 >> 2);
-    let b5 = (a3 >> 2) - a5;
-    let b7 = a7 - (a1 >> 2);
-
-    [
-        b0 + b7,
-        b2 + b5,
-        b4 + b3,
-        b6 + b1,
-        b6 - b1,
-        b4 - b3,
-        b2 - b5,
-        b0 - b7,
-    ]
 }
 
 fn invalid(message: &'static str) -> io::Error {

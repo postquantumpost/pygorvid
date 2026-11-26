@@ -219,6 +219,13 @@ func addNativeResidual(samples *uint8, residual int64) {
 }
 
 func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, result *CABACIIntraMacroblockResult, output *nativeInterResidual) error {
+	if err := decodeNativeInterLumaResidual(arithmetic, contexts, input, result, output); err != nil {
+		return err
+	}
+	return decodeNativeInterChromaResidual(arithmetic, contexts, input, result, output)
+}
+
+func decodeNativeInterLumaResidual(arithmetic *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, result *CABACIIntraMacroblockResult, output *nativeInterResidual) error {
 	if result.TransformSize8x8 {
 		for block := 0; block < 4; block++ {
 			if result.CodedBlockPatternLuma&(1<<block) == 0 {
@@ -234,16 +241,14 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 					break
 				}
 			}
-			coefficients, err := inverseScaleLuma8x8(PlaceLuma8x8ScanLevels(levels), input.Luma8x8ScalingList, result.QPY)
+			residual, err := reconstructLuma8x8Residual(
+				PlaceLuma8x8ScanLevels(levels), input.Luma8x8ScalingList, result.QPY)
 			if err != nil {
 				return err
 			}
-			residual := inverseTransformLuma8x8(coefficients)
-			for row := 0; row < 8; row++ {
-				for column := 0; column < 8; column++ {
-					output.luma[(block/2*8+row)*16+block%2*8+column] = residual[row*8+column]
-				}
-			}
+			blockX, blockY := blockPosition2x2(block)
+			placeResidualBlock(output.luma[:], residual[:], 16, blockX*8, blockY*8,
+				8)
 		}
 	} else {
 		for scan, raster := range luma4x4BlockScanToRaster {
@@ -263,14 +268,15 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 				if err != nil {
 					return err
 				}
-				for blockRow := 0; blockRow < 4; blockRow++ {
-					for blockColumn := 0; blockColumn < 4; blockColumn++ {
-						output.luma[(row*4+blockRow)*16+column*4+blockColumn] = residual[blockRow*4+blockColumn]
-					}
-				}
+				placeResidualBlock(output.luma[:], residual[:], 16,
+					column*4, row*4, 4)
 			}
 		}
 	}
+	return nil
+}
+
+func decodeNativeInterChromaResidual(arithmetic *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, result *CABACIIntraMacroblockResult, output *nativeInterResidual) error {
 	var dc [2][4]int64
 	var qpc [2]int
 	for component := 0; component < 2; component++ {
@@ -298,9 +304,8 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 		}
 	}
 	for component := 0; component < 2; component++ {
-		var residualBlocks [4][16]int64
+		var acScanBlocks [4][15]int32
 		for block := 0; block < 4; block++ {
-			var ac [15]int32
 			if result.CodedBlockPatternChroma == 2 {
 				condition := func(left bool) bool {
 					coordinate, edgeCoordinate := block/2, block%2
@@ -321,15 +326,15 @@ func decodeNativeInterResidual(arithmetic *CABACArithmeticDecoder, contexts *[CA
 					return err
 				}
 				result.ChromaACCodedFlags[component][block] = coded
-				copy(ac[:], levels[:15])
+				copy(acScanBlocks[block][:], levels[:15])
 			}
-			residual, err := reconstructChroma4x4Residual(dc[component][block], ac, input.ChromaScalingLists[component], qpc[component])
-			if err != nil {
-				return err
-			}
-			residualBlocks[block] = residual
 		}
-		residual := assembleChroma420ResidualMacroblock(residualBlocks)
+		residual, err := reconstructChromaComponentResidual(
+			dc[component], acScanBlocks, input.ChromaScalingLists[component],
+			qpc[component])
+		if err != nil {
+			return err
+		}
 		copy(output.chroma[component][:], residual[:])
 	}
 	return nil
@@ -340,6 +345,10 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 	if err != nil {
 		return Yuv420Frame{}, err
 	}
+	return decoder.decodeNativeInterSlices(slices, poc)
+}
+
+func (decoder *H264Decoder) decodeNativeInterSlices(slices []nativeSlice, poc int64) (Yuv420Frame, error) {
 	first := slices[0]
 	if first.header.SliceType%5 != 0 && first.header.SliceType%5 != 1 && first.header.SliceType%5 != 3 {
 		return Yuv420Frame{}, ErrDecoderUnsupportedFeature
@@ -354,28 +363,12 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 	pool := newNativeReconstructionPool(decoder.threads, len(history))
 	defer pool.finish()
 	for _, slice := range slices {
-		bSlice := slice.header.SliceType%5 == 1
-		lists, err := decoder.nativeReferenceLists(slice, poc)
+		state, err := decoder.newNativeInterSliceState(slice, poc)
 		if err != nil {
 			return Yuv420Frame{}, err
 		}
-		qpy, previousDelta := int(26+slice.pps.PicInitQpMinus26+slice.header.SliceQPDelta), 0
-		contexts, err := NewCABACSliceContexts(slice.header.SliceType, slice.header.CabacInitIDC, qpy)
-		if err != nil {
-			return Yuv420Frame{}, err
-		}
-		if (slice.pps.EntropyCodingMode && slice.header.SliceDataBitOffset%8 != 0) || slice.header.SliceDataBitOffset/8 >= uint64(len(slice.rbsp)) {
-			return Yuv420Frame{}, ErrBitstreamExhausted
-		}
-		var arithmetic *CABACArithmeticDecoder
-		if slice.pps.EntropyCodingMode {
-			arithmetic, err = NewCABACArithmeticDecoder(slice.rbsp[slice.header.SliceDataBitOffset/8:])
-		} else {
-			arithmetic, err = newCAVLCSyntaxDecoder(slice.rbsp, slice.header.SliceDataBitOffset)
-		}
-		if err != nil {
-			return Yuv420Frame{}, err
-		}
+		bSlice, lists, qpy := state.bSlice, state.lists, state.qpy
+		previousDelta, contexts, arithmetic := 0, state.contexts, state.arithmetic
 		coefficientCounts := make([][24]uint8, 0)
 		for address := int(slice.header.FirstMacroblockInSlice); ; address++ {
 			if address >= len(history) {
@@ -409,26 +402,12 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 			copy(contexts[skipOffset:skipOffset+3], skipContexts[:])
 			current.skipped = skipped
 			if skipped && !bSlice {
-				if len(lists[0]) == 0 {
-					return Yuv420Frame{}, fmt.Errorf("P-skip has no reference picture")
-				}
-				part := nativePartition{width: 16, height: 16, lists: [2]bool{true, false}, refs: [2]int32{0, -1}}
-				_, candidates := decoder.nativeNeighbors(slice, address, part, 0)
-				motion := MotionVector{}
-				if candidates[0].Available && candidates[1].Available && !(candidates[0].RefIdx == 0 && candidates[0].Vector == (MotionVector{})) && !(candidates[1].RefIdx == 0 && candidates[1].Vector == (MotionVector{})) {
-					motion = nativeMotion(part, 0, candidates, MotionVector{})
-				}
-				prediction := nativePrediction{used: true, reference: lists[0][0].Reference.ID, refIndex: 0, motion: motion, referenceDecoded: true, motionDecoded: true}
-				setNativePrediction(&current, part, 0, prediction)
-				compensations = append(compensations, nativeCompensation{frame: lists[0][0].Frame, part: part, motion: motion, list: 0, refIndex: 0, reference: lists[0][0].Reference})
-				previousDelta = 0
-			} else if skipped {
-				current.direct = true
-				parts, err := nativeBPartitions(0, [4]uint8{}, slice.sps.Direct8x8Inference)
-				if err != nil {
+				if err := decoder.compensateNativePSkip(&current, &compensations, slice, address, lists); err != nil {
 					return Yuv420Frame{}, err
 				}
-				if err := decoder.compensateNativeDirect(&current, &compensations, slice, address, poc, parts, lists, true); err != nil {
+				previousDelta = 0
+			} else if skipped {
+				if err := decoder.compensateNativeBSkip(&current, &compensations, slice, address, poc, lists); err != nil {
 					return Yuv420Frame{}, err
 				}
 				previousDelta = 0
@@ -630,4 +609,63 @@ func (decoder *H264Decoder) decodeNativeInterSample(sample CompressedSample, poc
 		return Yuv420Frame{}, fmt.Errorf("native inter picture has %d of %d macroblocks: %w", written, len(builder.written), err)
 	}
 	return frame, nil
+}
+
+func (decoder *H264Decoder) compensateNativePSkip(current *nativeMacroblock, compensations *[]nativeCompensation, slice nativeSlice, address int, lists [2][]DecodedReferencePicture) error {
+	if len(lists[0]) == 0 {
+		return fmt.Errorf("P-skip has no reference picture")
+	}
+	part := nativePartition{width: 16, height: 16, lists: [2]bool{true, false}, refs: [2]int32{0, -1}}
+	_, candidates := decoder.nativeNeighbors(slice, address, part, 0)
+	motion := MotionVector{}
+	if candidates[0].Available && candidates[1].Available &&
+		!(candidates[0].RefIdx == 0 && candidates[0].Vector == (MotionVector{})) &&
+		!(candidates[1].RefIdx == 0 && candidates[1].Vector == (MotionVector{})) {
+		motion = nativeMotion(part, 0, candidates, MotionVector{})
+	}
+	prediction := nativePrediction{used: true, reference: lists[0][0].Reference.ID, refIndex: 0, motion: motion, referenceDecoded: true, motionDecoded: true}
+	setNativePrediction(current, part, 0, prediction)
+	*compensations = append(*compensations, nativeCompensation{frame: lists[0][0].Frame, part: part, motion: motion, list: 0, refIndex: 0, reference: lists[0][0].Reference})
+	return nil
+}
+
+func (decoder *H264Decoder) compensateNativeBSkip(current *nativeMacroblock, compensations *[]nativeCompensation, slice nativeSlice, address int, poc int64, lists [2][]DecodedReferencePicture) error {
+	current.direct = true
+	parts, err := nativeBPartitions(0, [4]uint8{}, slice.sps.Direct8x8Inference)
+	if err != nil {
+		return err
+	}
+	return decoder.compensateNativeDirect(current, compensations, slice, address, poc, parts, lists, true)
+}
+
+type nativeInterSliceState struct {
+	bSlice     bool
+	lists      [2][]DecodedReferencePicture
+	qpy        int
+	contexts   [CABACContextCount]CABACContextModel
+	arithmetic *CABACArithmeticDecoder
+}
+
+func (decoder *H264Decoder) newNativeInterSliceState(slice nativeSlice, poc int64) (nativeInterSliceState, error) {
+	state := nativeInterSliceState{bSlice: slice.header.SliceType%5 == 1}
+	lists, err := decoder.nativeReferenceLists(slice, poc)
+	if err != nil {
+		return state, err
+	}
+	state.lists = lists
+	state.qpy = int(26 + slice.pps.PicInitQpMinus26 + slice.header.SliceQPDelta)
+	contexts, err := NewCABACSliceContexts(slice.header.SliceType, slice.header.CabacInitIDC, state.qpy)
+	if err != nil {
+		return state, err
+	}
+	state.contexts = contexts
+	if (slice.pps.EntropyCodingMode && slice.header.SliceDataBitOffset%8 != 0) || slice.header.SliceDataBitOffset/8 >= uint64(len(slice.rbsp)) {
+		return state, ErrBitstreamExhausted
+	}
+	if slice.pps.EntropyCodingMode {
+		state.arithmetic, err = NewCABACArithmeticDecoder(slice.rbsp[slice.header.SliceDataBitOffset/8:])
+	} else {
+		state.arithmetic, err = newCAVLCSyntaxDecoder(slice.rbsp, slice.header.SliceDataBitOffset)
+	}
+	return state, err
 }

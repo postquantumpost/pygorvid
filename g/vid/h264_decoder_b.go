@@ -124,6 +124,14 @@ func (decoder *H264Decoder) nativeBDirect(slice nativeSlice, address int, poc in
 	if len(lists[0]) == 0 || len(lists[1]) == 0 {
 		return predictions, fmt.Errorf("B direct reference list is empty")
 	}
+	colocated, colocatedIntra := decoder.nativeBDirectColocated(slice, address, part, lists)
+	if slice.header.DirectSpatialMVPred {
+		return decoder.nativeBDirectSpatial(slice, address, part, lists, whole, colocated, colocatedIntra)
+	}
+	return nativeBDirectTemporal(poc, lists, colocated, colocatedIntra)
+}
+
+func (decoder *H264Decoder) nativeBDirectColocated(slice nativeSlice, address int, part nativePartition, lists [2][]DecodedReferencePicture) (nativePrediction, bool) {
 	colocated := nativePrediction{refIndex: -1}
 	colocatedIntra := true
 	if blocks := decoder.nativeReferenceBlocks[lists[1][0].Reference.ID]; address < len(blocks) {
@@ -138,49 +146,55 @@ func (decoder *H264Decoder) nativeBDirect(slice nativeSlice, address int, poc in
 			colocated = block.predictions[raster][1]
 		}
 	}
-	if slice.header.DirectSpatialMVPred {
-		geometry := part
-		geometry.width = 16
-		if whole {
-			geometry.x, geometry.y, geometry.height = 0, 0, 16
-		}
-		var references [2]int32
-		var neighbors [2][4]MotionVectorCandidate
-		for list := 0; list < 2; list++ {
-			_, neighbors[list] = decoder.nativeNeighbors(slice, address, geometry, list)
-			if !neighbors[list][2].Available {
-				neighbors[list][2] = neighbors[list][3]
-			}
-			indices := [3]int32{-1, -1, -1}
-			for index := range indices {
-				candidate := neighbors[list][index]
-				if candidate.Available {
-					indices[index] = candidate.RefIdx
-				}
-			}
-			references[list] = nativeMinPositive(indices[0], nativeMinPositive(indices[1], indices[2]))
-		}
-		zero := references == ([2]int32{-1, -1})
-		if zero {
-			references = [2]int32{0, 0}
-		}
-		colocatedZero := !colocatedIntra && !lists[1][0].Reference.IsLongTerm && colocated.used && colocated.refIndex == 0 && absInt(int(colocated.motion.X)) <= 1 && absInt(int(colocated.motion.Y)) <= 1
-		for list, refIndex := range references {
-			if refIndex < 0 {
-				continue
-			}
-			if int(refIndex) >= len(lists[list]) {
-				return predictions, fmt.Errorf("B direct references an unavailable picture")
-			}
-			motion := MotionVector{}
-			if !zero && !(refIndex == 0 && colocatedZero) {
-				candidates := neighbors[list]
-				motion = nativeMotion(nativePartition{width: 16, height: 16}, refIndex, candidates, MotionVector{})
-			}
-			predictions[list] = nativePrediction{used: true, reference: lists[list][refIndex].Reference.ID, refIndex: refIndex, motion: motion, referenceDecoded: true, motionDecoded: true}
-		}
-		return predictions, nil
+	return colocated, colocatedIntra
+}
+
+func (decoder *H264Decoder) nativeBDirectSpatial(slice nativeSlice, address int, part nativePartition, lists [2][]DecodedReferencePicture, whole bool, colocated nativePrediction, colocatedIntra bool) ([2]nativePrediction, error) {
+	var predictions [2]nativePrediction
+	geometry := part
+	geometry.width = 16
+	if whole {
+		geometry.x, geometry.y, geometry.height = 0, 0, 16
 	}
+	var references [2]int32
+	var neighbors [2][4]MotionVectorCandidate
+	for list := 0; list < 2; list++ {
+		_, neighbors[list] = decoder.nativeNeighbors(slice, address, geometry, list)
+		if !neighbors[list][2].Available {
+			neighbors[list][2] = neighbors[list][3]
+		}
+		indices := [3]int32{-1, -1, -1}
+		for index := range indices {
+			candidate := neighbors[list][index]
+			if candidate.Available {
+				indices[index] = candidate.RefIdx
+			}
+		}
+		references[list] = nativeMinPositive(indices[0], nativeMinPositive(indices[1], indices[2]))
+	}
+	zero := references == ([2]int32{-1, -1})
+	if zero {
+		references = [2]int32{0, 0}
+	}
+	colocatedZero := !colocatedIntra && !lists[1][0].Reference.IsLongTerm && colocated.used && colocated.refIndex == 0 && absInt(int(colocated.motion.X)) <= 1 && absInt(int(colocated.motion.Y)) <= 1
+	for list, refIndex := range references {
+		if refIndex < 0 {
+			continue
+		}
+		if int(refIndex) >= len(lists[list]) {
+			return predictions, fmt.Errorf("B direct references an unavailable picture")
+		}
+		motion := MotionVector{}
+		if !zero && !(refIndex == 0 && colocatedZero) {
+			motion = nativeMotion(nativePartition{width: 16, height: 16}, refIndex, neighbors[list], MotionVector{})
+		}
+		predictions[list] = nativePrediction{used: true, reference: lists[list][refIndex].Reference.ID, refIndex: refIndex, motion: motion, referenceDecoded: true, motionDecoded: true}
+	}
+	return predictions, nil
+}
+
+func nativeBDirectTemporal(poc int64, lists [2][]DecodedReferencePicture, colocated nativePrediction, colocatedIntra bool) ([2]nativePrediction, error) {
+	var predictions [2]nativePrediction
 	refIndex := int32(0)
 	if !colocatedIntra && colocated.used {
 		refIndex = -1

@@ -1,16 +1,40 @@
 #!/usr/bin/env bash
 set -x
 
+max_size=$((16*1024*1024))
+echo max_size is $max_size
+
+process_file()
+{
+    local f="$1"
+    rm -f e0?
+    ./pygorvid --readall --hash --input "${f}"
+    sum e0?
+    d=$(sum e0? | sed -e 's/.$//' | uniq | wc -l)
+    if [ "${d}" -ne "1" ];then
+        echo hashes do not match "${f}"
+        exit 1
+    fi
+    for l in c r g p
+    do
+        mv "e0${l}" "${f}.e0${l}"
+    done
+}
+
 for f in samples/*.mp4
 do
-    if [ -f "${f}.e0c" ];then
-        echo already did ${f}
+    if [ -f "${f}" ];then
+        echo file still exists
+        if [ -f "${f}.e0c" ];then
+            echo already did "${f}"
+        else
+            if [ "$(wc -c < "$f")" -lt "$max_size" ];then
+                process_file "${f}"
+            else
+                echo file is too large "${f}"
+            fi
+        fi
     else
-        ./pygorvid --readall --hash --input $f
-        sum e0?
-        for l in c r g p
-        do
-            mv "e0${l}" "${f}.e0${l}"
-        done
+        echo file no longer exists
     fi
 done

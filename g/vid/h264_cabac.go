@@ -1153,11 +1153,11 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraNxN8x8LumaMacroblock(contexts 
 			}
 		}
 		rasterLevels := PlaceLuma8x8ScanLevels(levels)
-		coefficients, err := inverseScaleLuma8x8(rasterLevels, scalingList, qpy)
+		residual, err := reconstructLuma8x8Residual(rasterLevels, scalingList, qpy)
 		if err != nil {
 			return Intra8x8LumaMacroblockResult{}, err
 		}
-		blocks[blockIndex].Residual = inverseTransformLuma8x8(coefficients)
+		blocks[blockIndex].Residual = residual
 		result.Residuals[blockIndex] = blocks[blockIndex].Residual
 	}
 	result.Samples, err = ReconstructLumaIntra8x8Macroblock(blocks)
@@ -1216,30 +1216,26 @@ func (decoder *CABACArithmeticDecoder) DecodeIntra16x16LumaMacroblock(mbType uin
 				return Intra16x16LumaMacroblockResult{}, err
 			}
 			result.ACCodedBlockFlags[blockIndex] = coded
+			var acScanLevels [15]int32
 			if coded {
-				var scanLevels [16]int32
-				copy(scanLevels[1:], acLevels[:15])
-				rasterLevels := PlaceLuma4x4ScanLevels(scanLevels)
-				rasterLevels[0] = 0
-				coefficients, err := inverseScaleLuma4x4(rasterLevels, scalingList, qpy)
-				if err != nil {
-					return Intra16x16LumaMacroblockResult{}, err
-				}
-				coefficients[0] = result.DCLevels[rasterIndex]
-				blockResidual := inverseTransformLuma4x4(coefficients)
-				for row := 0; row < 4; row++ {
-					destination := (blockY*4+row)*16 + blockX*4
-					copy(result.Residual[destination:destination+4], blockResidual[row*4:row*4+4])
-				}
-				continue
+				copy(acScanLevels[:], acLevels[:15])
 			}
+			blockResidual, err := reconstructLuma4x4ACResidual(
+				acScanLevels, result.DCLevels[rasterIndex], scalingList, qpy)
+			if err != nil {
+				return Intra16x16LumaMacroblockResult{}, err
+			}
+			for row := 0; row < 4; row++ {
+				destination := (blockY*4+row)*16 + blockX*4
+				copy(result.Residual[destination:destination+4], blockResidual[row*4:row*4+4])
+			}
+			continue
 		}
-		coefficients, err := inverseScaleLuma4x4([16]int32{}, scalingList, qpy)
+		blockResidual, err := reconstructLuma4x4ACResidual(
+			[15]int32{}, result.DCLevels[rasterIndex], scalingList, qpy)
 		if err != nil {
 			return Intra16x16LumaMacroblockResult{}, err
 		}
-		coefficients[0] = result.DCLevels[rasterIndex]
-		blockResidual := inverseTransformLuma4x4(coefficients)
 		for row := 0; row < 4; row++ {
 			destination := (blockY*4+row)*16 + blockX*4
 			copy(result.Residual[destination:destination+4], blockResidual[row*4:row*4+4])
@@ -1317,11 +1313,11 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 		qpc := result.QPC[component]
 		dcSamples := componentDCSamples[component]
 		var err error
-		var residualBlocks [4][16]int64
+		var acScanBlocks [4][15]int32
 		var acCodedFlags [4]bool
 		for blockIndex := 0; blockIndex < 4; blockIndex++ {
 			if codedBlockPatternChroma == 2 {
-				blockX, blockY := blockIndex%2, blockIndex/2
+				blockX, blockY := blockPosition2x2(blockIndex)
 				condLeft := chromaACCondTerm(blockIndex, blockX, blockY, true, acCodedFlags, leftEdges[component])
 				condTop := chromaACCondTerm(blockIndex, blockX, blockY, false, acCodedFlags, topEdges[component])
 				acLevels, coded, err := trial.DecodeResidualBlock(4, condLeft, condTop, &trialContexts)
@@ -1330,22 +1326,16 @@ func (decoder *CABACArithmeticDecoder) DecodeIntraChroma420Macroblock(contexts *
 				}
 				acCodedFlags[blockIndex] = coded
 				if coded {
-					var acScan [15]int32
-					copy(acScan[:], acLevels[:15])
-					residualBlocks[blockIndex], err = reconstructChroma4x4Residual(dcSamples[blockIndex], acScan, scalingLists[component], qpc)
-					if err != nil {
-						return IntraChroma420MacroblockResult{}, err
-					}
-					continue
+					copy(acScanBlocks[blockIndex][:], acLevels[:15])
 				}
-			}
-			residualBlocks[blockIndex], err = reconstructChroma4x4Residual(dcSamples[blockIndex], [15]int32{}, scalingLists[component], qpc)
-			if err != nil {
-				return IntraChroma420MacroblockResult{}, err
 			}
 		}
 		result.ACCodedBlockFlags[component] = acCodedFlags
-		macroblockResidual := assembleChroma420ResidualMacroblock(residualBlocks)
+		macroblockResidual, err := reconstructChromaComponentResidual(
+			dcSamples, acScanBlocks, scalingLists[component], qpc)
+		if err != nil {
+			return IntraChroma420MacroblockResult{}, err
+		}
 		var top, left *[8]uint8
 		var topLeft *uint8
 		if references[component].TopAvailable {
@@ -1405,189 +1395,207 @@ func (decoder *CABACArithmeticDecoder) decodeIntraMacroblock(input CABACIIntraMa
 	result.MacroblockType = mbType
 	result.QPY = input.PreviousQPY
 	if mbType == 25 {
-		var yBlock [256]uint8
-		var cbBlock, crBlock [64]uint8
-		for readerCopy.bitOffset%8 != 0 {
-			bit, err := trial.bits.ReadBit()
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM alignment: %w", err)
-			}
-			if bit {
-				return CABACIIntraMacroblockResult{}, ErrCABACPCMAlignment
-			}
-		}
-		for index := range yBlock {
-			sample, err := trial.bits.ReadBits(8)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM luma samples: %w", err)
-			}
-			yBlock[index] = uint8(sample)
-		}
-		for index := range cbBlock {
-			sample, err := trial.bits.ReadBits(8)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM Cb samples: %w", err)
-			}
-			cbBlock[index] = uint8(sample)
-		}
-		for index := range crBlock {
-			sample, err := trial.bits.ReadBits(8)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM Cr samples: %w", err)
-			}
-			crBlock[index] = uint8(sample)
-		}
-		offset, err := readPCMRestartOffset(&trial)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM CABAC reinitialization: %w", err)
-		}
-		if offset >= cabacInitialRange {
-			return CABACIIntraMacroblockResult{}, ErrCABACOffsetOutOfRange
-		}
-		if err := builder.PlaceMacroblock(address, yBlock, cbBlock, crBlock); err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		trial.codeRange, trial.codeOffset, trial.terminated = cabacInitialRange, offset, false
-		result.Luma, result.Cb, result.Cr = yBlock, cbBlock, crBlock
-		decoder.commitTrial(&trial, &readerCopy)
-		*contexts = trialContexts
-		return result, nil
+		return decoder.decodeIntraPCMMacroblock(&trial, &readerCopy, &trialContexts, contexts, builder, address, result)
 	}
 
-	var modes4x4 [16]uint8
-	var modes8x8 [4]uint8
 	if mbType == 0 {
-		if input.Transform8x8ModeEnabled {
-			var transformContexts [3]CABACContextModel
-			copy(transformContexts[:], trialContexts[399:402])
-			result.TransformSize8x8, err = trial.DecodeTransformSize8x8Flag(&transformContexts, input.LeftHas8x8Transform, input.TopHas8x8Transform)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, err
-			}
-			copy(trialContexts[399:402], transformContexts[:])
-		}
-		var modeContexts [2]CABACContextModel
-		copy(modeContexts[:], trialContexts[68:70])
-		if result.TransformSize8x8 {
-			for blockIndex := range modes8x8 {
-				blockX, blockY := blockIndex%2, blockIndex/2
-				leftAvailable, topAvailable := input.LeftModeAvailable, input.TopModeAvailable
-				leftMode, topMode := input.LeftModes8x8[blockY], input.TopModes8x8[blockX]
-				if blockX > 0 {
-					leftAvailable, leftMode = true, modes8x8[blockIndex-1]
-				}
-				if blockY > 0 {
-					topAvailable, topMode = true, modes8x8[blockIndex-2]
-				}
-				predictedMode := uint8(2)
-				if leftAvailable && topAvailable {
-					predictedMode = min(leftMode, topMode)
-				}
-				modes8x8[blockIndex], err = trial.DecodeIntra4x4PredMode(predictedMode, &modeContexts)
-				if err != nil {
-					return CABACIIntraMacroblockResult{}, err
-				}
-			}
-		} else {
-			modes4x4, err = trial.DecodeIntra4x4PredModes(&modeContexts, input.TopModes4x4, input.LeftModes4x4, input.TopModeAvailable, input.LeftModeAvailable)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, err
-			}
-		}
-		copy(trialContexts[68:70], modeContexts[:])
-		var chromaModeContexts [4]CABACContextModel
-		copy(chromaModeContexts[:], trialContexts[64:68])
-		resultChromaMode, modeErr := trial.DecodeIntraChromaPredMode(&chromaModeContexts, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero)
-		if modeErr != nil {
-			return CABACIIntraMacroblockResult{}, modeErr
-		}
-		resultChromaModeForReconstruction := resultChromaMode
-		result.ChromaPredictionMode = resultChromaMode
-		result.Luma4x4Modes = modes4x4
-		result.Luma8x8Modes = modes8x8
-		copy(trialContexts[64:68], chromaModeContexts[:])
-		var lumaContexts [4]CABACContextModel
-		copy(lumaContexts[:], trialContexts[73:77])
-		result.CodedBlockPatternLuma, err = trial.DecodeLumaCodedBlockPattern(input.LeftLumaCBP, input.TopLumaCBP, &lumaContexts)
-		if err != nil {
+		if err := decodeIntraNxNMacroblock(&trial, &trialContexts, input, &result); err != nil {
 			return CABACIIntraMacroblockResult{}, err
 		}
-		copy(trialContexts[73:77], lumaContexts[:])
-		var chromaContexts [8]CABACContextModel
-		copy(chromaContexts[:], trialContexts[77:85])
-		result.CodedBlockPatternChroma, err = trial.DecodeChromaCodedBlockPattern(input.LeftChromaCBP, input.TopChromaCBP, &chromaContexts)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		copy(trialContexts[77:85], chromaContexts[:])
-		result.QPY, result.QPDelta, err = decodeIntraMacroblockQP(&trial, &trialContexts, input, result.CodedBlockPatternLuma, result.CodedBlockPatternChroma, mbType)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		if result.TransformSize8x8 {
-			lumaResult, err := decodeIntraNxN8x8LumaResiduals(&trial, &trialContexts, result.CodedBlockPatternLuma, result.QPY, input.Luma8x8ScalingList, modes8x8, input.Luma8x8Blocks)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, err
-			}
-			result.Luma, result.Luma8x8Nonzero = lumaResult.Samples, lumaResult.Nonzero
-		} else {
-			lumaResult, err := decodeIntraNxN4x4LumaResiduals(&trial, &trialContexts, result.CodedBlockPatternLuma, result.QPY, input.Luma4x4ScalingList, modes4x4, input.Luma4x4TopEdge, input.Luma4x4LeftEdge, input.Luma4x4Blocks)
-			if err != nil {
-				return CABACIIntraMacroblockResult{}, err
-			}
-			result.Luma, result.Luma4x4CodedBlockFlags = lumaResult.Samples, lumaResult.CodedBlockFlags
-		}
-		chromaResult, err := trial.DecodeIntraChroma420Macroblock(&trialContexts, resultChromaModeForReconstruction, true, 0, false, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		result.Cb, result.Cr = chromaResult.Cb, chromaResult.Cr
-		result.ChromaDCCoded, result.ChromaACCodedFlags = chromaResult.DCCoded, chromaResult.ACCodedBlockFlags
 	} else {
-		result.CodedBlockPatternLuma = 0
-		if mbType >= 13 {
-			result.CodedBlockPatternLuma = 15
-		}
-		result.CodedBlockPatternChroma = ((mbType - 1) / 4) % 3
-		chromaModeContexts := [4]CABACContextModel{}
-		copy(chromaModeContexts[:], trialContexts[64:68])
-		chromaMode, err := trial.DecodeIntraChromaPredMode(&chromaModeContexts, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero)
-		if err != nil {
+		if err := decodeIntra16x16Macroblock(&trial, &trialContexts, input, mbType, &result); err != nil {
 			return CABACIIntraMacroblockResult{}, err
 		}
-		copy(trialContexts[64:68], chromaModeContexts[:])
-		result.ChromaPredictionMode = chromaMode
-		result.Intra16x16LumaMode = (mbType - 1) % 4
-		result.QPY, result.QPDelta, err = decodeIntraMacroblockQP(&trial, &trialContexts, input, result.CodedBlockPatternLuma, result.CodedBlockPatternChroma, mbType)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		top, left := (*[16]uint8)(nil), (*[16]uint8)(nil)
-		if input.Intra16x16TopAvailable {
-			top = &input.Intra16x16Top
-		}
-		if input.Intra16x16LeftAvailable {
-			left = &input.Intra16x16Left
-		}
-		lumaResult, err := trial.DecodeIntra16x16LumaMacroblock(mbType, &trialContexts, result.QPY, input.Luma4x4ScalingList, top, left, input.Intra16x16TopLeft, input.Intra16x16TopLeftAvailable, input.Luma16x16TopEdge, input.Luma16x16LeftEdge)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		result.Luma = lumaResult.Samples
-		result.Luma4x4CodedBlockFlags = lumaResult.ACCodedBlockFlags
-		result.Luma16x16DCCoded = lumaResult.DCCoded
-		chromaResult, err := trial.DecodeIntraChroma420Macroblock(&trialContexts, chromaMode, true, mbType, true, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
-		if err != nil {
-			return CABACIIntraMacroblockResult{}, err
-		}
-		result.Cb, result.Cr = chromaResult.Cb, chromaResult.Cr
-		result.ChromaDCCoded, result.ChromaACCodedFlags = chromaResult.DCCoded, chromaResult.ACCodedBlockFlags
 	}
 	if err := builder.PlaceMacroblock(address, result.Luma, result.Cb, result.Cr); err != nil {
 		return CABACIIntraMacroblockResult{}, err
 	}
 	decoder.commitTrial(&trial, &readerCopy)
 	*contexts = trialContexts
+	return result, nil
+}
+
+func decodeIntraNxNMacroblock(decoder *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, result *CABACIIntraMacroblockResult) error {
+	var modes4x4 [16]uint8
+	var modes8x8 [4]uint8
+	var err error
+	if input.Transform8x8ModeEnabled {
+		var transformContexts [3]CABACContextModel
+		copy(transformContexts[:], contexts[399:402])
+		result.TransformSize8x8, err = decoder.DecodeTransformSize8x8Flag(&transformContexts, input.LeftHas8x8Transform, input.TopHas8x8Transform)
+		if err != nil {
+			return err
+		}
+		copy(contexts[399:402], transformContexts[:])
+	}
+	var modeContexts [2]CABACContextModel
+	copy(modeContexts[:], contexts[68:70])
+	if result.TransformSize8x8 {
+		for blockIndex := range modes8x8 {
+			blockX, blockY := blockIndex%2, blockIndex/2
+			leftAvailable, topAvailable := input.LeftModeAvailable, input.TopModeAvailable
+			leftMode, topMode := input.LeftModes8x8[blockY], input.TopModes8x8[blockX]
+			if blockX > 0 {
+				leftAvailable, leftMode = true, modes8x8[blockIndex-1]
+			}
+			if blockY > 0 {
+				topAvailable, topMode = true, modes8x8[blockIndex-2]
+			}
+			predictedMode := uint8(2)
+			if leftAvailable && topAvailable {
+				predictedMode = min(leftMode, topMode)
+			}
+			modes8x8[blockIndex], err = decoder.DecodeIntra4x4PredMode(predictedMode, &modeContexts)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		modes4x4, err = decoder.DecodeIntra4x4PredModes(&modeContexts, input.TopModes4x4, input.LeftModes4x4, input.TopModeAvailable, input.LeftModeAvailable)
+		if err != nil {
+			return err
+		}
+	}
+	copy(contexts[68:70], modeContexts[:])
+	var chromaModeContexts [4]CABACContextModel
+	copy(chromaModeContexts[:], contexts[64:68])
+	chromaMode, err := decoder.DecodeIntraChromaPredMode(&chromaModeContexts, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero)
+	if err != nil {
+		return err
+	}
+	result.ChromaPredictionMode = chromaMode
+	result.Luma4x4Modes = modes4x4
+	result.Luma8x8Modes = modes8x8
+	copy(contexts[64:68], chromaModeContexts[:])
+	var lumaContexts [4]CABACContextModel
+	copy(lumaContexts[:], contexts[73:77])
+	result.CodedBlockPatternLuma, err = decoder.DecodeLumaCodedBlockPattern(input.LeftLumaCBP, input.TopLumaCBP, &lumaContexts)
+	if err != nil {
+		return err
+	}
+	copy(contexts[73:77], lumaContexts[:])
+	var chromaContexts [8]CABACContextModel
+	copy(chromaContexts[:], contexts[77:85])
+	result.CodedBlockPatternChroma, err = decoder.DecodeChromaCodedBlockPattern(input.LeftChromaCBP, input.TopChromaCBP, &chromaContexts)
+	if err != nil {
+		return err
+	}
+	copy(contexts[77:85], chromaContexts[:])
+	result.QPY, result.QPDelta, err = decodeIntraMacroblockQP(decoder, contexts, input, result.CodedBlockPatternLuma, result.CodedBlockPatternChroma, 0)
+	if err != nil {
+		return err
+	}
+	if result.TransformSize8x8 {
+		lumaResult, err := decodeIntraNxN8x8LumaResiduals(decoder, contexts, result.CodedBlockPatternLuma, result.QPY, input.Luma8x8ScalingList, modes8x8, input.Luma8x8Blocks)
+		if err != nil {
+			return err
+		}
+		result.Luma, result.Luma8x8Nonzero = lumaResult.Samples, lumaResult.Nonzero
+	} else {
+		lumaResult, err := decodeIntraNxN4x4LumaResiduals(decoder, contexts, result.CodedBlockPatternLuma, result.QPY, input.Luma4x4ScalingList, modes4x4, input.Luma4x4TopEdge, input.Luma4x4LeftEdge, input.Luma4x4Blocks)
+		if err != nil {
+			return err
+		}
+		result.Luma, result.Luma4x4CodedBlockFlags = lumaResult.Samples, lumaResult.CodedBlockFlags
+	}
+	chromaResult, err := decoder.DecodeIntraChroma420Macroblock(contexts, chromaMode, true, 0, false, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
+	if err != nil {
+		return err
+	}
+	result.Cb, result.Cr = chromaResult.Cb, chromaResult.Cr
+	result.ChromaDCCoded, result.ChromaACCodedFlags = chromaResult.DCCoded, chromaResult.ACCodedBlockFlags
+	return nil
+}
+
+func decodeIntra16x16Macroblock(decoder *CABACArithmeticDecoder, contexts *[CABACContextCount]CABACContextModel, input CABACIIntraMacroblockInput, mbType uint8, result *CABACIIntraMacroblockResult) error {
+	result.CodedBlockPatternLuma = 0
+	if mbType >= 13 {
+		result.CodedBlockPatternLuma = 15
+	}
+	result.CodedBlockPatternChroma = ((mbType - 1) / 4) % 3
+	var chromaModeContexts [4]CABACContextModel
+	copy(chromaModeContexts[:], contexts[64:68])
+	chromaMode, err := decoder.DecodeIntraChromaPredMode(&chromaModeContexts, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero)
+	if err != nil {
+		return err
+	}
+	copy(contexts[64:68], chromaModeContexts[:])
+	result.ChromaPredictionMode = chromaMode
+	result.Intra16x16LumaMode = (mbType - 1) % 4
+	result.QPY, result.QPDelta, err = decodeIntraMacroblockQP(decoder, contexts, input, result.CodedBlockPatternLuma, result.CodedBlockPatternChroma, mbType)
+	if err != nil {
+		return err
+	}
+	top, left := (*[16]uint8)(nil), (*[16]uint8)(nil)
+	if input.Intra16x16TopAvailable {
+		top = &input.Intra16x16Top
+	}
+	if input.Intra16x16LeftAvailable {
+		left = &input.Intra16x16Left
+	}
+	lumaResult, err := decoder.DecodeIntra16x16LumaMacroblock(mbType, contexts, result.QPY, input.Luma4x4ScalingList, top, left, input.Intra16x16TopLeft, input.Intra16x16TopLeftAvailable, input.Luma16x16TopEdge, input.Luma16x16LeftEdge)
+	if err != nil {
+		return err
+	}
+	result.Luma = lumaResult.Samples
+	result.Luma4x4CodedBlockFlags = lumaResult.ACCodedBlockFlags
+	result.Luma16x16DCCoded = lumaResult.DCCoded
+	chromaResult, err := decoder.DecodeIntraChroma420Macroblock(contexts, chromaMode, true, mbType, true, input.ChromaLeftModeNonzero, input.ChromaTopModeNonzero, result.CodedBlockPatternChroma, result.QPY, input.ChromaQPIndexOffsets, input.ChromaScalingLists, input.ChromaReferences, input.ChromaLeftEdges, input.ChromaTopEdges)
+	if err != nil {
+		return err
+	}
+	result.Cb, result.Cr = chromaResult.Cb, chromaResult.Cr
+	result.ChromaDCCoded, result.ChromaACCodedFlags = chromaResult.DCCoded, chromaResult.ACCodedBlockFlags
+	return nil
+}
+
+func (decoder *CABACArithmeticDecoder) decodeIntraPCMMacroblock(trial *CABACArithmeticDecoder, readerCopy *BitReader, trialContexts *[CABACContextCount]CABACContextModel, contexts *[CABACContextCount]CABACContextModel, builder *Yuv420FrameBuilder, address int, result CABACIIntraMacroblockResult) (CABACIIntraMacroblockResult, error) {
+	var yBlock [256]uint8
+	var cbBlock, crBlock [64]uint8
+	for readerCopy.bitOffset%8 != 0 {
+		bit, err := trial.bits.ReadBit()
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM alignment: %w", err)
+		}
+		if bit {
+			return CABACIIntraMacroblockResult{}, ErrCABACPCMAlignment
+		}
+	}
+	for index := range yBlock {
+		sample, err := trial.bits.ReadBits(8)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM luma samples: %w", err)
+		}
+		yBlock[index] = uint8(sample)
+	}
+	for index := range cbBlock {
+		sample, err := trial.bits.ReadBits(8)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM Cb samples: %w", err)
+		}
+		cbBlock[index] = uint8(sample)
+	}
+	for index := range crBlock {
+		sample, err := trial.bits.ReadBits(8)
+		if err != nil {
+			return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM Cr samples: %w", err)
+		}
+		crBlock[index] = uint8(sample)
+	}
+	offset, err := readPCMRestartOffset(trial)
+	if err != nil {
+		return CABACIIntraMacroblockResult{}, fmt.Errorf("I_PCM CABAC reinitialization: %w", err)
+	}
+	if offset >= cabacInitialRange {
+		return CABACIIntraMacroblockResult{}, ErrCABACOffsetOutOfRange
+	}
+	if err := builder.PlaceMacroblock(address, yBlock, cbBlock, crBlock); err != nil {
+		return CABACIIntraMacroblockResult{}, err
+	}
+	trial.codeRange, trial.codeOffset, trial.terminated = cabacInitialRange, offset, false
+	result.Luma, result.Cb, result.Cr = yBlock, cbBlock, crBlock
+	decoder.commitTrial(trial, readerCopy)
+	*contexts = *trialContexts
 	return result, nil
 }
 
@@ -1660,11 +1668,12 @@ func decodeIntraNxN8x8LumaResiduals(decoder *CABACArithmeticDecoder, contexts *[
 				break
 			}
 		}
-		coefficients, err := inverseScaleLuma8x8(PlaceLuma8x8ScanLevels(levels), scalingList, qpy)
+		residual, err := reconstructLuma8x8Residual(
+			PlaceLuma8x8ScanLevels(levels), scalingList, qpy)
 		if err != nil {
 			return Intra8x8LumaMacroblockResult{}, err
 		}
-		blocks[blockIndex].Residual = inverseTransformLuma8x8(coefficients)
+		blocks[blockIndex].Residual = residual
 		result.Residuals[blockIndex] = blocks[blockIndex].Residual
 	}
 	var err error
